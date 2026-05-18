@@ -1,0 +1,12 @@
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+data/*.db-shm
+data/*.db-wal
+data/pdf_cache/
+data/saved_resume_pdfs/
+*.log
+.DS_Store
