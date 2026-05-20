@@ -1634,6 +1634,30 @@ def export_pdf_via_libreoffice(docx_path: Path, pdf_path: Path) -> tuple[bool, s
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def export_pdf_via_unoserver(docx_path: Path, pdf_path: Path, pdf_cfg: dict) -> tuple[bool, str]:
+    """Convert via a persistent unoserver daemon. ~0.4s vs ~30s for cold LibreOffice."""
+    unoconvert = shutil.which("unoconvert") or "/usr/local/bin/unoconvert"
+    if not Path(unoconvert).exists():
+        return False, "unoconvert not installed"
+    port = str(pdf_cfg.get("unoserver_port", "") or "2003")
+    host = str(pdf_cfg.get("unoserver_host", "") or "127.0.0.1")
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        result = subprocess.run(
+            [unoconvert, "--host", host, "--port", port, str(docx_path), str(pdf_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        if pdf_path.exists() and pdf_path.stat().st_size > 0:
+            return True, "PDF created via unoserver"
+        message = result.stderr.strip() or result.stdout.strip() or "unoserver conversion failed"
+        return False, f"unoserver export failed: {message}"
+    except Exception as exc:
+        return False, f"unoserver export failed: {exc!r}"
+
+
 def export_pdf_via_wps_custom(docx_path: Path, pdf_path: Path, pdf_cfg: dict) -> tuple[bool, str]:
     command_template = str(pdf_cfg.get("wps_pdf_command", "") or "").strip()
     if not command_template:
@@ -1657,8 +1681,9 @@ def export_pdf(docx_path: Path, pdf_path: Path, pdf_cfg: dict | None = None) -> 
     if isinstance(order, str):
         order = [item.strip() for item in order.split(",") if item.strip()]
     if not isinstance(order, list) or not order:
-        order = ["docx2pdf", "word", "libreoffice", "wps_custom"]
+        order = ["unoserver", "docx2pdf", "word", "libreoffice", "wps_custom"]
     backend_map = {
+        "unoserver": lambda: export_pdf_via_unoserver(docx_path, pdf_path, pdf_cfg),
         "docx2pdf": lambda: export_pdf_via_docx2pdf(docx_path, pdf_path),
         "word": lambda: export_pdf_via_word(docx_path, pdf_path),
         "libreoffice": lambda: export_pdf_via_libreoffice(docx_path, pdf_path),

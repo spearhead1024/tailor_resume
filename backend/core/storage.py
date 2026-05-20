@@ -247,6 +247,7 @@ def _normalize_profile(item: dict) -> dict:
         'technical_skills': [str(s).strip() for s in item.get('technical_skills', []) if str(s).strip()],
         'region': _normalize_market_region(item.get('region', item.get('market_region', ''))),
         'active': bool(item.get('active', True)),
+        'status': 'restricted' if str(item.get('status', 'active') or 'active').strip().lower() == 'restricted' else 'active',
         'created_by_user_id': str(item.get('created_by_user_id', '')).strip(),
         'created_by_username': str(item.get('created_by_username', '')).strip(),
         'total_years_of_experience': int(item['total_years_of_experience']) if str(item.get('total_years_of_experience') or '').strip().isdigit() else 0,
@@ -452,6 +453,18 @@ def _normalize_generated_resume(item: dict) -> dict:
             }
             for a in (item.get('answers', []) or []) if isinstance(a, dict)
         ],
+        'application_answers': [
+            {
+                'question': str(a.get('question', '')).strip(),
+                'answer': str(a.get('answer', '')).strip(),
+            }
+            for a in (item.get('application_answers', []) or []) if isinstance(a, dict)
+        ],
+        'status': str(item.get('status', 'generated') or 'generated').strip(),
+        'applied_status': str(item.get('applied_status', 'pending') or 'pending').strip(),
+        'applied_at': str(item.get('applied_at', '')).strip(),
+        'applied_by_user_id': str(item.get('applied_by_user_id', '')).strip(),
+        'applied_by_username': str(item.get('applied_by_username', '')).strip(),
         'ats_score': int(item.get('ats_score', 0) or 0),
         'download_filename': str(item.get('download_filename', '')).strip() or 'resume.pdf',
         'download_mode': str(item.get('download_mode', 'browser') or 'browser').strip(),
@@ -744,6 +757,14 @@ class Storage:
                 data=normalized,
             ))
 
+    def get_generated_resume_by_id(self, saved_resume_id: str) -> dict | None:
+        sid = str(saved_resume_id or '').strip()
+        if not sid:
+            return None
+        with session_scope(self.db_path) as session:
+            row = session.get(GeneratedResumeRow, sid)
+            return _normalize_generated_resume(dict(row.data or {})) if row else None
+
     def update_generated_resume(self, saved_resume_id: str, patch: dict) -> None:
         sid = str(saved_resume_id or '').strip()
         if not sid:
@@ -761,6 +782,37 @@ class Storage:
             row.created_by_user_id = normalized['created_by_user_id']
             row.created_by_username = normalized.get('created_by_username', '')
             row.created_at_ts = _parse_iso_datetime(normalized['created_at'])
+
+    def delete_generated_resume(self, saved_resume_id: str) -> int:
+        """Delete a single generated_resume row by id. Returns rows deleted."""
+        sid = str(saved_resume_id or '').strip()
+        if not sid:
+            return 0
+        with session_scope(self.db_path) as session:
+            row = session.get(GeneratedResumeRow, sid)
+            if row is None:
+                return 0
+            session.delete(row)
+            return 1
+
+    def delete_generated_resumes_for(self, profile_id: str, job_ids: list[str]) -> int:
+        """Delete all generated_resume rows matching (profile_id, job_id) — used by 'reset'."""
+        pid = str(profile_id or '').strip()
+        wanted = {str(j or '').strip() for j in job_ids if str(j or '').strip()}
+        if not pid or not wanted:
+            return 0
+        deleted = 0
+        with session_scope(self.db_path) as session:
+            rows = session.scalars(
+                select(GeneratedResumeRow).where(
+                    GeneratedResumeRow.profile_id == pid,
+                    GeneratedResumeRow.job_id.in_(wanted),
+                )
+            ).all()
+            for row in rows:
+                session.delete(row)
+                deleted += 1
+        return deleted
 
     # ---- settings ----
 
