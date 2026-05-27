@@ -3,14 +3,16 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from auth import (
     authenticate_user,
     create_jwt,
+    devices,
     get_current_user,
     storage,
 )
+from core.devices import is_mobile_or_tablet, parse_user_agent
 from core.storage import build_password_record
 from schemas import (
     ChangePasswordRequest,
@@ -18,6 +20,14 @@ from schemas import (
     LoginResponse,
     RegisterRequest,
 )
+
+
+def _client_ip(request: Request) -> str:
+    # Trust X-Forwarded-For from the reverse proxy (nginx → uvicorn).
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else ""
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -32,13 +42,29 @@ def _password_policy_error(password: str) -> str:
 
 
 @router.post("/login", response_model=LoginResponse)
-def login(body: LoginRequest):
+def login(body: LoginRequest, request: Request):
+    ua = request.headers.get("user-agent", "")
+
+    # Block mobile + tablet logins outright. Admins log in from desktop only.
+    if is_mobile_or_tablet(ua):
+        info = parse_user_agent(ua)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Mobile and tablet devices are not allowed ({info['device_type']}). "
+                f"Please sign in from a desktop browser."
+            ),
+        )
+
     user = authenticate_user(body.identifier, body.password)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     if user.get("status") != "approved":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account pending approval")
-    token = create_jwt(user["id"])
+
+    # Record (or refresh) the device session for this user.
+    session = devices.record_login(user["id"], ua, _client_ip(request))
+    token = create_jwt(user["id"], session_id=session.get("id", ""))
     sanitized = {k: v for k, v in user.items() if k not in ("password_hash", "password_salt")}
     return LoginResponse(token=token, user=sanitized)
 

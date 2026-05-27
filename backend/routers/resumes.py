@@ -6,6 +6,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import cast
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import Response
 
@@ -50,33 +51,62 @@ def _resume_hash(resume: dict, profile_id: str) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
-def _render_pdf_to_cache(saved_resume_id: str) -> Path | None:
+def _render_pdf_to_cache(saved_resume_id: str, *, raise_errors: bool = False) -> Path | None:
     """Render the PDF for a saved resume and write to the id-keyed cache file.
 
     Returns the cache file path on success, else None. Safe to call repeatedly
     — short-circuits when the cache file already exists with content.
+
+    When raise_errors=True, propagates the underlying exception with a clear
+    message (used by the GET endpoint so the bidder sees a useful error).
     """
     sid = (saved_resume_id or "").strip()
     if not sid:
+        if raise_errors:
+            raise HTTPException(status_code=400, detail="Missing resume id")
         return None
     cache_file = PDF_CACHE_DIR / f"{sid}.pdf"
     if cache_file.exists() and cache_file.stat().st_size > 0:
         return cache_file
     record = storage.get_generated_resume_by_id(sid) if hasattr(storage, "get_generated_resume_by_id") else None
     if not record:
+        if raise_errors:
+            raise HTTPException(status_code=404, detail="Resume not found")
         return None
     profile_id = record.get("profile_id", "")
     profile = next((p for p in storage.get_profiles() if p.get("id") == profile_id), None)
     if not profile:
+        if raise_errors:
+            raise HTTPException(status_code=404, detail="Profile not found")
         return None
+
+    # Detect missing DOCX template up-front so we can return a clear message.
+    ur = profile.get("uploaded_resume") if isinstance(profile.get("uploaded_resume"), dict) else None
+    ur_path = (ur or {}).get("path") if ur else None
+    if not ur or not ur_path or not Path(ur_path).exists():
+        if raise_errors:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Cannot render PDF — no DOCX template uploaded for profile "
+                    f"\"{profile.get('name','this profile')}\". Ask the admin to upload "
+                    f"a resume template in the Profiles tab."
+                ),
+            )
+        return None
+
     try:
         bundle = build_docx_style_pdf_bundle(record.get("resume", {}), profile, str(PDF_CACHE_DIR))
-        pdf_bytes = bundle.get("pdf") or b""
-    except Exception:
+        pdf_bytes = cast(bytes, bundle.get("pdf") or b"")
+    except Exception as exc:
+        if raise_errors:
+            raise HTTPException(status_code=500, detail=f"PDF render failed: {exc}")
         return None
     if pdf_bytes:
         cache_file.write_bytes(pdf_bytes)
         return cache_file
+    if raise_errors:
+        raise HTTPException(status_code=500, detail="PDF render produced empty output")
     return None
 
 
@@ -222,7 +252,7 @@ def get_resume_pdf(resume_id: str, user: dict = Depends(get_current_user)):
     if cache_file.exists() and cache_file.stat().st_size > 0:
         return Response(content=cache_file.read_bytes(), media_type="application/pdf")
 
-    cached = _render_pdf_to_cache(resume_id)
+    cached = _render_pdf_to_cache(resume_id, raise_errors=True)
     if cached and cached.exists() and cached.stat().st_size > 0:
         return Response(content=cached.read_bytes(), media_type="application/pdf")
     raise HTTPException(status_code=500, detail="PDF render failed")
@@ -246,7 +276,7 @@ def export_pdf(payload: dict, user: dict = Depends(get_current_user)):
 
     try:
         bundle = build_docx_style_pdf_bundle(resume, profile, str(PDF_CACHE_DIR))
-        pdf_bytes = bundle.get("pdf") or b""
+        pdf_bytes = cast(bytes, bundle.get("pdf") or b"")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"PDF export failed: {exc}")
 

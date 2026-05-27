@@ -22,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
 from routers import auth as auth_router
+from routers import devices as devices_router
 from routers import jobs as jobs_router
 from routers import metrics as metrics_router
 from routers import profiles as profiles_router
@@ -51,6 +52,7 @@ app.include_router(users_router.router)
 app.include_router(settings_router.router)
 app.include_router(todo_router.router)
 app.include_router(metrics_router.router)
+app.include_router(devices_router.router)
 
 
 @app.get("/api/health")

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useAuth } from '../lib/auth';
@@ -7,8 +7,6 @@ import { useToast } from '../lib/toast';
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const BLANK_JOB = { company: '', job_title: '', description: '', link: '', region: 'US', note: '' };
 
-/** Surface backend errors gracefully. The duplicate-detect path returns a
- *  structured `detail` object; everything else returns a string. */
 function formatJobError(err: any, fallback: string): string {
   const d = err?.response?.data?.detail;
   if (typeof d === 'string') return d;
@@ -76,7 +74,17 @@ export default function Jobs() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['jobs'] }),
   });
 
-  // Sort newest first, then filter
+  // ALL hooks must be called before any conditional return
+  const counts = useMemo(() => {
+    const c = { approved: 0, pending: 0, rejected: 0, deleted: 0, total: 0 };
+    for (const j of jobs) {
+      c.total++;
+      const s = j.status as keyof typeof c;
+      if (s in c) c[s]++;
+    }
+    return c;
+  }, [jobs]);
+
   const sorted = useMemo(() => {
     return [...jobs].sort((a, b) => {
       const ta = a.submitted_at || a.approved_at || '';
@@ -100,7 +108,6 @@ export default function Jobs() {
   const safePage = Math.min(page, totalPages);
   const pageJobs = filtered.slice((safePage - 1) * pageSize, safePage * pageSize);
 
-  // Group current page jobs by day
   const groupedPage = useMemo(() => {
     const groups: { day: string; label: string; jobs: any[] }[] = [];
     for (const job of pageJobs) {
@@ -155,8 +162,8 @@ export default function Jobs() {
   return (
     <div>
       {/* Header bar */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
-        <h1 style={{ margin: 0 }}>Jobs ({filtered.length})</h1>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '0.5rem', flexWrap: 'wrap' }}>
+        <h1 style={{ margin: 0 }}>Jobs</h1>
         <div style={{ flex: 1 }} />
         <input placeholder="Search company, title, or note…" value={query}
           onChange={(e) => { setQuery(e.target.value); setPage(1); }}
@@ -166,10 +173,22 @@ export default function Jobs() {
           <option value="approved">Approved</option>
           <option value="pending">Pending</option>
           <option value="rejected">Rejected</option>
+          <option value="deleted">Deleted</option>
         </select>
         <button onClick={() => { setShowForm(!showForm); setNewJob({ ...BLANK_JOB }); }}>
           {showForm ? 'Cancel' : '+ New Job'}
         </button>
+      </div>
+
+      {/* Status counts */}
+      <div style={{ display: 'flex', gap: '1rem', marginBottom: '1rem', flexWrap: 'wrap', fontSize: '0.88rem' }}>
+        {(['approved', 'pending', 'rejected', 'deleted'] as const).map((s) => (
+          <span key={s} style={{ cursor: 'pointer' }} onClick={() => { setStatusFilter(s); setPage(1); }}>
+            <span className={`pill ${s}`}>{s}</span>
+            <strong style={{ marginLeft: 4 }}>{counts[s]}</strong>
+          </span>
+        ))}
+        <span className="muted">/ {counts.total} total</span>
       </div>
 
       {/* Add job form */}
@@ -253,9 +272,8 @@ export default function Jobs() {
           </thead>
           <tbody>
             {groupedPage.map((group) => (
-              <>
-                {/* Day separator */}
-                <tr key={`sep-${group.day}`}>
+              <React.Fragment key={group.day}>
+                <tr>
                   <td colSpan={isAdmin ? 6 : 5} style={{
                     padding: '0.5rem 0.75rem',
                     fontWeight: 600,
@@ -267,10 +285,9 @@ export default function Jobs() {
                     {group.label} — {group.jobs.length} {group.jobs.length === 1 ? 'job' : 'jobs'}
                   </td>
                 </tr>
-
                 {group.jobs.map((job) => (
-                  <>
-                    <tr key={job.id}>
+                  <React.Fragment key={job.id}>
+                    <tr>
                       <td>{job.company}</td>
                       <td>
                         {job.link
@@ -284,26 +301,31 @@ export default function Jobs() {
                       </td>
                       {isAdmin && (
                         <td style={{ whiteSpace: 'nowrap' }}>
-                          {job.status !== 'approved' && (
-                            <button className="secondary" style={{ marginRight: 4 }}
-                              onClick={() => updateMutation.mutate({ id: job.id, payload: { status: 'approved' } })}>
-                              Approve
+                          <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                            <select
+                              value={job.status}
+                              disabled={updateMutation.isPending}
+                              onChange={(e) => {
+                                const next = e.target.value;
+                                if (next === 'deleted' && !confirm(`Mark "${job.company} — ${job.job_title}" as deleted? It will be permanently hidden and never re-synced.`)) return;
+                                updateMutation.mutate({ id: job.id, payload: { status: next } });
+                              }}
+                              style={{ padding: '0.25rem 0.4rem', fontSize: '0.82rem' }}>
+                              <option value="approved">approved</option>
+                              <option value="pending">pending</option>
+                              <option value="rejected">rejected</option>
+                              <option value="deleted">deleted</option>
+                            </select>
+                            <button className="secondary"
+                              onClick={() => editingId === job.id ? setEditingId(null) : startEdit(job)}>
+                              {editingId === job.id ? 'Cancel' : 'Edit'}
                             </button>
-                          )}
-                          <button className="secondary" style={{ marginRight: 4 }}
-                            onClick={() => editingId === job.id ? setEditingId(null) : startEdit(job)}>
-                            {editingId === job.id ? 'Cancel' : 'Edit'}
-                          </button>
-                          <button className="danger"
-                            onClick={() => { if (confirm('Delete this job?')) deleteMutation.mutate(job.id); }}>
-                            Delete
-                          </button>
+                          </div>
                         </td>
                       )}
                     </tr>
-
                     {editingId === job.id && (
-                      <tr key={`${job.id}-edit`}>
+                      <tr>
                         <td colSpan={isAdmin ? 6 : 5} style={{ padding: '1rem', background: 'var(--panel-2)' }}>
                           <div className="row">
                             <div className="field"><label>Company</label><input value={editDraft.company} onChange={(e) => setEditDraft({ ...editDraft, company: e.target.value })} /></div>
@@ -331,9 +353,9 @@ export default function Jobs() {
                         </td>
                       </tr>
                     )}
-                  </>
+                  </React.Fragment>
                 ))}
-              </>
+              </React.Fragment>
             ))}
           </tbody>
         </table>

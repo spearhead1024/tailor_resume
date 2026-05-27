@@ -24,6 +24,11 @@ from auth import get_current_user, storage
 router = APIRouter(prefix="/api/todo", tags=["todo"])
 
 
+def _regions_match(job_region: str, profile_region: str) -> bool:
+    """A job is relevant to a profile when either side is ANY, or they match."""
+    return "ANY" in (job_region, profile_region) or job_region == profile_region
+
+
 def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -77,7 +82,6 @@ def get_todo(profile_id: str = "", user: dict = Depends(get_current_user)):
                 and not j.get("flagged")
                 and not j.get("admin_applied")
             ]
-            approved_job_ids = {j["id"] for j in approved_jobs}
             processed_by_profile: dict[str, set[str]] = {}
             for r in storage.get_generated_resumes():
                 pid = r.get("profile_id") or ""
@@ -85,8 +89,13 @@ def get_todo(profile_id: str = "", user: dict = Depends(get_current_user)):
                 if pid and jid and r.get("status") in ("generated", "skipped"):
                     processed_by_profile.setdefault(pid, set()).add(jid)
             for p in profiles:
+                p_region = str(p.get("region") or "ANY").upper()
+                matched_ids = {
+                    j["id"] for j in approved_jobs
+                    if _regions_match(str(j.get("region") or "ANY").upper(), p_region)
+                }
                 processed = processed_by_profile.get(p.get("id", ""), set())
-                decorated.append({**p, "pending_count": len(approved_job_ids - processed)})
+                decorated.append({**p, "pending_count": len(matched_ids - processed)})
         else:
             pending_by_profile: dict[str, int] = {}
             for r in storage.get_generated_resumes():
@@ -104,12 +113,16 @@ def get_todo(profile_id: str = "", user: dict = Depends(get_current_user)):
     _profile_or_403(user, profile_id)
 
     if is_admin:
+        profile = next((p for p in profiles if p.get("id") == profile_id), {})
+        p_region = str(profile.get("region") or "ANY").upper()
         index = _resume_status_index(profile_id)
         result = []
         for job in storage.get_jobs():
             if job.get("status") != "approved":
                 continue
             if job.get("flagged") or job.get("admin_applied"):
+                continue
+            if not _regions_match(str(job.get("region") or "ANY").upper(), p_region):
                 continue
             jid = job.get("id", "")
             record = index.get(jid)

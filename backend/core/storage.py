@@ -209,7 +209,7 @@ def _normalize_uploaded_resume(item: Any) -> dict:
 
 def _normalize_generation_settings(raw) -> dict:
     if not isinstance(raw, dict):
-        return {'summary_char_count': 0, 'skills_count': 65, 'bullet_counts': []}
+        return {'summary_char_count': 650, 'skills_count': 85, 'bullet_counts': []}
     bullet_counts = []
     for bc in raw.get('bullet_counts') or []:
         try:
@@ -217,8 +217,8 @@ def _normalize_generation_settings(raw) -> dict:
         except Exception:
             pass
     return {
-        'summary_char_count': int(raw.get('summary_char_count') or 0),
-        'skills_count': int(raw.get('skills_count') or 65),
+        'summary_char_count': int(raw.get('summary_char_count') or 650),
+        'skills_count': int(raw.get('skills_count') or 85),
         'bullet_counts': bullet_counts,
     }
 
@@ -351,6 +351,8 @@ def _normalize_job(item: dict) -> dict:
         'admin_applied_at': str(item.get('admin_applied_at', '')).strip(),
         'admin_applied_by_user_id': str(item.get('admin_applied_by_user_id', '')).strip(),
         'admin_applied_by_username': str(item.get('admin_applied_by_username', '')).strip(),
+        'sync_remote_id': str(item.get('sync_remote_id', '')).strip(),
+        'sync_locked': bool(item.get('sync_locked', False)),
     }
 
 

@@ -12,7 +12,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Iterable
 
-from docx import Document
+from docx import Document as _DocxFactory
+from docx.document import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -171,7 +172,7 @@ def _first_meaningful_run_or_none(paragraph: Paragraph):
 
 
 def _clear_paragraph_keep_ppr(paragraph: Paragraph) -> None:
-    for child in list(paragraph._p):
+    for child in list(paragraph._p):  # type: ignore[arg-type]
         if child.tag != qn("w:pPr"):
             paragraph._p.remove(child)
 
@@ -408,7 +409,7 @@ def _insert_paragraph_after(
     if like_paragraph._p.pPr is not None:
         new_p.append(deepcopy(like_paragraph._p.pPr))
     paragraph._p.addnext(new_p)
-    new_paragraph = Paragraph(new_p, paragraph._parent)
+    new_paragraph = Paragraph(new_p, paragraph._parent)  # type: ignore[arg-type]
     source_run = _first_meaningful_run_or_none(like_paragraph)
     if keywords:
         _add_text_with_keyword_bold(new_paragraph, text, source_run, keywords, base_no_bold=True)
@@ -582,7 +583,7 @@ def _set_keep_lines(paragraph: Paragraph) -> None:
         pass
     try:
         ppr = paragraph._p.get_or_add_pPr()
-        if ppr.find(qn("w:keepLines")) is None:
+        if ppr.find(qn("w:keepLines")) is None:  # type: ignore[call-arg]
             ppr.append(OxmlElement("w:keepLines"))
     except Exception:
         pass
@@ -599,7 +600,7 @@ def _remove_existing_tabs(ppr) -> None:
 
 def _content_width_twips(paragraph: Paragraph) -> int:
     try:
-        section = paragraph.part.document.sections[0]
+        section = paragraph.part.document.sections[0]  # type: ignore[attr-defined]
         return int(section.page_width.twips - section.left_margin.twips - section.right_margin.twips)
     except Exception:
         return 9000
@@ -618,7 +619,7 @@ def _set_role_line_right_tab(paragraph: Paragraph) -> None:
         pass
     try:
         ppr = paragraph._p.get_or_add_pPr()
-        jc = ppr.find(qn("w:jc"))
+        jc = ppr.find(qn("w:jc"))  # type: ignore[call-arg]
         if jc is not None:
             ppr.remove(jc)
         _remove_existing_tabs(ppr)
@@ -792,16 +793,16 @@ def _write_skill_groups_bold_categories(
         if category:
             bold_run = paragraph.add_run(category)
             if source_run is not None:
-                _copy_run_format(bold_run, source_run)
+                _copy_run_style(bold_run, source_run)
             _force_run_bold(bold_run)
             sep_run = paragraph.add_run(f"   {items_text}")
             if source_run is not None:
-                _copy_run_format(sep_run, source_run)
+                _copy_run_style(sep_run, source_run)
             _force_run_not_bold(sep_run)
         else:
             plain_run = paragraph.add_run(items_text)
             if source_run is not None:
-                _copy_run_format(plain_run, source_run)
+                _copy_run_style(plain_run, source_run)
             _force_run_not_bold(plain_run)
 
     _write_group_to_paragraph(anchor_paragraph, groups[0])
@@ -811,13 +812,13 @@ def _write_skill_groups_bold_categories(
         if anchor_paragraph._p.pPr is not None:
             new_p.append(deepcopy(anchor_paragraph._p.pPr))
         cursor._p.addnext(new_p)
-        new_paragraph = Paragraph(new_p, anchor_paragraph._parent)
+        new_paragraph = Paragraph(new_p, anchor_paragraph._parent)  # type: ignore[arg-type]
         _write_group_to_paragraph(new_paragraph, group)
         cursor = new_paragraph
     return cursor
 
 
-def _copy_run_format(target_run, source_run) -> None:
+def _copy_run_style(target_run, source_run) -> None:
     """Copy font name and size from source_run to target_run without changing bold state."""
     try:
         if source_run.font.name:
@@ -837,7 +838,7 @@ def _insert_page_break_after(paragraph: Paragraph) -> Paragraph:
     new_r.append(new_br)
     new_p.append(new_r)
     paragraph._p.addnext(new_p)
-    return Paragraph(new_p, paragraph._parent)
+    return Paragraph(new_p, paragraph._parent)  # type: ignore[arg-type]
 
 
 def _paragraph_has_tab(paragraph: Paragraph) -> bool:
@@ -1006,7 +1007,7 @@ def _replace_skills_with_bold_categories(doc: Document, resume: dict) -> bool:
             if anchor._p.pPr is not None:
                 new_p.append(deepcopy(anchor._p.pPr))
             cursor._p.addnext(new_p)
-            new_para = Paragraph(new_p, anchor._parent)
+            new_para = Paragraph(new_p, anchor._parent)  # type: ignore[arg-type]
             _write_skill_groups_bold_categories(new_para, [group], source_run)
             cursor = new_para
     return True
@@ -1158,7 +1159,7 @@ def _trim_skills_spear2(doc: Document, resume: dict) -> None:
 def _strip_paragraph_borders(doc: Document) -> None:
     """Remove any w:pBdr from every paragraph (template cleanup before content is written)."""
     for paragraph in doc.paragraphs:
-        pPr = paragraph._p.find(qn("w:pPr"))
+        pPr = paragraph._p.find(qn("w:pPr"))  # type: ignore[call-arg]
         if pPr is None:
             continue
         pBdr = pPr.find(qn("w:pBdr"))
@@ -1222,13 +1223,13 @@ def _inject_section_heading_borders(doc: Document, resume_template: str = 'spear
         if not _is_section_heading_paragraph(p, resume_template):
             continue
 
-        pPr = p.find(qn("w:pPr"))
+        pPr = p.find(qn("w:pPr"))  # type: ignore[call-arg]
         if pPr is None:
             pPr = OxmlElement("w:pPr")
             p.insert(0, pPr)
 
         # remove any existing border first (safety)
-        existing = pPr.find(qn("w:pBdr"))
+        existing = pPr.find(qn("w:pBdr"))  # type: ignore[call-arg]
         if existing is not None:
             pPr.remove(existing)
 
@@ -1243,7 +1244,7 @@ def _inject_section_heading_borders(doc: Document, resume_template: str = 'spear
 
         # spear-2: add space after the heading so text below isn't flush against the border
         if resume_template == 'spear-2':
-            spacing = pPr.find(qn("w:spacing"))
+            spacing = pPr.find(qn("w:spacing"))  # type: ignore[call-arg]
             if spacing is None:
                 spacing = OxmlElement("w:spacing")
                 pPr.insert(0, spacing)
@@ -1251,7 +1252,7 @@ def _inject_section_heading_borders(doc: Document, resume_template: str = 'spear
 
 
 def apply_resume_to_docx(docx_path: Path, resume: dict, resume_template: str = 'spear-1') -> None:
-    doc = Document(str(docx_path))
+    doc = _DocxFactory(str(docx_path))
     headline = _plain_resume_text(resume.get("headline", ""))
     summary = _plain_resume_text(resume.get("summary", ""))
     tech_keywords = _technical_skill_keywords(resume)
@@ -1708,7 +1709,7 @@ def pdf_backend_status(pdf_cfg: dict | None = None) -> list[str]:
     pdf_cfg = pdf_cfg or {}
     lines = []
     try:
-        from docx2pdf import convert  # noqa: F401
+        from docx2pdf import convert  # type: ignore[import-untyped]  # noqa: F401
         lines.append("docx2pdf: OK - package available")
     except Exception as exc:
         lines.append(f"docx2pdf: NO - {exc!r}")
@@ -1726,7 +1727,8 @@ def pdf_backend_status(pdf_cfg: dict | None = None) -> list[str]:
 
 
 def _uploaded_resume_path(profile: dict) -> Path | None:
-    upload = profile.get("uploaded_resume") if isinstance(profile.get("uploaded_resume"), dict) else {}
+    _raw_upload = profile.get("uploaded_resume")
+    upload: dict = _raw_upload if isinstance(_raw_upload, dict) else {}
     candidates = [
         str(upload.get("path", "") or "").strip(),
         str(upload.get("storage_path", "") or "").strip(),

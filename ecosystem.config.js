@@ -25,5 +25,20 @@ module.exports = {
       max_memory_restart: '1G',
       autorestart: true,
     },
+    {
+      // Pulls approved jobs from Resume-Generator-v2 (remote PostgreSQL)
+      // every 20 minutes and inserts new ones into the local SQLite.
+      name: 'job-sync',
+      cwd: '/var/@TailorResume/backend',
+      script: '.venv/bin/python',
+      args: 'core/job_sync.py',
+      interpreter: 'none',
+      env: {
+        PYTHONUNBUFFERED: '1',
+      },
+      max_memory_restart: '256M',
+      autorestart: true,
+      restart_delay: 5000,
+    },
   ],
 };

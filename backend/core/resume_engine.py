@@ -1383,7 +1383,7 @@ def _normalize_resume(resume: dict, profile: dict, target_role: str, job_descrip
             continue
         company_index = item.get('company_index')
         try:
-            company_index = int(company_index)
+            company_index = int(company_index if company_index is not None else idx)
         except Exception:
             company_index = idx
         if company_index < 0:

@@ -10,6 +10,7 @@ import Profiles from './pages/Profiles';
 import Users from './pages/Users';
 import Settings from './pages/Settings';
 import Metrics from './pages/Metrics';
+import Devices from './pages/Devices';
 
 function TopNav() {
   const { user } = useAuth();
@@ -27,6 +28,7 @@ function TopNav() {
         <Link to="/profiles" className={linkClass('/profiles')}>Profiles</Link>
         <Link to="/metrics" className={linkClass('/metrics')}>Metrics</Link>
         {user.is_admin && <Link to="/users" className={linkClass('/users')}>Users</Link>}
+        {user.is_admin && <Link to="/devices" className={linkClass('/devices')}>Devices</Link>}
         {user.is_admin && <Link to="/settings" className={linkClass('/settings')}>Settings</Link>}
       </div>
       <div className="spacer" />
@@ -78,6 +80,7 @@ export default function App() {
           <Route path="/profiles" element={<Private><Profiles /></Private>} />
           <Route path="/metrics" element={<Private><Metrics /></Private>} />
           <Route path="/users" element={<AdminOnly><Users /></AdminOnly>} />
+          <Route path="/devices" element={<AdminOnly><Devices /></AdminOnly>} />
           <Route path="/settings" element={<AdminOnly><Settings /></AdminOnly>} />
           <Route path="/" element={<Navigate to="/todo" replace />} />
           <Route path="*" element={<Navigate to="/todo" replace />} />

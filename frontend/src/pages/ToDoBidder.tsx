@@ -337,7 +337,19 @@ export default function ToDoBidder({ profileId, profile }: { profileId: string; 
       setPdfState((s) => ({ ...s, [id]: { loading: false, error: '' } }));
       bump();
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Failed to render PDF';
+      // Response is a Blob (responseType:'blob'), so axios doesn't parse JSON errors.
+      // Read the blob as text and pull out the `detail` field if present.
+      let msg = e?.message || 'Failed to render PDF';
+      const data = e?.response?.data;
+      if (data instanceof Blob) {
+        try {
+          const text = await data.text();
+          const parsed = JSON.parse(text);
+          if (parsed?.detail) msg = parsed.detail;
+        } catch { /* leave default msg */ }
+      } else if (data?.detail) {
+        msg = data.detail;
+      }
       setPdfState((s) => ({ ...s, [id]: { loading: false, error: msg } }));
     } finally {
       inFlightRef.current.delete(id);

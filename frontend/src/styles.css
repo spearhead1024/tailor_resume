@@ -241,6 +241,7 @@ tbody tr:hover td { background: var(--panel-2); color: var(--text); }
 .pill.approved { background: rgba(16,185,129,0.1); color: #6ee7b7; border-color: rgba(16,185,129,0.3); }
 .pill.pending  { background: rgba(245,158,11,0.1); color: #fcd34d; border-color: rgba(245,158,11,0.3); }
 .pill.rejected { background: rgba(239,68,68,0.1);  color: #fca5a5; border-color: rgba(239,68,68,0.3); }
+.pill.deleted  { background: rgba(100,116,139,0.1); color: #94a3b8; border-color: rgba(100,116,139,0.3); }
 
 /* ── Utility ────────────────────────────────────────────────────────────── */
 .muted   { color: var(--muted); }

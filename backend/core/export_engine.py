@@ -3,19 +3,21 @@ from __future__ import annotations
 import re
 from copy import deepcopy
 from io import BytesIO
-from typing import Iterable
+from typing import Iterable, cast
 
-from docx import Document
+from docx import Document as _DocxFactory
+from docx.document import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
+from docx.styles.style import _ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
-from reportlab.platypus import HRFlowable, ListFlowable, ListItem, Paragraph, SimpleDocTemplate, Spacer
+from reportlab.platypus import Flowable, HRFlowable, ListFlowable, ListItem, Paragraph, SimpleDocTemplate, Spacer
 
 from core.template_engine import render_resume_html, render_resume_markdown
 
@@ -35,7 +37,7 @@ def build_export_bundle(resume: dict, profile: dict, template: dict) -> dict[str
 
 
 def build_docx_bytes(resume: dict, profile: dict, template: dict) -> bytes:
-    document = Document()
+    document = _DocxFactory()
     section = document.sections[0]
     section.top_margin = Inches(0.55)
     section.bottom_margin = Inches(0.55)
@@ -48,9 +50,11 @@ def build_docx_bytes(resume: dict, profile: dict, template: dict) -> bytes:
     muted_color = _hex_to_rgb(template.get("muted_color", "#4b5563"))
     emphasis_keywords = _effective_bold_keywords(resume)
 
-    normal_style = document.styles["Normal"]
+    normal_style = cast(_ParagraphStyle, document.styles["Normal"])
     normal_style.font.name = font_name
-    normal_style._element.rPr.rFonts.set(qn("w:eastAsia"), font_name)
+    _rpr = getattr(normal_style._element, "rPr", None)
+    if _rpr is not None:
+        _rpr.rFonts.set(qn("w:eastAsia"), font_name)
     normal_style.font.size = Pt(10.2)
     normal_style.font.color.rgb = RGBColor(*base_color)
 
@@ -190,7 +194,7 @@ def build_pdf_bytes(resume: dict, profile: dict, template: dict) -> bytes:
     styles.add(ParagraphStyle(name="JobRole", parent=styles["Normal"], fontName=font_name, fontSize=10.0, leading=12.1, textColor=palette["text"], spaceAfter=1, alignment=TA_JUSTIFY))
     styles.add(ParagraphStyle(name="JobMeta", parent=styles["Normal"], fontName=font_name, fontSize=9, leading=11, textColor=palette["muted"], spaceAfter=1, alignment=TA_JUSTIFY))
 
-    story = [
+    story: list[Flowable] = [
         Paragraph(_escape(profile.get("name", "")), styles["ResumeName"]),
         Paragraph(_pdf_markup(resume.get("headline", ""), emphasis_keywords, force_bold=True), styles["ResumeHeadline"]),
         Paragraph(_escape(_meta_line(profile)), styles["ResumeMeta"]),
@@ -222,7 +226,7 @@ def build_pdf_bytes(resume: dict, profile: dict, template: dict) -> bytes:
                     if group.get("items")
                 ]
                 if bullet_items:
-                    story.append(ListFlowable(bullet_items, bulletType="bullet", leftIndent=14))
+                    story.append(ListFlowable(cast(list, bullet_items), bulletType="bullet", leftIndent=14))
             else:
                 story.append(Paragraph(_pdf_markup(_skill_line(resume.get("technical_skills", []), skill_style), emphasis_keywords), styles["BodyResume"]))
         elif section_key == "work_history":
@@ -238,7 +242,7 @@ def build_pdf_bytes(resume: dict, profile: dict, template: dict) -> bytes:
                     story.append(Paragraph(f"<i>{_pdf_markup(job.get('role_headline', ''), emphasis_keywords)}</i>", styles["JobMeta"]))
                 bullet_items = [ListItem(Paragraph(_pdf_markup(bullet, emphasis_keywords), styles["BodyResume"])) for bullet in job.get("bullets", [])]
                 if bullet_items:
-                    story.append(ListFlowable(bullet_items, bulletType="bullet", leftIndent=14))
+                    story.append(ListFlowable(cast(list, bullet_items), bulletType="bullet", leftIndent=14))
                 story.append(Spacer(1, 5))
         elif section_key == "education_history":
             story.append(Paragraph("EDUCATION", styles["SectionTitle"]))
@@ -278,7 +282,7 @@ def _add_body_paragraph(document: Document, text: str, font_name: str, base_colo
 
 
 def _add_bullet_with_bold_label(document: Document, label: str, value: str, font_name: str, base_color: tuple[int, int, int], emphasis_keywords: list[str]) -> None:
-    paragraph = document.add_paragraph(style=document.styles["Normal"])
+    paragraph = document.add_paragraph(style="Normal")
     _set_spacing(paragraph, before=0, after=0)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
     paragraph.paragraph_format.left_indent = Inches(0.18)
@@ -348,7 +352,7 @@ def _add_job_block(document: Document, job: dict, template: dict, font_name: str
         )
 
     for bullet in job.get("bullets", []):
-        bp = document.add_paragraph(style=document.styles["Normal"])
+        bp = document.add_paragraph(style="Normal")
         _set_spacing(bp, before=0, after=0)
         bp.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
         bp.paragraph_format.left_indent = Inches(0.18)
@@ -559,7 +563,8 @@ def _hex_to_rgb(value: str) -> tuple[int, int, int]:
     value = value.strip().lstrip("#")
     if len(value) != 6:
         return (17, 24, 39)
-    return tuple(int(value[i : i + 2], 16) for i in (0, 2, 4))
+    r, g, b = (int(value[i : i + 2], 16) for i in (0, 2, 4))
+    return (r, g, b)
 
 
 def _hex_to_reportlab(value: str) -> colors.Color:
@@ -605,14 +610,16 @@ def _pdf_markup(text: str, keywords: list[str], force_bold: bool = False) -> str
     return "".join(parts)
 
 
-def _sanitize_nested(value):
-    if isinstance(value, dict):
-        return {key: _sanitize_nested(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_sanitize_nested(item) for item in value]
-    if isinstance(value, str):
-        return _sanitize_text(value)
-    return deepcopy(value)
+def _sanitize_nested(value: dict) -> dict:
+    def _recurse(v):
+        if isinstance(v, dict):
+            return {k: _recurse(item) for k, item in v.items()}
+        if isinstance(v, list):
+            return [_recurse(item) for item in v]
+        if isinstance(v, str):
+            return _sanitize_text(v)
+        return deepcopy(v)
+    return cast(dict, _recurse(value))
 
 
 def _sanitize_text(text: str) -> str:

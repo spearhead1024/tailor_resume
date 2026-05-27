@@ -75,21 +75,25 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
     resumes = [r for r in storage.get_generated_resumes() if r.get("status") == "generated"]
     profile_by_id = {p.get("id"): p for p in profiles}
 
-    # To-Do denominator = approved jobs added on that day / week / ever.
-    # Shared across every row because the job pool is profile-independent.
-    approved_jobs = [j for j in storage.get_jobs() if j.get("status") == "approved"]
-    job_by_id = {j.get("id"): j for j in approved_jobs}
-    jobs_added_per_day: dict[str, int] = defaultdict(int)
-    jobs_added_in_week = 0
-    for j in approved_jobs:
-        submitted = (j.get("submitted_at") or "")[:10]
-        if not submitted:
-            continue
-        if submitted in day_strs:
-            jobs_added_per_day[submitted] += 1
-        if monday.isoformat() <= submitted <= friday.isoformat():
-            jobs_added_in_week += 1
-    jobs_added_lifetime = len(approved_jobs)
+    # To-Do denominator = approved jobs that match the profile's region.
+    # Computed per-profile below using _regions_match.
+    all_approved_jobs = [
+        j for j in storage.get_jobs()
+        if j.get("status") == "approved"
+        and not j.get("flagged")
+        and not j.get("admin_applied")
+    ]
+    job_by_id = {j.get("id"): j for j in all_approved_jobs}
+
+    def _regions_match(job_region: str, profile_region: str) -> bool:
+        return "ANY" in (job_region, profile_region) or job_region == profile_region
+
+    def _profile_approved_jobs(profile_region: str) -> list[dict]:
+        p_region = profile_region.upper().strip() or "ANY"
+        return [
+            j for j in all_approved_jobs
+            if _regions_match(str(j.get("region") or "ANY").upper(), p_region)
+        ]
 
     # For the bidder view, restrict to the bidder's own assigned profiles.
     if not is_admin:
@@ -144,18 +148,31 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
             if not prof:
                 continue
             b = buckets.get((uid, pid)) or {"daily": {}, "applied_total": 0, "lifetime": 0}
+            # Denominator filtered by this profile's region.
+            p_region = str(prof.get("region") or "ANY")
+            profile_jobs = _profile_approved_jobs(p_region)
+            p_added_per_day: dict[str, int] = defaultdict(int)
+            p_added_in_week = 0
+            for j in profile_jobs:
+                submitted = (j.get("submitted_at") or "")[:10]
+                if not submitted:
+                    continue
+                if submitted in day_strs:
+                    p_added_per_day[submitted] += 1
+                if monday.isoformat() <= submitted <= friday.isoformat():
+                    p_added_in_week += 1
+            p_added_lifetime = len(profile_jobs)
             rows.append({
                 "user_id": uid,
                 "username": uname,
                 "profile_id": pid,
                 "profile_name": prof.get("name", ""),
-                # Denominator = jobs added in that period (shared across rows).
                 "daily": [
-                    {"applied": b["daily"].get(d, 0), "total": jobs_added_per_day.get(d, 0)}
+                    {"applied": b["daily"].get(d, 0), "total": p_added_per_day.get(d, 0)}
                     for d in day_strs
                 ],
-                "week":     {"applied": b["applied_total"], "total": jobs_added_in_week},
-                "lifetime": {"applied": b["lifetime"],      "total": jobs_added_lifetime},
+                "week":     {"applied": b["applied_total"], "total": p_added_in_week},
+                "lifetime": {"applied": b["lifetime"],      "total": p_added_lifetime},
             })
 
     # Stable sort: by username, then profile name.
@@ -169,21 +186,26 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
     }
 
     if is_admin:
-        # Grand totals: SUM the numerators (applied) across every row.
-        # Denominators (job-add counts) are profile-independent so they stay
-        # constant — they come straight from the per-period job tallies.
+        # Grand totals: SUM applied and SUM total across unique-profile rows.
+        # Each profile is counted once (de-duplicate users who share a profile).
+        seen_profiles: set[str] = set()
+        unique_rows = []
+        for r in rows:
+            if r["profile_id"] not in seen_profiles:
+                seen_profiles.add(r["profile_id"])
+                unique_rows.append(r)
         totals_daily = [
             {"applied": sum(r["daily"][i]["applied"] for r in rows),
-             "total":   jobs_added_per_day.get(d, 0)}
-            for i, d in enumerate(day_strs)
+             "total":   sum(r["daily"][i]["total"] for r in unique_rows)}
+            for i in range(len(day_strs))
         ]
         totals_week = {
             "applied": sum(r["week"]["applied"] for r in rows),
-            "total":   jobs_added_in_week,
+            "total":   sum(r["week"]["total"] for r in unique_rows),
         }
         totals_lifetime = {
             "applied": sum(r["lifetime"]["applied"] for r in rows),
-            "total":   jobs_added_lifetime,
+            "total":   sum(r["lifetime"]["total"] for r in unique_rows),
         }
         payload["totals"] = {
             "daily":    totals_daily,

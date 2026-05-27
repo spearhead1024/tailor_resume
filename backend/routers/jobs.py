@@ -106,6 +106,9 @@ def update_job(job_id: str, body: JobUpsertRequest, user: dict = Depends(get_cur
         patch.setdefault("approved_at", _utcnow())
         patch.setdefault("approved_by_user_id", user["id"])
         patch.setdefault("approved_by_username", user.get("username", ""))
+    # Any manual status change locks the job so job-sync never overwrites it.
+    if "status" in patch:
+        patch["sync_locked"] = True
     storage.update_job(job_id, patch)
     return storage.get_job_by_id(job_id) or {"id": job_id}
 

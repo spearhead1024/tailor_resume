@@ -1,10 +1,21 @@
 """Profiles CRUD + DOCX upload."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from auth import get_current_user, require_admin, storage
 from schemas import ProfileUpsertRequest
+
+
+def _extract_docx_text(path: Path) -> str:
+    """Extract paragraph text from a .docx. Best-effort: returns empty string on failure."""
+    try:
+        from docx import Document  # type: ignore[import]
+        doc = Document(str(path))
+        return "\n".join(p.text for p in doc.paragraphs if p.text)
+    except Exception:
+        return ""
 
 router = APIRouter(prefix="/api/profiles", tags=["profiles"])
 
@@ -69,15 +80,28 @@ async def upload_resume(profile_id: str, file: UploadFile = File(...), user: dic
         raise HTTPException(status_code=403, detail="Forbidden")
     if not file.filename or not file.filename.lower().endswith(".docx"):
         raise HTTPException(status_code=400, detail="Must upload a .docx file")
+
+    profile = next((p for p in storage.get_profiles() if p["id"] == profile_id), None)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
     target_dir = DATA_DIR / "profile_resumes" / profile_id
     target_dir.mkdir(parents=True, exist_ok=True)
     target_path = target_dir / file.filename
     content = await file.read()
     target_path.write_bytes(content)
-    # Update profile to reference uploaded path
-    profile = next((p for p in storage.get_profiles() if p["id"] == profile_id), None)
-    if profile is not None:
-        profile["uploaded_resume_path"] = str(target_path.relative_to(DATA_DIR.parent))
-        profile["uploaded_resume_filename"] = file.filename
-        storage.upsert_profile(profile)
-    return {"ok": True, "filename": file.filename, "path": str(target_path)}
+
+    # Persist the upload metadata in the shape the docx exporter expects.
+    profile["uploaded_resume"] = {
+        "filename":       file.filename,
+        "content_type":   file.content_type or "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "size_bytes":     len(content),
+        "path":           str(target_path),
+        "relative_path":  str(target_path.relative_to(DATA_DIR.parent)),
+        "uploaded_at":    datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "extracted_text": _extract_docx_text(target_path),
+    }
+    storage.upsert_profile(profile)
+
+    updated = next((p for p in storage.get_profiles() if p["id"] == profile_id), profile)
+    return updated

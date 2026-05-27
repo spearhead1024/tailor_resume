@@ -71,21 +71,15 @@ function CellView({ cell }: { cell: Cell }) {
   );
 }
 
-/**
- * Sum APPLIED across rows; keep the denominator constant.
- *
- * The denominator (jobs added in that period) is shared across every row in
- * the table — so summing it would double-count. We take whichever row's
- * denominator is available (they're all equal).
- */
+/** Sum applied across profile rows; total = job pool × unique profile count. */
 function sumApplied(cells: Cell[]): Cell {
   return {
     applied: cells.reduce((a, c) => a + c.applied, 0),
-    total: cells[0]?.total ?? 0,
+    total:   (cells[0]?.total ?? 0) * cells.length,
   };
 }
 
-/** Per-day version of {@link sumApplied}. Inputs are arrays of daily cells. */
+/** Per-day version of {@link sumApplied}. */
 function aggregateAcrossRows(arrays: Cell[][]): Cell[] {
   if (arrays.length === 0) return [];
   const len = arrays[0].length;
@@ -93,7 +87,7 @@ function aggregateAcrossRows(arrays: Cell[][]): Cell[] {
   for (let i = 0; i < len; i++) {
     out.push({
       applied: arrays.reduce((sum, a) => sum + a[i].applied, 0),
-      total:   arrays[0][i].total,
+      total:   arrays[0][i].total * arrays.length,
     });
   }
   return out;

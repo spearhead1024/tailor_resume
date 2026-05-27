@@ -101,3 +101,27 @@ class OpenAICallRow(Base):
     user_id: Mapped[str] = mapped_column(String(64), default='', index=True)
     recorded_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
     data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class DeviceSessionRow(Base):
+    """One row per (user, device fingerprint). Created on login.
+
+    `revoked` lets admins force a logout from a specific device without
+    deleting the row (audit-friendly). `fingerprint` is a stable hash of
+    user-agent + a salt, so the same browser+OS combines login_count.
+    """
+    __tablename__ = 'device_sessions'
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    user_agent: Mapped[str] = mapped_column(String(512), default='')
+    browser: Mapped[str] = mapped_column(String(64), default='')
+    os: Mapped[str] = mapped_column(String(64), default='')
+    device_type: Mapped[str] = mapped_column(String(32), default='desktop', index=True)
+    ip: Mapped[str] = mapped_column(String(64), default='')
+    login_count: Mapped[int] = mapped_column(Integer, default=1)
+    first_seen: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow, index=True)
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)

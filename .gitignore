@@ -10,3 +10,6 @@ data/pdf_cache/
 data/saved_resume_pdfs/
 *.log
 .DS_Store
+requirements.md
+.vscode
+tmp/

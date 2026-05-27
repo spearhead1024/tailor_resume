@@ -8,6 +8,7 @@ import jwt
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from core.devices import DeviceStore
 from core.storage import Storage, verify_password
 
 JWT_SECRET = "TAILORRESUME_JWT_SECRET_2026"
@@ -16,13 +17,15 @@ JWT_EXPIRES_DAYS = 30
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 storage = Storage(DATA_DIR)
+devices = DeviceStore(DATA_DIR / "app.db")
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
-def create_jwt(user_id: str) -> str:
+def create_jwt(user_id: str, session_id: str = "") -> str:
     payload = {
         "sub": user_id,
+        "sid": session_id,
         "iat": int(datetime.now(timezone.utc).timestamp()),
         "exp": int((datetime.now(timezone.utc) + timedelta(days=JWT_EXPIRES_DAYS)).timestamp()),
     }
@@ -65,6 +68,16 @@ def get_current_user(
     user = storage.get_user_by_id(user_id) if user_id else None
     if not user or user.get("status") != "approved":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or not approved")
+    # If the JWT carries a session id, that session must still be active.
+    # (Old tokens without sid stay valid for back-compat — they'll get an sid
+    # on next login.)
+    sid = payload.get("sid")
+    if sid:
+        sess = devices.get(sid)
+        if not sess:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session not found")
+        if sess.get("revoked"):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session revoked — please sign in again")
     return user
 
 
