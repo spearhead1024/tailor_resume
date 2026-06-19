@@ -1,0 +1,62 @@
+{
+  "manifest_version": 3,
+  "name": "TailorResume Assistant",
+  "version": "0.4.2",
+  "description": "Find and download the right resume for the job you're viewing, copy profile fields, report jobs, and screenshot the page \u2014 without leaving the tab.",
+  "minimum_chrome_version": "114",
+  "update_url": "https://tailorresume.duckdns.org/api/extension/update.xml",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "tabs",
+    "scripting",
+    "downloads",
+    "debugger"
+  ],
+  "host_permissions": [
+    "https://tailorresume.duckdns.org/*",
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "TailorResume Assistant",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content/content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "content/bar.css",
+        "icons/*"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmFRvhRTehvNk989FkTeagyo7CGplDDRO4nmnLf+c7mTbVEJxOah716pIPh0+dK4c3Pwq4o/FkJup/U4f7+DraJXptA8IEaDmD4NJZYDnkW+OFDXivXRaPDsakw6F5atie1dLwA2Xs863ItyU5jmqcLjZcdHzPIppJ6o7wCoLC9cA6DqVHus7F1EsDNDSc/l2jLcZqxVVStA8Ophgw34xt5EQckLdo3E1UaUwb222soiei+NZ2n9anFItJy3GkxkjyAT7PdaHWuu+Bhhzs2ES0TKgJbYK1IfWp7rhxhepvZ06pRTDSISMT8A/TAk2MGSvGAh4jWHTP0GXmak9ISzs5QIDAQAB"
+}

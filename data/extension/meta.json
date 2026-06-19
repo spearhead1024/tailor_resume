@@ -1,0 +1,6 @@
+{
+  "version": "0.4.2",
+  "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
+  "changelog": "v0.4.2 \u2014 fixes 'repeated N times' screenshots: removed the scroll-and-stitch entirely. Full-page capture is now a single DevTools pass (no tiling); if the debugger permission isn't active it cleanly saves the visible area and tells you to enable it.",
+  "built_at": "2026-06-16T16:44:42Z"
+}

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 
 from auth import (
     authenticate_user,
@@ -72,6 +72,84 @@ def login(body: LoginRequest, request: Request):
 @router.get("/me")
 def me(user: dict = Depends(get_current_user)):
     return {k: v for k, v in user.items() if k not in ("password_hash", "password_salt")}
+
+
+# ─── Keyboard-shortcut bindings (Chrome extension card) ──────────────────────
+# Single source of truth: the web "Help → Shortcuts" tab renders this catalog;
+# the extension fetches the effective bindings and applies them. Modifier is
+# always Alt; each action maps to one key in [a-z0-9], all keys unique.
+SHORTCUT_CATALOG = [
+    {"id": "toggle",     "label": "Show / hide the bar", "default": "a", "group": "Bar"},
+    {"id": "download",   "label": "Download resume",     "default": "d", "group": "Actions"},
+    {"id": "report",     "label": "Report job",          "default": "r", "group": "Actions"},
+    {"id": "screenshot", "label": "Screenshot page",     "default": "s", "group": "Actions"},
+    {"id": "first",      "label": "First name",          "default": "f", "group": "Copy / paste"},
+    {"id": "last",       "label": "Last name",           "default": "l", "group": "Copy / paste"},
+    {"id": "full",       "label": "Full name",           "default": "n", "group": "Copy / paste"},
+    {"id": "email",      "label": "Email",               "default": "e", "group": "Copy / paste"},
+    {"id": "phone",      "label": "Phone",               "default": "p", "group": "Copy / paste"},
+    {"id": "location",   "label": "Location",            "default": "o", "group": "Copy / paste"},
+    {"id": "address",    "label": "Address",             "default": "b", "group": "Copy / paste"},
+    {"id": "zip",        "label": "Zip code",            "default": "z", "group": "Copy / paste"},
+    {"id": "linkedin",   "label": "LinkedIn",            "default": "i", "group": "Copy / paste"},
+    {"id": "github",     "label": "Github",              "default": "g", "group": "Copy / paste"},
+    {"id": "portfolio",  "label": "Portfolio",           "default": "t", "group": "Copy / paste"},
+    {"id": "university", "label": "University history",   "default": "u", "group": "Copy / paste"},
+    {"id": "exp1",       "label": "Experience 1",        "default": "1", "group": "Copy / paste"},
+    {"id": "exp2",       "label": "Experience 2",        "default": "2", "group": "Copy / paste"},
+    {"id": "exp3",       "label": "Experience 3",        "default": "3", "group": "Copy / paste"},
+    {"id": "exp4",       "label": "Experience 4",        "default": "4", "group": "Copy / paste"},
+]
+SHORTCUT_DEFAULTS = {a["id"]: a["default"] for a in SHORTCUT_CATALOG}
+_VALID_KEY = re.compile(r"^[a-z0-9]$")
+
+
+def _effective_bindings(user: dict) -> dict:
+    """Stored overrides merged over defaults → the full effective map."""
+    stored = user.get("shortcuts") or {}
+    merged = dict(SHORTCUT_DEFAULTS)
+    for action, key in stored.items():
+        if action in SHORTCUT_DEFAULTS and isinstance(key, str) and _VALID_KEY.match(key):
+            merged[action] = key
+    return merged
+
+
+@router.get("/shortcuts")
+def get_shortcuts(user: dict = Depends(get_current_user)):
+    """Effective bindings for this user + the catalog (for the Help UI)."""
+    return {"bindings": _effective_bindings(user), "catalog": SHORTCUT_CATALOG}
+
+
+@router.put("/shortcuts")
+def put_shortcuts(body: dict = Body(...), user: dict = Depends(get_current_user)):
+    """Save this user's bindings. Validates: known actions, single [a-z0-9] keys,
+    no duplicates. The client sends the full effective map under `bindings`."""
+    raw = body.get("bindings") if isinstance(body, dict) else None
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=400, detail="Expected { bindings: { action: key } }")
+
+    cleaned: dict[str, str] = {}
+    for action, key in raw.items():
+        if action not in SHORTCUT_DEFAULTS:
+            raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
+        key = str(key or "").lower()
+        if not _VALID_KEY.match(key):
+            raise HTTPException(status_code=400, detail=f"'{action}' must be a single letter or digit (got '{key}').")
+        cleaned[action] = key
+
+    # Fill any actions the client omitted with their defaults, then check dupes.
+    full = dict(SHORTCUT_DEFAULTS) | cleaned
+    seen: dict[str, str] = {}
+    for action, key in full.items():
+        if key in seen:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Key '{key}' is used by both '{seen[key]}' and '{action}'. Each shortcut needs a unique key.",
+            )
+        seen[key] = action
+
+    storage.update_user(user["id"], {"shortcuts": full})
+    return {"ok": True, "bindings": full}
 
 
 @router.post("/register")

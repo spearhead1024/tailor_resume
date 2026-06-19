@@ -13,6 +13,7 @@ they can be deleted later once the migration is verified.
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 import threading
 import uuid
@@ -37,8 +38,6 @@ from .db.models import (
 
 
 _ALLOWED_REGIONS = {'ANY', 'US', 'EU', 'LATAM'}
-OPENAI_MODEL_OPTIONS = ['gpt-5-nano', 'gpt-5.1', 'gpt-5-mini']
-DEFAULT_OPENAI_MODEL = 'gpt-5-nano'
 
 _URL_TRACKING_PARAMS = frozenset({
     'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
@@ -158,14 +157,194 @@ def _default_templates() -> list[dict]:
     ]
 
 
+DEFAULT_PROMPT_TEMPLATE = """\
+You are a senior resume writer. Generate a JSON resume tailored to the Job Description below.
+
+# RESPONSE FORMAT — ABSOLUTE, NON-NEGOTIABLE
+This message IS the work order. The instant you finish reading this prompt, GENERATE the JSON. Do not reply with anything else first.
+
+Your ENTIRE response must be a SINGLE ```json fenced code block and NOTHING ELSE.
+
+DO NOT:
+  - DO NOT ask "should I proceed?", "do you want me to generate?", "shall I continue?", or any confirmation question. The answer is always YES — generate immediately.
+  - DO NOT ask the user to "reply with 'Generate the resume'" or any other trigger phrase. There is no trigger phrase. The prompt itself is the trigger.
+  - DO NOT acknowledge the file, describe what you see, or summarize the requirements back to the user.
+  - DO NOT say "the constraints are strict so I'll need to…" or any meta-commentary about difficulty, length, or effort.
+  - DO NOT review, critique, or comment on the existing resume.
+  - DO NOT explain what you are doing or what you changed.
+  - DO NOT list problems, suggestions, or improvements.
+  - DO NOT add any greeting, preface, summary, or closing remark.
+  - DO NOT add text before the ```json fence.
+  - DO NOT add text after the closing ``` fence.
+  - DO NOT use markdown headings, bullet points, or tables outside the JSON.
+
+DO:
+  - Begin generating the JSON resume IMMEDIATELY, with zero preamble.
+  - Output begins with the literal three characters ```json on the very first line.
+  - Output ends with the literal three characters ``` on the very last line.
+  - Everything between is one valid JSON object.
+
+The user has automated tooling that reads ONLY the fenced JSON. Any question, preface, or confirmation request is wasted output and causes the request to be rejected — the user then has to re-send the same prompt, which costs them time. Just generate.
+
+```json
+{ ...your JSON here... }
+```
+
+The JSON inside must have EXACTLY these top-level keys:
+- "job_id": copy from the input JOB JSON
+- "profile_id": copy from the input PROFILE JSON
+- "professional_summary": string
+- "professional_experience": array of {company, role, duration, bullets: [string]}
+- "technical_skills": array of {skill_category, skills: [string]}
+
+# INPUT EXPECTATIONS — READ THIS BEFORE ANYTHING ELSE
+You are given EXACTLY two JSON inputs further down: PROFILE JSON and JOB DESCRIPTION JSON.
+
+The PROFILE JSON is intentionally minimal. It contains only:
+  - the candidate's company history (company name, duration, prior role title, target bullet count per company)
+  - target lengths: `summary_char_count`, `skills_count`, `total_years_of_experience`
+  - `profile_id` and `job_id` to echo back
+
+It DOES NOT contain — and is NOT supposed to contain — the candidate's full prior resume, real prior bullets, their name, their education, their skills, or their projects. This is by design. The candidate's name, education, and any other identity fields are filled in downstream by the rendering pipeline.
+
+Your job is to GENERATE plausible, JD-aligned content for each company in PROFILE.work_history, using only the company name, duration, and legacy_role as anchors. Treat each company as a fixed placement; invent realistic achievements, technologies, and metrics that:
+  1. Could credibly have been done at a company of that kind during that date range, AND
+  2. Directly match the requirements in the JOB DESCRIPTION.
+
+DO NOT refuse. DO NOT ask the user to upload anything more. DO NOT say "I need more information." The two JSONs below are sufficient — proceed.
+
+# RULES
+1. Read the JOB DESCRIPTION deeply. Extract every required skill, framework, tool, service, methodology, and domain term.
+2. Wrap each tech-relevant keyword in <B>...</B> tags wherever it appears in "professional_summary", in each bullet of "professional_experience", and skills inside "technical_skills". These tags will be rendered as bold in the final PDF.
+3. "professional_summary":
+   - Length MUST be within ±20 characters of `summary_char_count` (from PROFILE). For example, if `summary_char_count` is 700, the summary MUST be between 680 and 720 characters (including spaces, INCLUDING the <B>...</B> tags). Count the characters before returning. A summary outside this range is REJECTED.
+   - If your first draft is too short, expand with additional context about scope, scale, leadership, and measurable outcomes — do not pad with filler. If too long, tighten redundant phrasing. Never finish under the minimum.
+   - Bold every required skill and tech term with <B>...</B>.
+4. "professional_experience":
+   - Emit one entry per item in PROFILE.work_history, in the same order.
+   - For each company, generate EXACTLY `bullet_count` bullets (no more, no less).
+   - Each bullet MUST render as EXACTLY 2 LINES in the final PDF. The resume column wraps at roughly 95–105 characters per line, so each bullet must be between 180 and 200 characters (including spaces). The server REJECTS any bullet under 110 characters because it would render as only 1 line — that is an automatic failure of the entire submission.
+   - The 180–200 char count is the VISIBLE TEXT only — do NOT count the literal characters of <B> and </B> markup. Each <B>...</B> wrapper adds 7 invisible chars that the server strips before counting. So if you wrap 5 tech terms, your visible bullet must still be ~190 chars; the raw string you submit may be ~225 chars.
+   - HARD COUNTING RULE — before you write a bullet, decide the target VISIBLE length (≈190 chars after removing every <B> and </B>). After drafting, mentally delete every <B> and </B> and count what remains. If the visible text is under 180, EXPAND with more concrete detail (named tools, named systems, specific %/$/qty metrics, scope of users/data/team). If under 110 visible chars, you have failed — rewrite the bullet entirely longer. Do NOT shrug and submit a short bullet.
+   - Structure each bullet as: [Action verb] + [what you built/led/delivered] + [the technology/stack used] + [measurable impact or scope]. Pack all four parts into one flowing sentence — never split into two sentences, never use "and then", and never write filler.
+   - Examples of length (chars shown are VISIBLE chars after stripping <B>/</B>):
+     * BAD — 1 line (75 visible chars, will be REJECTED): "Built CI/CD pipelines in <B>GitHub Actions</B> that cut deploy times by 40% across services." (raw string is 96 chars; once you strip the 21 chars of <B>...</B> markup the visible text is only 75 chars — under the 110-char floor.)
+     * GOOD — 2 lines (~190 visible chars, accepted): "Architected a multi-tenant microservices platform on <B>Kubernetes</B> using <B>Go</B> and <B>gRPC</B>, cutting p99 latency from 480ms to 90ms across 14 services serving 12M daily requests in production." (raw string is ~213 chars; visible text after stripping <B>/</B> is ~192 chars — comfortably in the 180–200 band.)
+   - If you find yourself writing short, generic bullets ("Built X using Y, improving Z"), STOP and re-expand each one with two of: real scale (users, requests, GB, $), team/scope (engineers, teams, BU), or before/after numbers. Length comes from concrete specifics, not adjectives.
+   - Bullets must be realistic for the role's `duration` and `legacy_role`.
+   - TEMPORAL CONSTRAINT — only mention a technology in a bullet if that tech existed AND was widely adopted during that role's date range. Examples of emergence dates to respect:
+     * Generative AI / OpenAI API / LLMs / ChatGPT: 2022+
+     * LangChain / vector DBs (Pinecone, Weaviate): 2023+
+     * Solana mainnet: 2020+
+     * Ethereum / Solidity: 2015+
+     * React: 2013+
+     * Kubernetes: 2015+
+     * Docker: 2014+
+     * TypeScript widespread: 2017+
+     * Rust widespread: 2018+
+   Anything before its emergence year is hallucination — DO NOT include it.
+5. "technical_skills":
+   - The total number of individual skills across ALL categories combined must be EXACTLY `skills_count` (from PROFILE). Count them before returning. No more, no less.
+   - Group those skills into 8–10 logical categories. Wrap the category name in <B>...</B>.
+   - DO NOT bold the individual skill items (keep them plain).
+   - Include every skill required by the JD first, then pad with closely-related tech/frameworks (e.g. if JD mentions React, also list Next.js, Redux; if Solidity, also Hardhat, Foundry) until the total reaches exactly `skills_count`.
+6. Tone: confident, specific, achievement-driven. No fluff. (The candidate's name, contact info, and education are filled in downstream by the rendering pipeline — DO NOT add them to the JSON, and DO NOT ask the user for them.)
+7. Reminder: wrap the JSON in ```json ... ``` fences so the chat UI shows a copy button.
+
+# SELF-CHECK BEFORE RETURNING (MANDATORY)
+Before you output the final JSON, silently run this checklist. If ANY check fails, fix it and re-check. Do not return a JSON that fails any check — the server will reject it and the user will have to re-prompt you.
+
+  [ ] Summary length (including spaces and <B>...</B> tags) is within ±20 chars of PROFILE.summary_char_count.
+  [ ] professional_experience has exactly the same number of entries as PROFILE.work_history, in the same order.
+  [ ] For each company i, the bullets array has EXACTLY PROFILE.work_history[i].bullet_count entries.
+  [ ] Every bullet's VISIBLE length (after deleting every <B> and </B> from the string) is between 180 and 200 chars, spaces included. Any bullet whose visible text is under 110 chars is an automatic rejection — rewrite it longer with concrete metrics/scope. Bold markup does NOT count toward this number.
+  [ ] technical_skills total skill count (summed across all categories) equals PROFILE.skills_count exactly.
+  [ ] No prose outside the ```json fence."""
+
+
 def _default_settings() -> dict:
     return {
-        'default_prompt': '',
-        'always_clean_generation': True,
+        'prompt_template': DEFAULT_PROMPT_TEMPLATE,
         'download_output_dir': 'saved_resumes',
-        'openai_model': DEFAULT_OPENAI_MODEL,
         'saved_prompts': [],
+        # Root domains to blacklist from ingestion. Stored as a list of
+        # lowercase, no-scheme, no-path strings. e.g. ['lever.co', 'foo.com'].
+        'blacklist_domains': [],
+        # Title keywords (case-insensitive substring) — a job whose title
+        # contains any of these is rejected. e.g. ['lead', 'staff', 'devops'].
+        'blacklist_titles': [],
+        # Company names (case-insensitive exact match) to reject.
+        'blacklist_companies': [],
+        # Rolling deadline (hours): how long a job stays in the Resumes queue,
+        # and how long a generated resume stays in the Apply queue.
+        'job_deadline_hours': 12,
     }
+
+
+def _normalize_keyword_list(raw: Any) -> list[str]:
+    """Accept list[str] or newline/comma-separated str; return lowercased,
+    de-duped, non-empty keywords preserving first-seen order."""
+    if isinstance(raw, str):
+        items = [s for s in re.split(r'[\n,]+', raw) if s.strip()]
+    elif isinstance(raw, list):
+        items = [str(s) for s in raw if str(s).strip()]
+    else:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        k = str(item).strip().lower()
+        if k and k not in seen:
+            seen.add(k)
+            out.append(k)
+    return out
+
+
+def _root_domain(url: str) -> str:
+    """Return the lowercase eTLD+1 of a URL (best-effort, no PSL).
+
+    Treats the last two dot-separated segments of the hostname as the root.
+    Good enough for common .com/.io/.co/.net/.org TLDs; misses things like
+    co.uk, but those are rare for job-board domains.
+    """
+    raw = str(url or '').strip().lower()
+    if not raw:
+        return ''
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(raw if '://' in raw else f'http://{raw}')
+        host = (parsed.hostname or '').lower()
+    except Exception:
+        return ''
+    if not host:
+        return ''
+    if host.startswith('www.'):
+        host = host[4:]
+    parts = host.split('.')
+    # Require at least one dot — otherwise it's not a real hostname.
+    if len(parts) < 2 or any(not p for p in parts):
+        return ''
+    if len(parts) == 2:
+        return host
+    return '.'.join(parts[-2:])
+
+
+def _normalize_blacklist(raw: Any) -> list[str]:
+    """Accept list[str] or a newline/comma-separated str; return clean roots."""
+    if isinstance(raw, str):
+        items = [s for s in re.split(r'[\s,]+', raw) if s]
+    elif isinstance(raw, list):
+        items = [str(s) for s in raw if str(s).strip()]
+    else:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        d = _root_domain(item) or str(item).strip().lower().lstrip('.')
+        if d and d not in seen:
+            seen.add(d)
+            out.append(d)
+    return out
 
 
 def _default_admin_user() -> dict:
@@ -239,7 +418,10 @@ def _normalize_profile(item: dict) -> dict:
         'email': item.get('email', ''),
         'phone': item.get('phone', ''),
         'location': item.get('location', ''),
+        'address': item.get('address', item.get('street', '')),
+        'zip_code': item.get('zip_code', item.get('zip', '')),
         'linkedin': item.get('linkedin', ''),
+        'github': item.get('github', ''),
         'portfolio': item.get('portfolio', ''),
         'default_template_id': str(item.get('default_template_id', '')).strip(),
         'summary_seed': item.get('summary_seed', ''),
@@ -277,7 +459,24 @@ def _normalize_template(item: dict, *, fallback_index: int = 0) -> dict:
     return merged
 
 
+ALLOWED_ROLES = {'admin', 'bidder', 'job_adder'}
+
+
+def _normalize_roles(item: dict) -> list[str]:
+    """Roles are stored as a list. Falls back to legacy is_admin for migration."""
+    raw = item.get('roles')
+    if isinstance(raw, list) and raw:
+        roles = [str(r).strip() for r in raw if str(r).strip() in ALLOWED_ROLES]
+        if roles:
+            # de-dupe, preserve order
+            seen = set()
+            return [r for r in roles if not (r in seen or seen.add(r))]
+    # Legacy migration: is_admin=True → ['admin'], else → ['bidder']
+    return ['admin'] if bool(item.get('is_admin', False)) else ['bidder']
+
+
 def _normalize_user(item: dict) -> dict:
+    roles = _normalize_roles(item)
     return {
         'id': item.get('id') or f'user_{uuid.uuid4().hex[:10]}',
         'username': str(item.get('username', '')).strip().lower(),
@@ -285,7 +484,9 @@ def _normalize_user(item: dict) -> dict:
         'email': str(item.get('email', '')).strip(),
         'password_hash': str(item.get('password_hash', '')).strip(),
         'password_salt': str(item.get('password_salt', '')).strip(),
-        'is_admin': bool(item.get('is_admin', False)),
+        'roles': roles,
+        # is_admin kept as derived convenience field for back-compat
+        'is_admin': 'admin' in roles,
         'status': str(item.get('status', 'pending') or 'pending').strip(),
         'assigned_profile_ids': [str(v).strip() for v in item.get('assigned_profile_ids', []) if str(v).strip()],
         'created_at': str(item.get('created_at', '')),
@@ -294,6 +495,12 @@ def _normalize_user(item: dict) -> dict:
         'parent_admin_id': str(item.get('parent_admin_id', '')).strip(),
         'force_password_change': bool(item.get('force_password_change', False)),
         'auth_tokens': _normalize_auth_tokens(item.get('auth_tokens', []) or []),
+        # Per-user keyboard-shortcut overrides for the Chrome extension card
+        # ({action_id: single_key}). Validated at the API layer.
+        'shortcuts': {
+            str(k): str(v)
+            for k, v in (item.get('shortcuts') or {}).items()
+        } if isinstance(item.get('shortcuts'), dict) else {},
     }
 
 
@@ -347,6 +554,9 @@ def _normalize_job(item: dict) -> dict:
         'scraped_at': str(item.get('scraped_at', '')).strip(),
         'reports': _normalize_job_reports(item.get('reports', []) or []),
         'flagged': bool(item.get('flagged', False)),
+        # Set when an admin dismisses reports (double-approves the job). Locks the
+        # job from being reported again — stops the report/dismiss ping-pong.
+        'report_locked': bool(item.get('report_locked', False)),
         'admin_applied': bool(item.get('admin_applied', False)),
         'admin_applied_at': str(item.get('admin_applied_at', '')).strip(),
         'admin_applied_by_user_id': str(item.get('admin_applied_by_user_id', '')).strip(),
@@ -493,11 +703,12 @@ def _normalize_settings(item: Any) -> dict:
     defaults = _default_settings()
     source = item if isinstance(item, dict) else {}
     merged = defaults | source
-    merged['default_prompt'] = str(merged.get('default_prompt', '')).strip()
+    raw_template = str(merged.get('prompt_template', '') or '').strip()
+    merged['prompt_template'] = raw_template or DEFAULT_PROMPT_TEMPLATE
     merged['download_output_dir'] = str(merged.get('download_output_dir', 'saved_resumes')).strip() or 'saved_resumes'
-    merged['always_clean_generation'] = True
-    raw_model = str(merged.get('openai_model', '') or '').strip()
-    merged['openai_model'] = raw_model if raw_model in OPENAI_MODEL_OPTIONS else DEFAULT_OPENAI_MODEL
+    # Strip legacy OpenAI fields
+    for k in ('default_prompt', 'openai_model', 'always_clean_generation'):
+        merged.pop(k, None)
     raw_prompts = merged.get('saved_prompts', [])
     normalized_prompts = []
     for p in raw_prompts if isinstance(raw_prompts, list) else []:
@@ -512,6 +723,14 @@ def _normalize_settings(item: Any) -> dict:
                 'text': text,
             })
     merged['saved_prompts'] = normalized_prompts
+    merged['blacklist_domains'] = _normalize_blacklist(merged.get('blacklist_domains'))
+    merged['blacklist_titles'] = _normalize_keyword_list(merged.get('blacklist_titles'))
+    merged['blacklist_companies'] = _normalize_keyword_list(merged.get('blacklist_companies'))
+    try:
+        dh = int(merged.get('job_deadline_hours') or 12)
+    except (TypeError, ValueError):
+        dh = 12
+    merged['job_deadline_hours'] = min(max(dh, 1), 168)  # clamp 1h–7d
     return merged
 
 
@@ -1006,10 +1225,63 @@ class Storage:
             row = session.get(JobRow, jid)
             return _normalize_job(dict(row.data or {})) if row else None
 
-    def upsert_job(self, payload: dict) -> None:
+    def is_link_blacklisted(self, link: str) -> bool:
+        """True if the URL's root domain is in the admin-configured blacklist."""
+        d = _root_domain(link)
+        if not d:
+            return False
+        return d in set(self.get_app_settings().get('blacklist_domains') or [])
+
+    def is_title_blacklisted(self, title: str) -> bool:
+        """True if the job title contains any blacklisted keyword (substring,
+        case-insensitive)."""
+        t = str(title or '').lower()
+        if not t:
+            return False
+        return any(kw in t for kw in (self.get_app_settings().get('blacklist_titles') or []))
+
+    def is_company_blacklisted(self, company: str) -> bool:
+        """True if the company name exactly matches a blacklisted company
+        (case-insensitive)."""
+        c = str(company or '').strip().lower()
+        if not c:
+            return False
+        return c in set(self.get_app_settings().get('blacklist_companies') or [])
+
+    def job_block_reason(self, payload: dict) -> str | None:
+        """Return a human-readable reason if this job should be blocked from
+        ingestion, else None. Checks domain, title, and company blacklists in
+        one settings read."""
+        settings = self.get_app_settings()
+        domains = set(settings.get('blacklist_domains') or [])
+        titles = settings.get('blacklist_titles') or []
+        companies = set(settings.get('blacklist_companies') or [])
+
+        link = str(payload.get('link') or '')
+        d = _root_domain(link)
+        if d and d in domains:
+            return f"domain '{d}' is blacklisted"
+
+        title_l = str(payload.get('job_title') or '').lower()
+        for kw in titles:
+            if kw in title_l:
+                return f"title contains blacklisted keyword '{kw}'"
+
+        company_l = str(payload.get('company') or '').strip().lower()
+        if company_l and company_l in companies:
+            return f"company '{payload.get('company')}' is blacklisted"
+
+        return None
+
+    def upsert_job(self, payload: dict) -> bool:
+        """Insert/update a job. Returns False if blocked by any blacklist
+        (domain, title, or company)."""
         normalized = _normalize_job(payload)
+        if self.job_block_reason(normalized) is not None:
+            return False
         with session_scope(self.db_path) as session:
             self._write_job_row(session, normalized)
+        return True
 
     def update_job(self, job_id: str, patch: dict) -> None:
         jid = str(job_id or '').strip()
@@ -1038,9 +1310,144 @@ class Storage:
                 normalized = _normalize_job(raw)
                 if not normalized.get('id'):
                     continue
+                if self.job_block_reason(normalized) is not None:
+                    continue
                 self._write_job_row(session, normalized)
                 count += 1
         return count
+
+    def query_jobs(
+        self,
+        *,
+        status: str = '',
+        region: str = '',
+        company: str = '',
+        q: str = '',
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+        reported: bool = False,
+        created_by: str = '',
+        page: int = 1,
+        page_size: int = 20,
+    ) -> dict:
+        """Server-side filtered + paginated job listing.
+
+        Returns {jobs: [...light dicts...], total, page, page_size,
+        counts: {status -> n}} where counts respect every filter EXCEPT
+        status (so the status pills can show switch targets). `jobs` omits the
+        heavy `description`/`note` fields — fetch a single job for those.
+        """
+        from sqlalchemy import func, or_
+
+        def _base_conditions(include_status: bool):
+            conds = []
+            if include_status and status:
+                conds.append(JobRow.status == status)
+            if reported:
+                # Reported jobs are flagged=True in the JSON data column.
+                conds.append(JobRow.data['flagged'].as_boolean() == True)  # noqa: E712
+            if created_by:
+                # Restrict to jobs this user uploaded (job_adder scoping).
+                conds.append(JobRow.created_by_user_id == created_by)
+            if region and region.upper() not in ('', 'ALL', 'ANY'):
+                conds.append(JobRow.region == region.upper())
+            if company:
+                conds.append(func.lower(JobRow.company) == company.strip().lower())
+            if q:
+                like = f"%{q.strip().lower()}%"
+                conds.append(or_(
+                    func.lower(JobRow.company).like(like),
+                    func.lower(JobRow.job_title).like(like),
+                ))
+            if date_from is not None:
+                conds.append(JobRow.submitted_at >= date_from)
+            if date_to is not None:
+                conds.append(JobRow.submitted_at < date_to)
+            return conds
+
+        page = max(1, int(page or 1))
+        page_size = max(1, min(int(page_size or 20), 200))
+
+        with session_scope(self.db_path) as session:
+            # Page of rows (status-filtered), newest first.
+            stmt = select(JobRow)
+            for c in _base_conditions(include_status=True):
+                stmt = stmt.where(c)
+            stmt = stmt.order_by(JobRow.submitted_at.desc().nullslast())
+            total = session.scalar(
+                select(func.count()).select_from(stmt.subquery())
+            ) or 0
+            rows = session.scalars(
+                stmt.offset((page - 1) * page_size).limit(page_size)
+            ).all()
+
+            # Status counts across the same filters EXCEPT status.
+            count_stmt = select(JobRow.status, func.count()).group_by(JobRow.status)
+            for c in _base_conditions(include_status=False):
+                count_stmt = count_stmt.where(c)
+            counts = {'approved': 0, 'pending': 0, 'rejected': 0, 'deleted': 0}
+            for st, n in session.execute(count_stmt).all():
+                counts[str(st)] = int(n)
+            counts['total'] = sum(counts.get(k, 0) for k in ('approved', 'pending', 'rejected', 'deleted'))
+
+            jobs = []
+            for row in rows:
+                d = _normalize_job(dict(row.data or {}))
+                reports = d.get('reports', []) or []
+                jobs.append({
+                    'id': d.get('id'),
+                    'company': d.get('company', ''),
+                    'job_title': d.get('job_title', ''),
+                    'link': d.get('link', ''),
+                    'region': d.get('region', 'ANY'),
+                    'status': d.get('status', 'approved'),
+                    'submitted_at': d.get('submitted_at', ''),
+                    'approved_at': d.get('approved_at', ''),
+                    'flagged': bool(d.get('flagged', False)),
+                    'report_locked': bool(d.get('report_locked', False)),
+                    'reports': reports,
+                    'reports_count': len(reports),
+                    # Who added it ('' for jobs pulled by the sync poller).
+                    'source': d.get('source', ''),
+                    'created_by_user_id': d.get('created_by_user_id', ''),
+                    'created_by_username': d.get('created_by_username', ''),
+                })
+
+        return {
+            'jobs': jobs,
+            'total': int(total),
+            'page': page,
+            'page_size': page_size,
+            'counts': counts,
+        }
+
+    def export_recent_jobs(
+        self,
+        *,
+        limit: int = 100,
+        since: datetime | None = None,
+        status: str = 'approved',
+        region: str = '',
+    ) -> list[dict]:
+        """Recent jobs for the external read-only feed (machine-to-machine).
+
+        Newest-first by submitted_at, capped at `limit` (1..1000). Returns FULL
+        normalized job dicts (incl. description); the caller projects whichever
+        public subset it wants. `status=''` means any status. `since` is a naive
+        UTC datetime — only jobs submitted at/after it are returned.
+        """
+        limit = max(1, min(int(limit or 100), 1000))
+        with session_scope(self.db_path) as session:
+            stmt = select(JobRow)
+            if status:
+                stmt = stmt.where(JobRow.status == status)
+            if region and region.upper() not in ('', 'ALL', 'ANY'):
+                stmt = stmt.where(JobRow.region == region.upper())
+            if since is not None:
+                stmt = stmt.where(JobRow.submitted_at >= since)
+            stmt = stmt.order_by(JobRow.submitted_at.desc().nullslast()).limit(limit)
+            rows = session.scalars(stmt).all()
+            return [_normalize_job(dict(row.data or {})) for row in rows]
 
     def bulk_update_jobs(self, patches_by_id: dict[str, dict]) -> int:
         if not patches_by_id:
@@ -1063,6 +1470,34 @@ class Storage:
             return None
         with session_scope(self.db_path) as session:
             stmt = select(JobRow).where(JobRow.company_key == company_key, JobRow.title_key == title_key)
+            if exclude_job_id:
+                stmt = stmt.where(JobRow.id != str(exclude_job_id).strip())
+            row = session.scalar(stmt.limit(1))
+            return _normalize_job(dict(row.data or {})) if row else None
+
+    def find_recent_company_job(
+        self, company: str, region: str, within_days: int = 7, exclude_job_id: str = '',
+    ) -> dict | None:
+        """Most recent ACTIVE (approved/pending) job for the same company + region
+        added within `within_days`. Used to enforce one job per company per week.
+        Rejected/deleted jobs don't hold the slot."""
+        company_key = _job_compare_key(company)
+        if not company_key:
+            return None
+        region_key = _normalize_market_region(region)
+        cutoff = datetime.utcnow() - timedelta(days=max(1, int(within_days or 7)))
+        with session_scope(self.db_path) as session:
+            stmt = (
+                select(JobRow)
+                .where(
+                    JobRow.company_key == company_key,
+                    JobRow.region == region_key,
+                    JobRow.status.in_(('approved', 'pending')),
+                    JobRow.submitted_at.is_not(None),
+                    JobRow.submitted_at >= cutoff,
+                )
+                .order_by(JobRow.submitted_at.desc())
+            )
             if exclude_job_id:
                 stmt = stmt.where(JobRow.id != str(exclude_job_id).strip())
             row = session.scalar(stmt.limit(1))
@@ -1138,7 +1573,7 @@ class Storage:
             row = session.get(JobRow, jid)
             if row is None:
                 return
-            normalized = _normalize_job(dict(row.data or {}) | {'reports': [], 'flagged': False})
+            normalized = _normalize_job(dict(row.data or {}) | {'reports': [], 'flagged': False, 'report_locked': True})
             self._write_job_row(session, normalized, existing=row)
 
     # ---- openai usage logs ----

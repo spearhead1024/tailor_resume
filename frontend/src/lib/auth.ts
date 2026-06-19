@@ -3,16 +3,25 @@ import { api } from '../api/client';
 
 const TOKEN_KEY = 'tailorresume.token';
 
+export type Role = 'admin' | 'bidder' | 'job_adder';
+
 export type User = {
   id: string;
   username: string;
   full_name: string;
   email: string;
-  is_admin: boolean;
+  roles: Role[];
+  is_admin: boolean; // derived: 'admin' in roles
   status: string;
   assigned_profile_ids?: string[];
   force_password_change?: boolean;
 };
+
+export function hasRole(user: User | null, ...roles: Role[]): boolean {
+  if (!user) return false;
+  const set = new Set(user.roles || []);
+  return roles.some((r) => set.has(r));
+}
 
 let currentUser: User | null = null;
 const listeners = new Set<() => void>();

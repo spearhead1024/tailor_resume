@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="wrap">
+    <div class="brand">TailorResume <span>Assistant</span></div>
+
+    <!-- Signed out -->
+    <form id="login" class="card hidden">
+      <label>Username or email</label>
+      <input id="identifier" type="text" autocomplete="username" />
+      <label>Password</label>
+      <input id="password" type="password" autocomplete="current-password" />
+      <button id="loginBtn" type="submit">Sign in</button>
+      <div id="loginErr" class="err"></div>
+      <details class="adv">
+        <summary>Advanced</summary>
+        <label>API base URL</label>
+        <input id="apiBase" type="text" placeholder="https://tailorresume.duckdns.org" />
+        <button id="saveApi" type="button" class="ghost">Save API URL</button>
+      </details>
+    </form>
+
+    <!-- Signed in -->
+    <div id="account" class="card hidden">
+      <div class="who">Signed in as <strong id="who"></strong></div>
+      <button id="toggleBar" type="button" class="primary">Show / hide the bar on this tab</button>
+      <div class="hint">The TailorResume bar appears on every tab.
+        Toggle it with the button above or your shortcut (default <kbd>Alt</kbd>+<kbd>A</kbd>).
+        Customize shortcuts in <strong>Help → Shortcuts</strong> on the website.</div>
+      <div id="toggleErr" class="err"></div>
+      <div class="row">
+        <span class="muted" id="ver"></span>
+        <button id="logout" class="ghost">Sign out</button>
+      </div>
+    </div>
+  </div>
+  <script src="popup.js" type="module"></script>
+</body>
+</html>

@@ -26,7 +26,10 @@ const BLANK_PROFILE = {
   email: '',
   phone: '',
   location: '',
+  address: '',
+  zip_code: '',
   linkedin: '',
+  github: '',
   portfolio: '',
   region: 'US',
   work_history: [] as any[],
@@ -261,12 +264,29 @@ export default function Profiles() {
                 </Field>
               </div>
               <div className="row">
+                <Field label="Address">
+                  {editing
+                    ? <input value={selected.address || ''} onChange={(e) => setSelected({ ...selected, address: e.target.value })} />
+                    : <ReadValue value={selected.address} />}
+                </Field>
+                <Field label="Zip code">
+                  {editing
+                    ? <input value={selected.zip_code || ''} onChange={(e) => setSelected({ ...selected, zip_code: e.target.value })} />
+                    : <ReadValue value={selected.zip_code} />}
+                </Field>
+              </div>
+              <div className="row">
                 <Field label="LinkedIn">
                   {editing
                     ? <input value={selected.linkedin || ''} onChange={(e) => setSelected({ ...selected, linkedin: e.target.value })} />
                     : <ReadValue value={selected.linkedin} />}
                 </Field>
-                <Field label="Portfolio / GitHub">
+                <Field label="GitHub">
+                  {editing
+                    ? <input value={selected.github || ''} onChange={(e) => setSelected({ ...selected, github: e.target.value })} />
+                    : <ReadValue value={selected.github} />}
+                </Field>
+                <Field label="Portfolio">
                   {editing
                     ? <input value={selected.portfolio || ''} onChange={(e) => setSelected({ ...selected, portfolio: e.target.value })} />
                     : <ReadValue value={selected.portfolio} />}

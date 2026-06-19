@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useToast } from '../lib/toast';
+import { etDateKey } from '../lib/etTime';
 
 const MODELS = ['gpt-5.1', 'gpt-5-nano', 'gpt-5-mini'];
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
@@ -405,7 +406,7 @@ export default function ToDoAdmin({ profileId }: { profileId: string }) {
                     </td>
                     <td style={{ color: 'var(--muted)', fontSize: '0.85rem' }}>{job.region || '—'}</td>
                     <td style={{ color: 'var(--muted)', fontSize: '0.85rem' }}>
-                      {(job.submitted_at || '').slice(0, 10) || '—'}
+                      {etDateKey(job.submitted_at || '') || '—'}
                     </td>
                     <td style={{ textAlign: 'center' }}>
                       {qCount > 0 ? <span className="pill">{qCount}</span> : <span className="muted">·</span>}

@@ -1,11 +1,14 @@
-import React, { useMemo, useState } from 'react';
-import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
+import React, { useEffect, useMemo, useState } from 'react';
+import { useQuery, useQueryClient, useMutation, keepPreviousData } from '@tanstack/react-query';
+import { useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
-import { useAuth } from '../lib/auth';
+import { useAuth, hasRole } from '../lib/auth';
 import { useToast } from '../lib/toast';
+import { etDateLong, etDateShort, etDateKey, todayETKey } from '../lib/etTime';
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const BLANK_JOB = { company: '', job_title: '', description: '', link: '', region: 'US', note: '' };
+type GroupBy = 'day' | 'region' | 'status' | 'company';
 
 function formatJobError(err: any, fallback: string): string {
   const d = err?.response?.data?.detail;
@@ -14,23 +17,15 @@ function formatJobError(err: any, fallback: string): string {
   return err?.message || fallback;
 }
 
-function formatDay(iso: string): string {
-  if (!iso) return 'Unknown date';
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return 'Unknown date';
-  return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
-}
+function formatDay(iso: string): string { return etDateLong(iso, 'Unknown date'); }
+function formatDate(iso: string): string { return etDateShort(iso, '—'); }
 
-function formatDate(iso: string): string {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return '—';
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-}
-
-function dayKey(iso: string): string {
-  if (!iso) return '';
-  return iso.slice(0, 10);
+interface JobsResponse {
+  jobs: any[];
+  total: number;
+  page: number;
+  page_size: number;
+  counts: Record<string, number>;
 }
 
 export default function Jobs() {
@@ -38,34 +33,86 @@ export default function Jobs() {
   const qc = useQueryClient();
   const toast = useToast();
   const isAdmin = !!user?.is_admin;
+  // Admins and job_adders both review/dismiss reported jobs.
+  const canReview = hasRole(user, 'admin', 'job_adder');
+
+  // Deep-link from the Applied tab: ?company=… opens this job across all dates.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const jumpCompany = searchParams.get('company') || '';
+
+  // Filters (server-side)
   const [query, setQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState('approved');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState(jumpCompany ? '' : 'approved');
+  const [regionFilter, setRegionFilter] = useState('');
+  const [companyFilter, setCompanyFilter] = useState(jumpCompany);
+  // Default to today (ET) so the Jobs tab opens on today's intake — unless we
+  // arrived via a company deep-link, in which case show all dates.
+  const [dateFrom, setDateFrom] = useState(jumpCompany ? '' : todayETKey());
+  const [dateTo, setDateTo] = useState(jumpCompany ? '' : todayETKey());
+  const [reportedOnly, setReportedOnly] = useState(false);
+  const [groupBy, setGroupBy] = useState<GroupBy>('day');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+
+  // Form / edit state
   const [showForm, setShowForm] = useState(false);
   const [newJob, setNewJob] = useState({ ...BLANK_JOB });
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState<any>({});
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number>(10);
 
-  const { data: jobs = [], isLoading } = useQuery({
-    queryKey: ['jobs'],
-    queryFn: () => api.get<any[]>('/api/jobs'),
+  // Consume the ?company= deep-link param once, then strip it from the URL so
+  // it doesn't stick on later navigation.
+  useEffect(() => {
+    if (jumpCompany) setSearchParams({}, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Debounce the free-text search so we don't refetch on every keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(query.trim()), 350);
+    return () => clearTimeout(t);
+  }, [query]);
+
+  // Reset to page 1 whenever a filter changes.
+  useEffect(() => { setPage(1); }, [debouncedQuery, statusFilter, regionFilter, companyFilter, dateFrom, dateTo, reportedOnly, pageSize]);
+
+  const params = useMemo(() => {
+    const sp = new URLSearchParams();
+    // In reported-review mode, ignore the status filter so flagged jobs of any
+    // status surface together.
+    if (statusFilter && !reportedOnly) sp.set('status', statusFilter);
+    if (regionFilter) sp.set('region', regionFilter);
+    if (companyFilter.trim()) sp.set('company', companyFilter.trim());
+    if (debouncedQuery) sp.set('q', debouncedQuery);
+    if (dateFrom) sp.set('date_from', dateFrom);
+    if (dateTo) sp.set('date_to', dateTo);
+    if (reportedOnly) sp.set('reported', 'true');
+    sp.set('page', String(page));
+    sp.set('page_size', String(pageSize));
+    return sp.toString();
+  }, [statusFilter, regionFilter, companyFilter, debouncedQuery, dateFrom, dateTo, reportedOnly, page, pageSize]);
+
+  const { data, isLoading, isFetching } = useQuery({
+    queryKey: ['jobs', params],
+    queryFn: () => api.get<JobsResponse>(`/api/jobs?${params}`),
+    placeholderData: keepPreviousData,
   });
+
+  const jobs = data?.jobs || [];
+  const total = data?.total || 0;
+  const counts = data?.counts || { approved: 0, pending: 0, rejected: 0, deleted: 0, total: 0 };
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const safePage = Math.min(page, totalPages);
 
   const createMutation = useMutation({
     mutationFn: (payload: any) => api.post('/api/jobs', { payload }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['jobs'] });
-      setPage(1);
-    },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['jobs'] }); setPage(1); },
   });
 
   const updateMutation = useMutation({
     mutationFn: ({ id, payload }: { id: string; payload: any }) => api.patch(`/api/jobs/${id}`, { payload }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['jobs'] });
-      setEditingId(null);
-    },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['jobs'] }); setEditingId(null); },
     onError: (e: any) => toast(formatJobError(e, 'Failed to update job'), 'error'),
   });
 
@@ -74,121 +121,162 @@ export default function Jobs() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['jobs'] }),
   });
 
-  // ALL hooks must be called before any conditional return
-  const counts = useMemo(() => {
-    const c = { approved: 0, pending: 0, rejected: 0, deleted: 0, total: 0 };
-    for (const j of jobs) {
-      c.total++;
-      const s = j.status as keyof typeof c;
-      if (s in c) c[s]++;
-    }
-    return c;
-  }, [jobs]);
+  const clearReportMutation = useMutation({
+    mutationFn: (id: string) => api.post(`/api/jobs/${id}/reports/clear`),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['jobs'] }); toast('Reports dismissed — job back in circulation', 'success'); },
+    onError: (e: any) => toast(formatJobError(e, 'Failed to dismiss reports'), 'error'),
+  });
 
-  const sorted = useMemo(() => {
-    return [...jobs].sort((a, b) => {
-      const ta = a.submitted_at || a.approved_at || '';
-      const tb = b.submitted_at || b.approved_at || '';
-      return tb.localeCompare(ta);
-    });
-  }, [jobs]);
+  const syncMutation = useMutation({
+    mutationFn: () => api.post<any>('/api/jobs/sync-now'),
+    onSuccess: (res: any) => {
+      qc.invalidateQueries({ queryKey: ['jobs'] });
+      const ins = res?.inserted ?? 0;
+      const blk = res?.blocked ?? 0;
+      toast(`Sync done — ${ins} new, ${res?.skipped ?? 0} skipped, ${blk} blocked`, 'success');
+    },
+    onError: (e: any) => toast(formatJobError(e, 'Sync failed'), 'error'),
+  });
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return sorted.filter((j) => {
-      if (statusFilter && j.status !== statusFilter) return false;
-      if (!q) return true;
-      return (j.company || '').toLowerCase().includes(q)
-        || (j.job_title || '').toLowerCase().includes(q)
-        || (j.note || '').toLowerCase().includes(q);
-    });
-  }, [sorted, query, statusFilter]);
-
-  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
-  const safePage = Math.min(page, totalPages);
-  const pageJobs = filtered.slice((safePage - 1) * pageSize, safePage * pageSize);
-
-  const groupedPage = useMemo(() => {
-    const groups: { day: string; label: string; jobs: any[] }[] = [];
-    for (const job of pageJobs) {
+  // Group the current page by the selected dimension.
+  const groups = useMemo(() => {
+    const keyOf = (job: any): { key: string; label: string } => {
+      if (groupBy === 'region') return { key: job.region || '—', label: `Region: ${job.region || '—'}` };
+      if (groupBy === 'status') return { key: job.status || '—', label: `Status: ${job.status || '—'}` };
+      if (groupBy === 'company') return { key: job.company || '—', label: job.company || '—' };
       const ts = job.submitted_at || job.approved_at || '';
-      const dk = dayKey(ts);
-      const last = groups[groups.length - 1];
-      if (last && last.day === dk) {
-        last.jobs.push(job);
-      } else {
-        groups.push({ day: dk, label: formatDay(ts), jobs: [job] });
-      }
+      return { key: etDateKey(ts), label: formatDay(ts) };
+    };
+    const out: { key: string; label: string; jobs: any[] }[] = [];
+    for (const job of jobs) {
+      const { key, label } = keyOf(job);
+      const last = out[out.length - 1];
+      if (last && last.key === key) last.jobs.push(job);
+      else out.push({ key, label, jobs: [job] });
     }
-    return groups;
-  }, [pageJobs]);
+    return out;
+  }, [jobs, groupBy]);
 
   async function handleCreate(keepOpen = false) {
-    const status = isAdmin ? 'approved' : 'pending';
+    // Manually-added jobs (by admins or job_adders) go live as approved.
+    const status = 'approved';
     const label = newJob.company || 'job';
     try {
       await createMutation.mutateAsync({ ...newJob, status });
       setNewJob({ ...BLANK_JOB });
-      if (keepOpen) {
-        toast(`Saved "${label}" — ready for the next one`, 'success');
-      } else {
-        setShowForm(false);
-        toast(`Saved "${label}"`, 'success');
-      }
+      if (keepOpen) toast(`Saved "${label}" — ready for the next one`, 'success');
+      else { setShowForm(false); toast(`Saved "${label}"`, 'success'); }
     } catch (e: any) {
       toast(formatJobError(e, 'Failed to save job'), 'error');
     }
   }
 
-  function startEdit(job: any) {
+  async function startEdit(job: any) {
     setEditingId(job.id);
-    setEditDraft({
-      company: job.company || '',
-      job_title: job.job_title || '',
-      link: job.link || '',
-      region: job.region || 'US',
-      description: job.description || '',
-      note: job.note || '',
-    });
+    // The list payload omits description/note — fetch the full row to edit.
+    try {
+      const full = await api.get<any>(`/api/jobs/${job.id}`);
+      setEditDraft({
+        company: full.company || '', job_title: full.job_title || '',
+        link: full.link || '', region: full.region || 'US',
+        description: full.description || '', note: full.note || '',
+      });
+    } catch {
+      setEditDraft({
+        company: job.company || '', job_title: job.job_title || '',
+        link: job.link || '', region: job.region || 'US', description: '', note: '',
+      });
+    }
   }
 
-  function goPage(n: number) {
-    setPage(Math.max(1, Math.min(n, totalPages)));
-    setEditingId(null);
-  }
+  function goPage(n: number) { setPage(Math.max(1, Math.min(n, totalPages))); setEditingId(null); }
 
-  if (isLoading) return <div><span className="spinner" /> Loading…</div>;
+  // "Today" resets dates to today (the default view); "all dates" clears them.
+  function resetToToday() {
+    setQuery(''); setRegionFilter(''); setCompanyFilter('');
+    setDateFrom(todayETKey()); setDateTo(todayETKey());
+  }
+  function showAllDates() { setDateFrom(''); setDateTo(''); }
+
+  const today = todayETKey();
+  const isTodayOnly = dateFrom === today && dateTo === today;
+  const hasExtraFilters = !!(regionFilter || companyFilter || query || !isTodayOnly);
 
   return (
     <div>
       {/* Header bar */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '0.5rem', flexWrap: 'wrap' }}>
         <h1 style={{ margin: 0 }}>Jobs</h1>
+        {isFetching && <span className="spinner" />}
         <div style={{ flex: 1 }} />
-        <input placeholder="Search company, title, or note…" value={query}
-          onChange={(e) => { setQuery(e.target.value); setPage(1); }}
-          style={{ maxWidth: 260 }} />
-        <select value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }} style={{ maxWidth: 160 }}>
+        <button
+          className="secondary"
+          onClick={() => syncMutation.mutate()}
+          disabled={syncMutation.isPending || !isAdmin}
+          title={isAdmin ? 'Fetch new jobs from the remote server now' : 'Only an admin can fetch new jobs'}>
+          {syncMutation.isPending ? <span className="spinner" /> : '⟳ Fetch new jobs'}
+        </button>
+        <button onClick={() => { setShowForm(!showForm); setNewJob({ ...BLANK_JOB }); }}>
+          {showForm ? 'Cancel' : '+ New Job'}
+        </button>
+      </div>
+
+      {/* Filter bar */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
+        <input placeholder="Search company or title…" value={query}
+          onChange={(e) => setQuery(e.target.value)} style={{ maxWidth: 220 }} />
+        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ maxWidth: 150 }}>
           <option value="">All statuses</option>
           <option value="approved">Approved</option>
           <option value="pending">Pending</option>
           <option value="rejected">Rejected</option>
           <option value="deleted">Deleted</option>
         </select>
-        <button onClick={() => { setShowForm(!showForm); setNewJob({ ...BLANK_JOB }); }}>
-          {showForm ? 'Cancel' : '+ New Job'}
-        </button>
+        <select value={regionFilter} onChange={(e) => setRegionFilter(e.target.value)} style={{ maxWidth: 120 }}>
+          <option value="">All regions</option>
+          <option value="US">US</option><option value="EU">EU</option>
+          <option value="ASIA">ASIA</option><option value="GLOBAL">GLOBAL</option>
+        </select>
+        <input placeholder="Company (exact)" value={companyFilter}
+          onChange={(e) => setCompanyFilter(e.target.value)} style={{ maxWidth: 160 }} />
+        <label style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>From</label>
+        <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} style={{ maxWidth: 150 }} title="ET date" />
+        <label style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>To</label>
+        <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} style={{ maxWidth: 150 }} title="ET date" />
+        <button className={isTodayOnly ? '' : 'secondary'} onClick={resetToToday}
+          style={{ fontSize: '0.82rem' }} title="Show only today's jobs (ET)">Today</button>
+        {(dateFrom || dateTo) && (
+          <button className="secondary" onClick={showAllDates} style={{ fontSize: '0.82rem' }} title="Remove the date filter">All dates</button>
+        )}
+        <label style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>Group by</label>
+        <select value={groupBy} onChange={(e) => setGroupBy(e.target.value as GroupBy)} style={{ maxWidth: 120 }}>
+          <option value="day">Day</option>
+          <option value="region">Region</option>
+          <option value="status">Status</option>
+          <option value="company">Company</option>
+        </select>
+        {hasExtraFilters && (
+          <button className="secondary" onClick={resetToToday} style={{ fontSize: '0.82rem' }}>Clear filters</button>
+        )}
+        <label style={{
+          display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: '0.85rem',
+          marginLeft: 'auto', cursor: 'pointer',
+          color: reportedOnly ? 'var(--danger, #dc2626)' : 'var(--text)', fontWeight: reportedOnly ? 700 : 400,
+        }}>
+          <input type="checkbox" checked={reportedOnly} onChange={(e) => setReportedOnly(e.target.checked)} />
+          ⚑ Reported only
+        </label>
       </div>
 
       {/* Status counts */}
       <div style={{ display: 'flex', gap: '1rem', marginBottom: '1rem', flexWrap: 'wrap', fontSize: '0.88rem' }}>
         {(['approved', 'pending', 'rejected', 'deleted'] as const).map((s) => (
-          <span key={s} style={{ cursor: 'pointer' }} onClick={() => { setStatusFilter(s); setPage(1); }}>
+          <span key={s} style={{ cursor: 'pointer' }} onClick={() => setStatusFilter(s)}>
             <span className={`pill ${s}`}>{s}</span>
-            <strong style={{ marginLeft: 4 }}>{counts[s]}</strong>
+            <strong style={{ marginLeft: 4 }}>{counts[s] ?? 0}</strong>
           </span>
         ))}
-        <span className="muted">/ {counts.total} total</span>
+        <span className="muted">/ {counts.total ?? 0} match{(counts.total ?? 0) === 1 ? '' : 'es'} filters</span>
       </div>
 
       {/* Add job form */}
@@ -214,14 +302,10 @@ export default function Jobs() {
               placeholder={'Why are you a strong fit for this role?\nTell us about your most relevant experience.\nWhy do you want to work here?'} />
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <button
-              onClick={() => handleCreate(false)}
-              disabled={!newJob.company || !newJob.job_title || createMutation.isPending}>
+            <button onClick={() => handleCreate(false)} disabled={!newJob.company || !newJob.job_title || createMutation.isPending}>
               {createMutation.isPending ? <span className="spinner" /> : 'Save'}
             </button>
-            <button
-              className="secondary"
-              onClick={() => handleCreate(true)}
+            <button className="secondary" onClick={() => handleCreate(true)}
               disabled={!newJob.company || !newJob.job_title || createMutation.isPending}
               title="Save this job and keep the form open for the next one">
               {createMutation.isPending ? <span className="spinner" /> : 'Save & Add Another'}
@@ -231,80 +315,75 @@ export default function Jobs() {
         </div>
       )}
 
-      {/* Pagination controls — top */}
-      {filtered.length > 0 && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: '0.75rem', flexWrap: 'wrap' }}>
-          {totalPages > 1 && (
-            <>
-              <button className="secondary" disabled={safePage === 1} onClick={() => goPage(safePage - 1)}>← Prev</button>
-              <span className="muted" style={{ fontSize: '0.9rem' }}>Page {safePage} of {totalPages}</span>
-              <button className="secondary" disabled={safePage === totalPages} onClick={() => goPage(safePage + 1)}>Next →</button>
-            </>
-          )}
-          <span className="muted" style={{ fontSize: '0.85rem', marginLeft: totalPages > 1 ? 8 : 0 }}>
-            {filtered.length} job{filtered.length === 1 ? '' : 's'} total
-          </span>
-          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span className="muted" style={{ fontSize: '0.8rem' }}>Rows</span>
-            <select value={pageSize}
-              onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}
-              style={{ width: 'auto', padding: '0.3rem 0.5rem', fontSize: '0.85rem' }}>
-              {PAGE_SIZE_OPTIONS.map((n) => <option key={n} value={n}>{n}</option>)}
-            </select>
-          </div>
+      {/* Pagination — top */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: '0.75rem', flexWrap: 'wrap' }}>
+        {totalPages > 1 && (
+          <>
+            <button className="secondary" disabled={safePage === 1} onClick={() => goPage(safePage - 1)}>← Prev</button>
+            <span className="muted" style={{ fontSize: '0.9rem' }}>Page {safePage} of {totalPages}</span>
+            <button className="secondary" disabled={safePage === totalPages} onClick={() => goPage(safePage + 1)}>Next →</button>
+          </>
+        )}
+        <span className="muted" style={{ fontSize: '0.85rem', marginLeft: totalPages > 1 ? 8 : 0 }}>
+          {total} job{total === 1 ? '' : 's'} total
+        </span>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span className="muted" style={{ fontSize: '0.8rem' }}>Rows</span>
+          <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}
+            style={{ width: 'auto', padding: '0.3rem 0.5rem', fontSize: '0.85rem' }}>
+            {PAGE_SIZE_OPTIONS.map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
         </div>
-      )}
+      </div>
 
-      {/* Jobs — single table with day separator rows */}
-      {filtered.length === 0 ? (
+      {/* Jobs table with group separator rows */}
+      {isLoading ? (
+        <div><span className="spinner" /> Loading…</div>
+      ) : jobs.length === 0 ? (
         <div className="card"><span className="muted">No jobs match the current filters.</span></div>
       ) : (
         <table>
           <thead>
             <tr>
-              <th>Company</th>
-              <th>Job title</th>
-              <th>Region</th>
-              <th>Status</th>
+              <th>Company</th><th>Job title</th><th>Region</th><th>Status</th>
               <th style={{ whiteSpace: 'nowrap' }}>AddedAt</th>
+              {isAdmin && <th style={{ whiteSpace: 'nowrap' }}>Added by</th>}
               {isAdmin && <th></th>}
             </tr>
           </thead>
           <tbody>
-            {groupedPage.map((group) => (
-              <React.Fragment key={group.day}>
+            {groups.map((group) => (
+              <React.Fragment key={group.key}>
                 <tr>
-                  <td colSpan={isAdmin ? 6 : 5} style={{
-                    padding: '0.5rem 0.75rem',
-                    fontWeight: 600,
-                    fontSize: '0.85rem',
-                    color: 'var(--muted)',
-                    background: 'var(--panel-2)',
-                    borderTop: '2px solid var(--border)',
+                  <td colSpan={isAdmin ? 7 : 5} style={{
+                    padding: '0.5rem 0.75rem', fontWeight: 600, fontSize: '0.85rem',
+                    color: 'var(--muted)', background: 'var(--panel-2)', borderTop: '2px solid var(--border)',
                   }}>
                     {group.label} — {group.jobs.length} {group.jobs.length === 1 ? 'job' : 'jobs'}
                   </td>
                 </tr>
                 {group.jobs.map((job) => (
                   <React.Fragment key={job.id}>
-                    <tr>
-                      <td>{job.company}</td>
+                    <tr style={job.flagged ? { background: 'rgba(220,38,38,0.06)' } : undefined}>
                       <td>
-                        {job.link
-                          ? <a href={job.link} target="_blank" rel="noreferrer">{job.job_title}</a>
-                          : job.job_title}
+                        {job.flagged && (
+                          <span title={`Reported ${job.reports_count}×`} style={{ color: 'var(--danger,#dc2626)', marginRight: 5 }}>⚑</span>
+                        )}
+                        {job.company}
                       </td>
+                      <td>{job.link ? <a href={job.link} target="_blank" rel="noreferrer">{job.job_title}</a> : job.job_title}</td>
                       <td>{job.region}</td>
                       <td><span className={`pill ${job.status}`}>{job.status}</span></td>
-                      <td style={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }}>
-                        {formatDate(job.submitted_at || job.approved_at)}
-                      </td>
+                      <td style={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }}>{formatDate(job.submitted_at || job.approved_at)}</td>
+                      {isAdmin && (
+                        <td style={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }}>
+                          {job.created_by_username || (job.source === 'sync' ? <span className="muted">Sync</span> : <span className="muted">—</span>)}
+                        </td>
+                      )}
                       {isAdmin && (
                         <td style={{ whiteSpace: 'nowrap' }}>
                           <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                            <select
-                              value={job.status}
-                              disabled={updateMutation.isPending}
+                            <select value={job.status} disabled={updateMutation.isPending}
                               onChange={(e) => {
                                 const next = e.target.value;
                                 if (next === 'deleted' && !confirm(`Mark "${job.company} — ${job.job_title}" as deleted? It will be permanently hidden and never re-synced.`)) return;
@@ -316,17 +395,53 @@ export default function Jobs() {
                               <option value="rejected">rejected</option>
                               <option value="deleted">deleted</option>
                             </select>
-                            <button className="secondary"
-                              onClick={() => editingId === job.id ? setEditingId(null) : startEdit(job)}>
+                            <button className="secondary" onClick={() => editingId === job.id ? setEditingId(null) : startEdit(job)}>
                               {editingId === job.id ? 'Cancel' : 'Edit'}
                             </button>
                           </div>
                         </td>
                       )}
                     </tr>
+                    {job.flagged && (job.reports?.length || 0) > 0 && (
+                      <tr>
+                        <td colSpan={isAdmin ? 7 : 5} style={{ padding: '0.75rem 1rem', background: 'rgba(220,38,38,0.06)', borderBottom: '1px solid var(--border)' }}>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: 12 }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--danger,#dc2626)', marginBottom: 4 }}>
+                                ⚑ Reported {job.reports_count}× — pending review
+                              </div>
+                              {(job.reports || []).map((r: any, i: number) => (
+                                <div key={i} style={{ fontSize: '0.83rem', marginBottom: 2 }}>
+                                  “{r.reason}”
+                                  <span className="muted" style={{ marginLeft: 6, fontSize: '0.78rem' }}>
+                                    — {r.reported_by_username || 'unknown'}{r.reported_at ? ` · ${etDateShort(r.reported_at)}` : ''}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                            {canReview && (
+                              <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                                <button className="secondary"
+                                  disabled={clearReportMutation.isPending}
+                                  title="Dismiss reports — job returns to Resumes/Apply"
+                                  onClick={() => clearReportMutation.mutate(job.id)}>
+                                  ✓ Dismiss reports
+                                </button>
+                                <button className="danger"
+                                  disabled={updateMutation.isPending}
+                                  title="Reject the job — keeps it out of circulation"
+                                  onClick={() => updateMutation.mutate({ id: job.id, payload: { status: 'rejected' } })}>
+                                  Reject job
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
                     {editingId === job.id && (
                       <tr>
-                        <td colSpan={isAdmin ? 6 : 5} style={{ padding: '1rem', background: 'var(--panel-2)' }}>
+                        <td colSpan={isAdmin ? 7 : 5} style={{ padding: '1rem', background: 'var(--panel-2)' }}>
                           <div className="row">
                             <div className="field"><label>Company</label><input value={editDraft.company} onChange={(e) => setEditDraft({ ...editDraft, company: e.target.value })} /></div>
                             <div className="field"><label>Job title</label><input value={editDraft.job_title} onChange={(e) => setEditDraft({ ...editDraft, job_title: e.target.value })} /></div>
@@ -349,6 +464,8 @@ export default function Jobs() {
                               {updateMutation.isPending ? <span className="spinner" /> : 'Save changes'}
                             </button>
                             <button className="secondary" onClick={() => setEditingId(null)}>Cancel</button>
+                            <div style={{ flex: 1 }} />
+                            <button className="danger" onClick={() => { if (confirm('Delete this job?')) deleteMutation.mutate(job.id); }}>Delete</button>
                           </div>
                         </td>
                       </tr>
@@ -361,7 +478,7 @@ export default function Jobs() {
         </table>
       )}
 
-      {/* Pagination controls — bottom */}
+      {/* Pagination — bottom */}
       {totalPages > 1 && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: '1rem' }}>
           <button className="secondary" disabled={safePage === 1} onClick={() => goPage(safePage - 1)}>← Prev</button>

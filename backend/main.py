@@ -30,14 +30,27 @@ from routers import resumes as resumes_router
 from routers import settings as settings_router
 from routers import todo as todo_router
 from routers import users as users_router
+from routers import screenshots as screenshots_router
+from routers import extension as extension_router
+from routers import guide as guide_router
+from routers import external as external_router
 
 FRONTEND_DIST = PROJECT_ROOT.parent / "frontend" / "dist"
 
 app = FastAPI(title="TailorResume API", version="2.0.0")
 
+# CORS: the web app is same-origin via nginx; the Chrome extension calls the API
+# cross-origin from a chrome-extension:// origin. We allow the site origin plus
+# any chrome-extension:// origin (matched by regex) instead of a blanket "*",
+# which is incompatible with allow_credentials.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # nginx serves same-origin in prod; CORS open for local dev
+    allow_origins=[
+        "https://tailorresume.duckdns.org",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    allow_origin_regex=r"^chrome-extension://[a-z]+$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -53,6 +66,10 @@ app.include_router(settings_router.router)
 app.include_router(todo_router.router)
 app.include_router(metrics_router.router)
 app.include_router(devices_router.router)
+app.include_router(screenshots_router.router)
+app.include_router(extension_router.router)
+app.include_router(guide_router.router)
+app.include_router(external_router.router)
 
 
 @app.get("/api/health")

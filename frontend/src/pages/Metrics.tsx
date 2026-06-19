@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
-import { useAuth } from '../lib/auth';
+import { useAuth, hasRole } from '../lib/auth';
 
 type Cell = { applied: number; total: number };
 type Row = {
@@ -13,12 +13,16 @@ type Row = {
   week: Cell;
   lifetime: Cell;
 };
+type JobCell = { uploaded: number; approved: number; rejected: number };
+type JobRow = { user_id: string; username: string; daily: JobCell[]; week: JobCell; lifetime: JobCell };
 type MetricsResponse = {
   week_start: string;
   week_end: string;
   days: string[];
   rows: Row[];
   totals?: { daily: Cell[]; week: Cell; lifetime: Cell };
+  job_rows?: JobRow[];
+  job_totals?: { daily: JobCell[]; week: JobCell; lifetime: JobCell };
 };
 
 /** Parse a YYYY-MM-DD string as LOCAL midnight (NOT UTC midnight).
@@ -43,7 +47,11 @@ function isoMonday(d: Date): string {
 }
 
 function todayIsoMonday(): string {
-  return isoMonday(new Date());
+  // Anchor on today's ET date (the calendar the whole app uses), not the
+  // browser's local date — so the week is correct regardless of viewer TZ.
+  const etToday = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const [y, m, d] = etToday.split('-').map(Number);
+  return isoMonday(new Date(y, m - 1, d));
 }
 
 function shiftWeek(weekStart: string, deltaDays: number): string {
@@ -53,11 +61,19 @@ function shiftWeek(weekStart: string, deltaDays: number): string {
 }
 
 function shortDay(iso: string): string {
-  return parseLocalDate(iso).toLocaleDateString('en-US', { weekday: 'short', day: 'numeric' });
+  // Anchor the date at noon ET so rendering in ET can't slip to the previous
+  // calendar day for browsers in PT.
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d, 17));  // 17:00 UTC == 12pm-1pm ET
+  return dt.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short', day: 'numeric' });
 }
 
 function formatRange(start: string, end: string): string {
-  const fmt = (s: string) => parseLocalDate(s).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  const fmt = (s: string) => {
+    const [y, m, d] = s.split('-').map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d, 17));
+    return dt.toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric' });
+  };
   return `${fmt(start)} – ${fmt(end)}`;
 }
 
@@ -67,6 +83,17 @@ function CellView({ cell }: { cell: Cell }) {
     <span style={{ fontVariantNumeric: 'tabular-nums', color: empty ? 'var(--muted)' : 'var(--text-soft)' }}>
       <strong style={{ color: cell.applied > 0 ? 'var(--text)' : 'var(--muted)' }}>{cell.applied}</strong>
       <span style={{ color: 'var(--muted)' }}> / {cell.total}</span>
+    </span>
+  );
+}
+
+function JobCellView({ cell }: { cell: JobCell }) {
+  const empty = cell.uploaded === 0;
+  return (
+    <span style={{ fontVariantNumeric: 'tabular-nums' }}>
+      <strong style={{ color: empty ? 'var(--muted)' : 'var(--text)' }}>{cell.uploaded}</strong>
+      {cell.approved > 0 && <span style={{ color: '#16a34a', marginLeft: 4 }}>✓{cell.approved}</span>}
+      {cell.rejected > 0 && <span style={{ color: '#dc2626', marginLeft: 4 }}>✗{cell.rejected}</span>}
     </span>
   );
 }
@@ -96,6 +123,11 @@ function aggregateAcrossRows(arrays: Cell[][]): Cell[] {
 export default function Metrics() {
   const { user } = useAuth();
   const isAdmin = !!user?.is_admin;
+  // Which metric sets this user can see. A dual-role user (bidder + job_adder)
+  // and admins see BOTH; others see only the one matching their role.
+  const canSeeApps = isAdmin || hasRole(user, 'bidder');
+  const canSeeJobs = isAdmin || hasRole(user, 'job_adder');
+  const [view, setView] = useState<'apps' | 'jobs'>(canSeeApps ? 'apps' : 'jobs');
   const [weekStart, setWeekStart] = useState<string>(todayIsoMonday());
 
   const { data, isLoading, isFetching } = useQuery({
@@ -116,6 +148,7 @@ export default function Metrics() {
     return [...m.values()];
   }, [data]);
 
+  const jobRows = data?.job_rows || [];
   const isCurrentWeek = weekStart === todayIsoMonday();
 
   if (isLoading) return <div><span className="spinner" /> Loading metrics…</div>;
@@ -147,11 +180,32 @@ export default function Metrics() {
           This week
         </button>
         <span className="muted" style={{ fontSize: '0.82rem', marginLeft: 'auto' }}>
-          Each cell = applied / total To-Do {isFetching && <><span className="spinner" /></>}
+          {view === 'apps'
+            ? 'Each cell = applied / total To-Do'
+            : 'Each cell = uploaded ( ✓ approved · ✗ rejected )'}
+          {isFetching && <> <span className="spinner" /></>}
         </span>
       </div>
 
-      {/* Table */}
+      {/* Applications / Job uploads switch — only when the user can see both */}
+      {canSeeApps && canSeeJobs && (
+        <div style={{ display: 'flex', gap: 4, marginBottom: '1rem', borderBottom: '1px solid var(--border)' }}>
+          {([['apps', '📨 Applications'], ['jobs', '📥 Job uploads']] as const).map(([k, label]) => (
+            <button key={k} onClick={() => setView(k)}
+              style={{
+                background: 'transparent', border: 'none', borderRadius: 0,
+                borderBottom: `2px solid ${view === k ? 'var(--accent, #2563eb)' : 'transparent'}`,
+                color: view === k ? 'var(--text)' : 'var(--muted)',
+                fontWeight: view === k ? 700 : 400, padding: '8px 16px', fontSize: '0.95rem',
+              }}>
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Applications table */}
+      {view === 'apps' && canSeeApps && (
       <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
         <table className="metrics-table">
           <thead>
@@ -160,13 +214,12 @@ export default function Metrics() {
               <th>Profile</th>
               {data.days.map((d) => <th key={d} style={{ textAlign: 'center' }}>{shortDay(d)}</th>)}
               <th style={{ textAlign: 'center' }}>This Week</th>
-              <th style={{ textAlign: 'center' }}>Lifetime</th>
             </tr>
           </thead>
           <tbody>
             {groups.length === 0 ? (
               <tr>
-                <td colSpan={(isAdmin ? 2 : 1) + data.days.length + 2}
+                <td colSpan={(isAdmin ? 2 : 1) + data.days.length + 1}
                   style={{ padding: '1.5rem', textAlign: 'center' }}>
                   <span className="muted">
                     {isAdmin
@@ -181,7 +234,6 @@ export default function Metrics() {
                 const userRowSpan = g.rows.length + (showSubtotal ? 1 : 0);
                 const subtotalDaily = aggregateAcrossRows(g.rows.map((r) => r.daily));
                 const subtotalWeek = sumApplied(g.rows.map((r) => r.week));
-                const subtotalLifetime = sumApplied(g.rows.map((r) => r.lifetime));
                 return (
                   <>
                     {g.rows.map((r, idx) => (
@@ -196,7 +248,6 @@ export default function Metrics() {
                           <td key={i} style={{ textAlign: 'center' }}><CellView cell={c} /></td>
                         ))}
                         <td style={{ textAlign: 'center' }}><CellView cell={r.week} /></td>
-                        <td style={{ textAlign: 'center' }}><CellView cell={r.lifetime} /></td>
                       </tr>
                     ))}
                     {showSubtotal && (
@@ -206,7 +257,6 @@ export default function Metrics() {
                           <td key={i} style={{ textAlign: 'center' }}><CellView cell={c} /></td>
                         ))}
                         <td style={{ textAlign: 'center' }}><CellView cell={subtotalWeek} /></td>
-                        <td style={{ textAlign: 'center' }}><CellView cell={subtotalLifetime} /></td>
                       </tr>
                     )}
                   </>
@@ -222,12 +272,61 @@ export default function Metrics() {
                   <td key={i} style={{ textAlign: 'center' }}><CellView cell={c} /></td>
                 ))}
                 <td style={{ textAlign: 'center' }}><CellView cell={data.totals.week} /></td>
-                <td style={{ textAlign: 'center' }}><CellView cell={data.totals.lifetime} /></td>
               </tr>
             </tfoot>
           )}
         </table>
       </div>
+      )}
+
+      {/* Job-uploads table */}
+      {view === 'jobs' && canSeeJobs && (
+      <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
+        <table className="metrics-table">
+          <thead>
+            <tr>
+              {isAdmin && <th>User</th>}
+              {data.days.map((d) => <th key={d} style={{ textAlign: 'center' }}>{shortDay(d)}</th>)}
+              <th style={{ textAlign: 'center' }}>This Week</th>
+              <th style={{ textAlign: 'center' }}>All-time</th>
+            </tr>
+          </thead>
+          <tbody>
+            {jobRows.length === 0 ? (
+              <tr>
+                <td colSpan={(isAdmin ? 1 : 0) + data.days.length + 2}
+                  style={{ padding: '1.5rem', textAlign: 'center' }}>
+                  <span className="muted">No job uploads in this week.</span>
+                </td>
+              </tr>
+            ) : (
+              jobRows.map((r) => (
+                <tr key={r.user_id}>
+                  {isAdmin && <td className="metrics-user-cell">{r.username}</td>}
+                  {r.daily.map((c, i) => (
+                    <td key={i} style={{ textAlign: 'center' }}><JobCellView cell={c} /></td>
+                  ))}
+                  <td style={{ textAlign: 'center' }}><JobCellView cell={r.week} /></td>
+                  <td style={{ textAlign: 'center' }}><JobCellView cell={r.lifetime} /></td>
+                </tr>
+              ))
+            )}
+          </tbody>
+          {isAdmin && data.job_totals && jobRows.length > 0 && (
+            <tfoot>
+              <tr className="metrics-grand-total">
+                <td><strong>GRAND TOTAL</strong></td>
+                {data.job_totals.daily.map((c, i) => (
+                  <td key={i} style={{ textAlign: 'center' }}><JobCellView cell={c} /></td>
+                ))}
+                <td style={{ textAlign: 'center' }}><JobCellView cell={data.job_totals.week} /></td>
+                <td style={{ textAlign: 'center' }}><JobCellView cell={data.job_totals.lifetime} /></td>
+              </tr>
+            </tfoot>
+          )}
+        </table>
+      </div>
+      )}
     </div>
   );
 }

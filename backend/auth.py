@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import jwt
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from core.devices import DeviceStore
@@ -81,7 +81,30 @@ def get_current_user(
     return user
 
 
+def _user_roles(user: dict) -> set[str]:
+    roles = user.get("roles") or []
+    return {str(r).strip() for r in roles if str(r).strip()}
+
+
+def has_role(user: dict, *roles: str) -> bool:
+    """True if user holds ANY of the given roles."""
+    user_set = _user_roles(user)
+    return any(r in user_set for r in roles)
+
+
 def require_admin(user: dict = Depends(get_current_user)) -> dict:
-    if not user.get("is_admin"):
+    if "admin" not in _user_roles(user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin only")
     return user
+
+
+def require_role(*roles: str):
+    """FastAPI dependency factory: require ANY of the listed roles."""
+    def _check(user: dict = Depends(get_current_user)) -> dict:
+        if not has_role(user, *roles):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Requires one of: {', '.join(roles)}",
+            )
+        return user
+    return _check

@@ -16,10 +16,11 @@ Mutations
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from auth import get_current_user, storage
+from routers.resumes import _is_recent_job, _is_recent_resume, deadline_hours
 
 router = APIRouter(prefix="/api/todo", tags=["todo"])
 
@@ -27,6 +28,19 @@ router = APIRouter(prefix="/api/todo", tags=["todo"])
 def _regions_match(job_region: str, profile_region: str) -> bool:
     """A job is relevant to a profile when either side is ANY, or they match."""
     return "ANY" in (job_region, profile_region) or job_region == profile_region
+
+
+def _resume_applyable(resume: dict, job: dict | None, *, hours: int) -> bool:
+    """True if a generated resume should still appear in the Apply queue:
+      • its job exists and has NOT been reported/flagged (or admin-applied), AND
+      • the RESUME was generated within the deadline window.
+    Keyed on resume generation time (not job age), so a freshly-generated
+    resume stays applyable even if its job just crossed the deadline."""
+    if not job:
+        return False
+    if job.get("flagged") or job.get("admin_applied"):
+        return False
+    return _is_recent_resume(resume, hours=hours)
 
 
 def _utcnow() -> str:
@@ -61,9 +75,17 @@ def _resume_status_index(profile_id: str) -> dict[str, dict]:
 
 
 @router.get("")
-def get_todo(profile_id: str = "", user: dict = Depends(get_current_user)):
+def get_todo(
+    profile_id: str = "",
+    for_: str = Query("apply", alias="for"),
+    user: dict = Depends(get_current_user),
+):
     is_admin = bool(user.get("is_admin"))
     role = "admin" if is_admin else "bidder"
+    # `for_` selects which tab's count the caller wants on the overview:
+    #   • "apply"  (default) — pending applies (bidder) or pending generations (admin)
+    #   • "resumes"           — pending generations for both roles
+    want_resumes_count = str(for_).strip().lower() == "resumes"
 
     profiles = storage.get_profiles()
     if not is_admin:
@@ -71,16 +93,21 @@ def get_todo(profile_id: str = "", user: dict = Depends(get_current_user)):
         profiles = [p for p in profiles if p.get("id") in allowed]
 
     if not profile_id:
-        # Decorate each profile with a role-appropriate `pending_count`:
-        #   • admin:  approved jobs not yet generated/skipped for the profile
-        #   • bidder: generated resumes for the profile not yet marked applied
+        # Decorate each profile with the tab-appropriate `pending_count` —
+        # SAME formula for admin and bidder, keyed only on which tab asked:
+        #   • Resumes tab (for=resumes): approved recent jobs not yet generated
+        #   • Apply tab   (for=apply):   generated resumes not yet applied
         decorated: list[dict] = []
-        if is_admin:
+        dh = deadline_hours()
+        if want_resumes_count:
+            # "To generate" — approved recent jobs without a generated/skipped
+            # record for the profile.
             approved_jobs = [
                 j for j in storage.get_jobs()
                 if j.get("status") == "approved"
                 and not j.get("flagged")
                 and not j.get("admin_applied")
+                and _is_recent_job(j, hours=dh)
             ]
             processed_by_profile: dict[str, set[str]] = {}
             for r in storage.get_generated_resumes():
@@ -97,11 +124,17 @@ def get_todo(profile_id: str = "", user: dict = Depends(get_current_user)):
                 processed = processed_by_profile.get(p.get("id", ""), set())
                 decorated.append({**p, "pending_count": len(matched_ids - processed)})
         else:
+            # Apply tab — count of generated resumes per profile that are still
+            # pending apply (recent, non-reported job). Same for admin and bidder.
+            jobs_by_id = {j.get("id"): j for j in storage.get_jobs() if j.get("id")}
             pending_by_profile: dict[str, int] = {}
             for r in storage.get_generated_resumes():
                 if r.get("status") != "generated":
                     continue
                 if r.get("applied_status") == "applied":
+                    continue
+                job = jobs_by_id.get(r.get("job_id") or "")
+                if not _resume_applyable(r, job, hours=dh):
                     continue
                 pid = r.get("profile_id") or ""
                 if pid:
@@ -112,40 +145,17 @@ def get_todo(profile_id: str = "", user: dict = Depends(get_current_user)):
 
     _profile_or_403(user, profile_id)
 
-    if is_admin:
-        profile = next((p for p in profiles if p.get("id") == profile_id), {})
-        p_region = str(profile.get("region") or "ANY").upper()
-        index = _resume_status_index(profile_id)
-        result = []
-        for job in storage.get_jobs():
-            if job.get("status") != "approved":
-                continue
-            if job.get("flagged") or job.get("admin_applied"):
-                continue
-            if not _regions_match(str(job.get("region") or "ANY").upper(), p_region):
-                continue
-            jid = job.get("id", "")
-            record = index.get(jid)
-            if record:
-                proc_status = record.get("status") or "generated"
-                saved_resume_id = record.get("saved_resume_id", "")
-            else:
-                proc_status = "pending"
-                saved_resume_id = ""
-            result.append({
-                **job,
-                "processing_status": proc_status,
-                "saved_resume_id": saved_resume_id,
-            })
-        result.sort(key=lambda j: j.get("submitted_at") or "", reverse=True)
-        return {"role": role, "profiles": profiles, "jobs": result}
-
-    # Bidder — return all generated resumes for this profile (pending + applied).
-    # Frontend chip-filters by applied_status.
+    # Per-profile Apply view — generated resumes for this profile that were
+    # generated within the deadline window AND whose job isn't reported/flagged.
+    # Keyed on resume generation time, so just-made resumes stay applyable.
+    # Same for admin and bidder. Frontend chip-filters by applied_status.
+    dh = deadline_hours()
+    jobs_by_id = {j.get("id"): j for j in storage.get_jobs() if j.get("id")}
     resumes = [
         r for r in storage.get_generated_resumes()
         if r.get("profile_id") == profile_id
         and r.get("status") == "generated"
+        and _resume_applyable(r, jobs_by_id.get(r.get("job_id") or ""), hours=dh)
     ]
     # Sort: pending first (urgent), then applied; within each group newest first.
     # Python's sort is stable — apply secondary key first, then primary.

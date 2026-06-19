@@ -424,6 +424,22 @@ def _delete_paragraph(paragraph: Paragraph) -> None:
         parent.remove(paragraph._element)
 
 
+def _copy_paragraph_format_from(target: Paragraph, source: Paragraph) -> None:
+    """Replace target's pPr with a deep copy of source's pPr.
+
+    This is used to normalize formatting (including the paragraph-mark rPr
+    that controls list-bullet glyph rendering) across paragraphs that should
+    share the same style — e.g. all bullets within one company.
+    """
+    src_ppr = source._p.pPr
+    if src_ppr is None:
+        return
+    tgt_ppr = target._p.pPr
+    if tgt_ppr is not None:
+        target._p.remove(tgt_ppr)
+    target._p.insert(0, deepcopy(src_ppr))
+
+
 def _is_decorative_or_blank_paragraph(paragraph: Paragraph) -> bool:
     text = (paragraph.text or "").strip()
     if not text:
@@ -461,11 +477,37 @@ def _is_section_heading(paragraph: Paragraph) -> bool:
     return bool(text) and "heading" in style_name and len(text.split()) <= 4
 
 
+# Keyword fallback when a heading doesn't exactly match a known alias — e.g.
+# "WORKING EXPERIENCE", "EDUCATION SUMMARY", or a typo like "PROFESSONAL
+# SUMMARY". Ordered so a multi-keyword heading resolves to the MORE SPECIFIC
+# section first ("education summary" -> education, not summary).
+_SECTION_KEYWORDS = [
+    ("experience", ("experience", "employment", "work history")),
+    ("education", ("education", "academic")),
+    ("skills", ("skills", "competenc", "technolog", "tech stack")),
+    ("projects", ("projects",)),
+    ("certifications", ("certificat", "licens")),
+    ("summary", ("summary", "profile", "about")),
+]
+
+
 def _section_name(paragraph: Paragraph) -> str:
     text = _normalized_heading_text(paragraph)
+    if not text:
+        return ""
+    # 1) exact alias match (most reliable)
     for key, aliases in SECTION_ALIASES.items():
         if text in aliases:
             return key
+    # 2) keyword fallback for non-standard / misspelled headings — but ONLY on
+    # heading-styled short paragraphs, so body text that merely contains a
+    # keyword (e.g. "...10 years of experience...") is never mistaken for a
+    # section heading.
+    style_name = str(getattr(paragraph.style, "name", "") or "").lower()
+    if "heading" in style_name and len(text.split()) <= 4:
+        for key, keywords in _SECTION_KEYWORDS:
+            if any(kw in text for kw in keywords):
+                return key
     return ""
 
 
@@ -587,6 +629,61 @@ def _set_keep_lines(paragraph: Paragraph) -> None:
             ppr.append(OxmlElement("w:keepLines"))
     except Exception:
         pass
+
+
+def _set_keep_next(paragraph: Paragraph, on: bool) -> None:
+    """Set/clear w:keepNext, inserting it in schema-correct position.
+
+    OOXML requires keepNext to appear immediately after pStyle in pPr;
+    appending it elsewhere makes LibreOffice silently ignore it.
+    """
+    try:
+        ppr = paragraph._p.get_or_add_pPr()
+        for el in ppr.findall(qn("w:keepNext")):  # type: ignore[call-arg]
+            ppr.remove(el)
+        if on:
+            kn = OxmlElement("w:keepNext")
+            pstyle = ppr.find(qn("w:pStyle"))  # type: ignore[call-arg]
+            if pstyle is not None:
+                pstyle.addnext(kn)
+            else:
+                ppr.insert(0, kn)
+    except Exception:
+        pass
+
+
+def _fix_experience_keep_next(doc: Document) -> None:
+    """Prevent orphaned company headers in the experience section.
+
+    The source templates set w:keepNext on every experience paragraph
+    (headers AND bullets). That makes the whole multi-page section one
+    unsatisfiable "keep together" chain, so LibreOffice ignores it and breaks
+    at an arbitrary point — sometimes right after a company header, leaving
+    the header alone at the bottom of a page with its bullets on the next.
+
+    Fix: bond each company header only to its first bullet. We set keepNext on
+    the header/role lines (and any spacer paragraphs up to the first bullet)
+    and strip keepNext from the bullets. LibreOffice can satisfy these small
+    bonds, so a header that doesn't fit with its bullets moves — together with
+    them — to the next page, leaving white space behind.
+    """
+    body = _paragraphs_between_sections(doc, "experience")
+    if not body:
+        return
+    in_header_region = False
+    for paragraph in body:
+        text = (paragraph.text or "").strip()
+        if not text:
+            # Spacer: keep it bonded forward only while we're between a header
+            # and its first bullet, so the header chains through to the bullet.
+            _set_keep_next(paragraph, in_header_region)
+            continue
+        if _looks_like_job_meta_line(paragraph) or _looks_like_role_title_line(paragraph):
+            _set_keep_next(paragraph, True)
+            in_header_region = True
+        elif _paragraph_looks_like_bullet_content(paragraph):
+            _set_keep_next(paragraph, False)
+            in_header_region = False
 
 
 def _remove_existing_tabs(ppr) -> None:
@@ -931,17 +1028,47 @@ def _replace_experience_bullets_and_titles(doc: Document, resume: dict) -> bool:
     changed = False
     keywords = _technical_skill_keywords(resume)
 
+    # Split bullet groups at JOB-META-LINE boundaries (company | location | dates)
+    # rather than at any non-bullet paragraph. The previous "break on any
+    # non-bullet" rule was fragile: any single template paragraph in the middle
+    # of a company's bullets that happened to fail _paragraph_looks_like_bullet_content
+    # (e.g. a stray tab character, a 5-word line ending in ':', a role-title-ish
+    # rewrite) would silently split that company's bullets into two groups, and
+    # the second half would then be assigned to the NEXT company — losing
+    # bullets. Anchoring on the meta line (which is the only reliable "new
+    # company starts here" signal) matches how humans read the section.
     bullet_groups: list[list[Paragraph]] = []
     current_group: list[Paragraph] = []
+    seen_first_meta = False
     for paragraph in body:
-        if _paragraph_looks_like_bullet_content(paragraph):
-            current_group.append(paragraph)
-        else:
+        if _looks_like_job_meta_line(paragraph):
             if current_group:
                 bullet_groups.append(current_group)
                 current_group = []
+            seen_first_meta = True
+            continue
+        if not seen_first_meta:
+            # Skip any template preamble that appears before the first company.
+            continue
+        if _paragraph_looks_like_bullet_content(paragraph):
+            current_group.append(paragraph)
     if current_group:
         bullet_groups.append(current_group)
+
+    # Fallback: if no meta lines were detected (older templates), fall back to
+    # the legacy "break on any non-bullet paragraph" behavior so we don't
+    # regress those layouts.
+    if not bullet_groups:
+        current_group = []
+        for paragraph in body:
+            if _paragraph_looks_like_bullet_content(paragraph):
+                current_group.append(paragraph)
+            else:
+                if current_group:
+                    bullet_groups.append(current_group)
+                    current_group = []
+        if current_group:
+            bullet_groups.append(current_group)
 
     for idx, group in enumerate(bullet_groups):
         if idx >= len(jobs) or not group:
@@ -957,6 +1084,13 @@ def _replace_experience_bullets_and_titles(doc: Document, resume: dict) -> bool:
             _delete_paragraph(old_paragraph)
 
         active_group = group[:len(bullets)]
+        # Normalize every bullet's pPr to match the first bullet's pPr. Some
+        # templates have stray <w:rStyle> baked into the paragraph-mark rPr of
+        # later bullets, which makes their list glyph render with a different
+        # font (e.g. a filled arrow instead of the hollow arrow used by the
+        # rest of the group).
+        for paragraph in active_group[1:]:
+            _copy_paragraph_format_from(paragraph, first)
         for paragraph, bullet in zip(active_group, bullets[:len(active_group)]):
             _set_paragraph_text(paragraph, bullet, keywords=keywords)
             changed = True
@@ -1101,6 +1235,14 @@ def _trim_skills_spear2(doc: Document, resume: dict) -> None:
     exp_range = _find_section_range(paragraphs, "experience")
 
     if not skills_range:
+        return
+
+    # This page-1-fit trim assumes the spear-2 layout where skills sit on page 1
+    # BEFORE the experience section. Some templates tagged spear-2 actually put
+    # skills LAST (after experience); there, pre_skills_lines would include the
+    # whole experience block and crush the budget, truncating every category to
+    # one item. In that case skip trimming and let skills flow naturally.
+    if exp_range and skills_range[0] > exp_range[0]:
         return
 
     skills_start, skills_end = skills_range
@@ -1313,9 +1455,14 @@ def apply_resume_to_docx(docx_path: Path, resume: dict, resume_template: str = '
         if not _replace_placeholders(doc, EXPERIENCE_PLACEHOLDERS, experience_lines, keywords=tech_keywords):
             _replace_experience_bullets_and_titles(doc, resume)
 
-    # spear-2: forced page breaks — education end → new page, company 2 end → new page
-    if resume_template == 'spear-2':
-        _insert_spear2_page_breaks(doc, resume)
+    # Forced page breaks disabled — content flows naturally and LibreOffice
+    # handles pagination. _insert_spear2_page_breaks and
+    # _insert_experience_page_breaks are kept defined for future use.
+    # (Was: if resume_template == 'spear-2': _insert_spear2_page_breaks(...))
+
+    # Prevent orphaned company headers: keep each header with its first bullet
+    # so a header that doesn't fit moves to the next page with its block.
+    _fix_experience_keep_next(doc)
 
     # Section heading borders — style depends on template
     _inject_section_heading_borders(doc, resume_template=resume_template)
@@ -1442,58 +1589,18 @@ def _insert_spear2_page_breaks(doc: Document, resume: dict) -> None:
     if len(bullet_groups) < 2:
         return
 
-    # Trim company 2 bullets if they overflow page 2.
-    # Page 2 holds companies 1+2. Estimate lines at ~95 chars/line, ~43 printable
-    # lines per page. Each bullet = 2 lines (120-175 chars). Non-bullet rows = 1 line.
-    _CHARS_PER_LINE = 95
-    _LINES_PER_PAGE = 43
-
-    def _estimated_lines(p: Paragraph) -> int:
-        text = (p.text or '').strip()
-        if not text:
-            return 1
-        return max(1, -(-len(text) // _CHARS_PER_LINE))  # ceiling division
-
-    # Build id sets for fast identity checks
-    co1_ids = {id(p) for p in bullet_groups[0]}
+    # NOTE: A previous version of this helper would silently delete bullets from
+    # the tail of company 2 if a coarse heuristic (95 chars/line, 43 lines/page)
+    # estimated that companies 1+2 would overflow page 2. That heuristic was
+    # over-conservative (real Times New Roman 11pt at 6.5" content width fits
+    # ~105-110 chars and ~46-50 lines per page) and caused user-paid bullets to
+    # be silently dropped — most visibly the last 4 bullets of Zerone Consulting
+    # in Ivan's resume. We do NOT silently drop user content here anymore:
+    # LibreOffice/unoserver handles real pagination, and any overflow flows
+    # naturally to the next page. This helper now only inserts page breaks
+    # (Break 1 after Education above, Break 2 after company 2 below) and never
+    # removes bullets.
     co2_bullets = bullet_groups[1]
-    co2_ids = {id(p) for p in co2_bullets}
-
-    # Split exp_body2 into: company1 block (up to and including co1 last bullet),
-    # company2 block (everything after co1 last bullet up to and including co2 last bullet)
-    co1_last_id = id(bullet_groups[0][-1])
-    co2_last_id = id(co2_bullets[-1]) if co2_bullets else None
-
-    co1_block: list[Paragraph] = []
-    co2_block: list[Paragraph] = []
-    in_co2_block = False
-    for p in exp_body2:
-        if not in_co2_block:
-            co1_block.append(p)
-            if id(p) == co1_last_id:
-                in_co2_block = True
-        else:
-            co2_block.append(p)
-            if co2_last_id and id(p) == co2_last_id:
-                break
-
-    # page2 = exp heading + co1 block + co2 block
-    page2_lines = 1  # PROFESSIONAL EXPERIENCE heading
-    page2_lines += sum(_estimated_lines(p) for p in co1_block)
-    page2_lines += sum(_estimated_lines(p) for p in co2_block)
-    overflow_lines = page2_lines - _LINES_PER_PAGE
-
-    # Drop bullets from the end of company 2 until it fits
-    if overflow_lines > 0 and co2_bullets:
-        bullets_to_drop: list[Paragraph] = []
-        freed = 0
-        for bp in reversed(co2_bullets):
-            if freed >= overflow_lines:
-                break
-            freed += _estimated_lines(bp)
-            bullets_to_drop.append(bp)
-        for bp in bullets_to_drop:
-            bp._p.getparent().remove(bp._p)
 
     # Re-query after potential removals
     paragraphs3 = _all_body_paragraphs(doc)

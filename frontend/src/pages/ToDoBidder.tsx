@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { copyText } from '../lib/clipboard';
 import { useToast } from '../lib/toast';
+import { etDateKey } from '../lib/etTime';
 
 type Profile = {
   id: string;
@@ -10,6 +11,8 @@ type Profile = {
   email?: string;
   phone?: string;
   location?: string;
+  address?: string;
+  zip_code?: string;
   linkedin?: string;
   portfolio?: string;
   education_history?: Array<{ university?: string; degree?: string; duration?: string; location?: string }>;
@@ -34,6 +37,20 @@ type SavedResume = {
 };
 
 type AppliedFilter = 'pending' | 'applied' | 'all';
+
+// Normalize a LinkedIn value to a full https URL.
+//   "in/jane-doe"            -> https://www.linkedin.com/in/jane-doe
+//   "linkedin.com/in/jane"   -> https://www.linkedin.com/in/jane
+//   "https://x.linkedin.com" -> unchanged
+function linkedinUrl(value: string): string {
+  const v = (value || '').trim();
+  if (!v) return '';
+  if (/^https?:\/\//i.test(v)) return v;                     // already a full URL
+  let rest = v.replace(/^www\./i, '');
+  rest = rest.replace(/^linkedin\.com\/?/i, '');             // drop a bare domain prefix
+  rest = rest.replace(/^\/+/, '');                           // drop leading slashes
+  return `https://www.linkedin.com/${rest}`;
+}
 
 // ─── Click-to-copy chip ──────────────────────────────────────────────────
 function CopyChip({ label, value }: { label: string; value: string }) {
@@ -114,7 +131,7 @@ function AnswerCard({ question, answer, idx }: { question: string; answer: strin
 
 // ─── Resume card ─────────────────────────────────────────────────────────
 function ResumeCard({
-  resume, pdfUrl, pdfLoading, pdfError, onDownload, onMarkApplied, onRevert,
+  resume, pdfUrl, pdfLoading, pdfError, onDownload, onMarkApplied, onRevert, onReport, markAppliedDisabled,
 }: {
   resume: SavedResume;
   pdfUrl: string;
@@ -123,6 +140,8 @@ function ResumeCard({
   onDownload: () => void;
   onMarkApplied: () => void;
   onRevert: () => void;
+  onReport: () => void;
+  markAppliedDisabled: boolean;
 }) {
   const toast = useToast();
   const [copiedLink, setCopiedLink] = useState(false);
@@ -164,10 +183,10 @@ function ResumeCard({
             ) : (resume.job_title || '—')}
           </h2>
           <div style={{ fontSize: '0.82rem', color: 'var(--muted)', marginTop: 8 }}>
-            Generated {(resume.created_at || '').slice(0, 10) || '—'}
+            Generated {etDateKey(resume.created_at || '') || '—'}
             {isApplied && resume.applied_at && (
               <> · <span style={{ color: 'var(--success)' }}>
-                Applied {resume.applied_at.slice(0, 10)}
+                Applied {etDateKey(resume.applied_at)}
               </span></>
             )}
           </div>
@@ -193,10 +212,17 @@ function ResumeCard({
             ↺ Revert to pending
           </button>
         ) : (
-          <button onClick={onMarkApplied}>
+          <button onClick={onMarkApplied} disabled={markAppliedDisabled}
+            title={markAppliedDisabled
+              ? 'Use the “Mark Applied” button in the TailorResume extension while applying'
+              : ''}>
             Mark as applied
           </button>
         )}
+        <button className="danger" onClick={onReport}
+          title="Flag this job as broken, closed, or spam — removes it from the queue for review">
+          ⚑ Report this Job
+        </button>
       </div>
 
       {/* Inline PDF preview */}
@@ -308,9 +334,19 @@ function IndexStrip({ resumes, current, onPick }: {
 // ─── Main component ─────────────────────────────────────────────────────
 export default function ToDoBidder({ profileId, profile }: { profileId: string; profile: Profile }) {
   const qc = useQueryClient();
+  // "Mark as applied" is enabled for everyone (bidders + admins) in the Apply tab.
+  const markAppliedDisabled = false;
   const toast = useToast();
   const [filter, setFilter] = useState<AppliedFilter>('pending');
   const [cardIdx, setCardIdx] = useState(0);
+
+  // "Open N job links" batch control. Count persists per browser.
+  const OPEN_LINKS_MAX = 50;
+  const [openCount, setOpenCount] = useState<number>(() => {
+    const v = parseInt(localStorage.getItem('apply.open_links_count') || '10', 10);
+    return Number.isFinite(v) && v > 0 ? Math.min(v, OPEN_LINKS_MAX) : 10;
+  });
+  useEffect(() => { localStorage.setItem('apply.open_links_count', String(openCount)); }, [openCount]);
 
   // PDF blob cache (resume id → blob URL). Survives card navigation.
   const pdfCacheRef = useRef<Map<string, { url: string; blob: Blob }>>(new Map());
@@ -483,6 +519,71 @@ export default function ToDoBidder({ profileId, profile }: { profileId: string; 
     }
   }, [current, qc, toast, profileId]);
 
+  const reportJob = useCallback(async () => {
+    if (!current?.job_id) {
+      toast('No linked job to report', 'error');
+      return;
+    }
+    const reason = window.prompt(
+      `Report this job — "${current.job_company} · ${current.job_title}".\nWhat's wrong? (e.g. link broken, posting closed, spam)`,
+    );
+    if (reason === null) return;            // cancelled
+    const trimmed = reason.trim();
+    if (!trimmed) { toast('A reason is required', 'error'); return; }
+    try {
+      await api.post(`/api/jobs/${current.job_id}/reports`, { reason: trimmed });
+      qc.invalidateQueries({ queryKey: ['todo', 'bidder', profileId] });
+      qc.invalidateQueries({ queryKey: ['jobs'] });
+      toast('Job reported — thanks, it will be reviewed', 'success');
+    } catch (e: any) {
+      toast(e?.response?.data?.detail || 'Failed to report job', 'error');
+    }
+  }, [current, qc, toast, profileId]);
+
+  // Open the next N job links (starting at the current card) in new tabs.
+  const openLinks = useCallback(() => {
+    const seen = new Set<string>();
+    const batch: string[] = [];
+    for (let i = safeIdx; i < resumes.length && batch.length < openCount; i++) {
+      const link = (resumes[i].job_link || '').trim();
+      if (link && !seen.has(link)) { seen.add(link); batch.push(link); }
+    }
+    if (batch.length === 0) {
+      toast('No job links to open from here', 'info');
+      return;
+    }
+
+    // Best path: hand the batch to the TailorResume extension, which has the
+    // browser "tabs" permission and opens them all in the background (like
+    // Ctrl+click) with no pop-up blocker and no per-site prompt. The extension
+    // tags the page with data-tailorresume-ext when it's installed.
+    const hasExtension = document.documentElement.getAttribute('data-tailorresume-ext');
+    if (hasExtension) {
+      window.postMessage({ __tailorresume: 'open-tabs', urls: batch }, window.location.origin);
+      toast(`Opening ${batch.length} job link${batch.length === 1 ? '' : 's'}…`, 'success');
+      return;
+    }
+
+    // Fallback (extension not installed): synthesize anchor clicks during this
+    // gesture (kept synchronous — no await/setTimeout, or the gesture is lost).
+    // The browser may still cap this at one tab unless pop-ups are allowed.
+    for (const url of batch) {
+      const a = document.createElement('a');
+      a.href = url;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+    toast(
+      batch.length === 1
+        ? 'Opened 1 job link'
+        : `Opening ${batch.length} links. If only one opens, install the TailorResume extension (Extension tab) or allow pop-ups for this site.`,
+      'info',
+    );
+  }, [resumes, safeIdx, openCount, toast]);
+
   if (isLoading) return <div><span className="spinner" /> Loading…</div>;
 
   return (
@@ -498,8 +599,10 @@ export default function ToDoBidder({ profileId, profile }: { profileId: string; 
             <CopyChip label="Full name" value={profile.name || ''} />
             <CopyChip label="Email" value={profile.email || ''} />
             <CopyChip label="Location" value={profile.location || ''} />
+            <CopyChip label="Address" value={profile.address || ''} />
+            <CopyChip label="Zip code" value={profile.zip_code || ''} />
             <CopyChip label="Phone" value={profile.phone || ''} />
-            <CopyChip label="LinkedIn" value={profile.linkedin || ''} />
+            <CopyChip label="LinkedIn" value={linkedinUrl(profile.linkedin || '')} />
             <CopyChip label="Portfolio" value={profile.portfolio || ''} />
           </div>
 
@@ -555,22 +658,44 @@ export default function ToDoBidder({ profileId, profile }: { profileId: string; 
             ))}
           </div>
 
-          {resumes.length > 0 && (
-            <div className="bidder-nav-cluster">
-              <button className="secondary nav-btn"
-                disabled={safeIdx === 0}
-                onClick={() => setCardIdx(safeIdx - 1)}
-                aria-label="Previous card">←</button>
-              <span className="bidder-counter">
-                <strong>{safeIdx + 1}</strong>
-                <span className="muted">of {resumes.length}</span>
-              </span>
-              <button className="secondary nav-btn"
-                disabled={safeIdx >= resumes.length - 1}
-                onClick={() => setCardIdx(safeIdx + 1)}
-                aria-label="Next card">→</button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginLeft: 'auto', flexWrap: 'wrap' }}>
+            {/* Open N job links at once */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+                 title="Open this many job links in new tabs, starting from the current card">
+              <input
+                type="number"
+                min={1}
+                max={OPEN_LINKS_MAX}
+                value={openCount}
+                onChange={(e) => {
+                  const n = parseInt(e.target.value, 10);
+                  setOpenCount(Number.isFinite(n) ? Math.max(1, Math.min(n, OPEN_LINKS_MAX)) : 1);
+                }}
+                style={{ width: 58, padding: '0.3rem 0.4rem', fontSize: '0.85rem', textAlign: 'center' }}
+                aria-label="Number of job links to open"
+              />
+              <button className="secondary" onClick={openLinks} disabled={resumes.length === 0}>
+                ↗ Open {openCount} link{openCount === 1 ? '' : 's'}
+              </button>
             </div>
-          )}
+
+            {resumes.length > 0 && (
+              <div className="bidder-nav-cluster">
+                <button className="secondary nav-btn"
+                  disabled={safeIdx === 0}
+                  onClick={() => setCardIdx(safeIdx - 1)}
+                  aria-label="Previous card">←</button>
+                <span className="bidder-counter">
+                  <strong>{safeIdx + 1}</strong>
+                  <span className="muted">of {resumes.length}</span>
+                </span>
+                <button className="secondary nav-btn"
+                  disabled={safeIdx >= resumes.length - 1}
+                  onClick={() => setCardIdx(safeIdx + 1)}
+                  aria-label="Next card">→</button>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Card deck */}
@@ -601,6 +726,8 @@ export default function ToDoBidder({ profileId, profile }: { profileId: string; 
                   onDownload={downloadPdf}
                   onMarkApplied={markApplied}
                   onRevert={revertToPending}
+                  onReport={reportJob}
+                  markAppliedDisabled={markAppliedDisabled}
                 />
               </div>
             )}

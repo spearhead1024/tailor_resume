@@ -12,4 +12,6 @@ data/saved_resume_pdfs/
 .DS_Store
 requirements.md
 .vscode
-tmp/
+tmp/backend/.env
+backend/.env
+data/extension/keys/
