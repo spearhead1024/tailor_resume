@@ -1,0 +1,10 @@
+{
+  "sent": [
+    "r_3ae9f5e12f|hour_before|2026-07-12T20:00:00.000Z",
+    "r_3ae9f5e12f|hour_before|2026-07-12T20:30:00.000Z",
+    "r_d7418b6815|hour_before|2026-07-12T20:13:00.000Z",
+    "r_d7418b6815|hour_before|2026-07-12T20:25:00.000Z",
+    "user_4d95e5ff05|2026-07-12|day_before_7pm",
+    "user_4d95e5ff05|2026-07-12|day_of_8am"
+  ]
+}

@@ -23,16 +23,22 @@ except Exception:                       # pragma: no cover
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-from auth import require_role, storage
-from core import notify
+from auth import is_manager, require_role, storage, team_caller_names, team_id_of
 
 router = APIRouter(prefix="/api/interviews", tags=["interviews"])
 
-# Both admins and callers can use the board.
-_access = require_role("admin", "caller")
+# Admins, callers and team managers can all use the board.
+_access = require_role("admin", "caller", "manager")
 # A caller is read-only on the board except these columns: Approved, Status, and the
 # Chat & Feedback thread (c_feedback). Chat posts also go through the dedicated /chat endpoint.
 _CALLER_EDITABLE = {"c_approved", "c_status", "c_feedback"}
+# A manager can additionally hand a call to a different caller — but only one of their own (enforced
+# in patch_row: writing c_caller with someone outside the team is rejected, not silently accepted).
+_MANAGER_EDITABLE = _CALLER_EDITABLE | {"c_caller"}
+
+
+def _editable_cols(user: dict) -> set:
+    return _MANAGER_EDITABLE if is_manager(user) else _CALLER_EDITABLE
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 _GRID_FILE = DATA_DIR / "interviews.json"
@@ -95,10 +101,65 @@ def _caller_ids(user: dict) -> set:
                         str(user.get("full_name", "")).strip().lower()) if s}
 
 
-def _owns_row(user: dict, row: dict) -> bool:
+def _team_name_of(user: dict) -> str:
+    t = storage.get_team(team_id_of(user)) or {}
+    return str(t.get("name", "")).strip().lower()
+
+
+def _team_scope(user: dict):
+    """Predicate: is this row part of the user's team? Either the row was handed to the team (Team
+    cell), or its Caller is someone on the team. Built once per request — resolving the team and its
+    members per row would hit storage N times."""
+    tname = _team_name_of(user)
+    members = team_caller_names(team_id_of(user))
+
+    def _in_team(row: dict) -> bool:
+        cells = row.get("cells") or {}
+        row_team = str(cells.get("c_team", "")).strip().lower()
+        row_caller = str(cells.get("c_caller", "")).strip().lower()
+        return (bool(tname) and row_team == tname) or (row_caller in members)
+    return _in_team
+
+
+def _visibility(user: dict):
+    """READ scope — "may this user SEE this row?"
+
+    admin   → everything.
+    manager → their whole team (incl. calls handed to the team with no Caller yet).
+    caller  → their own calls, PLUS their team's whole schedule if they're on a team, so a team can
+              see what the rest of the team is booked for. Seeing is not editing — see _writability.
+    """
     if user.get("is_admin"):
-        return True
-    return str((row.get("cells") or {}).get("c_caller", "")).strip().lower() in _caller_ids(user)
+        return lambda row: True
+
+    if is_manager(user):
+        return _team_scope(user)
+
+    ids = _caller_ids(user)
+    mine = lambda row: str((row.get("cells") or {}).get("c_caller", "")).strip().lower() in ids
+    if not team_id_of(user):
+        return mine
+    in_team = _team_scope(user)
+    return lambda row: mine(row) or in_team(row)
+
+
+def _writability(user: dict):
+    """WRITE scope — deliberately NARROWER than the read scope.
+
+    A team member can see the whole team's schedule but may only edit their OWN calls; without this
+    split, widening visibility would have silently let any caller set Approved/Status/Feedback on a
+    team-mate's interview. A manager may write anywhere in their team (that's their job)."""
+    if user.get("is_admin"):
+        return lambda row: True
+    if is_manager(user):
+        return _team_scope(user)
+    ids = _caller_ids(user)
+    return lambda row: str((row.get("cells") or {}).get("c_caller", "")).strip().lower() in ids
+
+
+def _owns_row(user: dict, row: dict) -> bool:
+    """Used by every WRITE path (patch_row, chat). Reads use _visibility, which is wider."""
+    return _writability(user)(row)
 
 
 def _normalize_column(raw: dict) -> dict:
@@ -144,6 +205,7 @@ def _default_grid() -> dict:
         {"id": "c_min", "name": "Duration(min)", "type": "text", "width": 100},
         {"id": "c_sched", "name": "Scheduled_at", "type": "date", "width": 140},
         {"id": "c_created", "name": "Created_at", "type": "date", "width": 130},
+        {"id": "c_team", "name": "Team", "type": "select", "width": 140, "options": []},
         {"id": "c_caller", "name": "Caller", "type": "select", "width": 140, "options": []},
         {"id": "c_approved", "name": "Approved", "type": "select", "width": 120, "options": [
             s("Confirmed", "#22c55e"), s("Pending", "#f59e0b"), s("Rejected", "#ef4444")]},
@@ -166,6 +228,10 @@ def _default_grid() -> dict:
 _REQUIRED_COLS = [
     {"id": "c_company", "name": "Company Info", "type": "text", "width": 170},
     {"id": "c_salary", "name": "Salary Range", "type": "text", "width": 130},
+    # Which caller team owns this interview. An admin sets it; the team's manager then sees the row —
+    # even with no Caller yet — and picks which of their callers takes it. Options are injected from
+    # the teams table (like Caller / Account Profile), so the cell holds the team NAME.
+    {"id": "c_team", "name": "Team", "type": "select", "width": 140, "options": []},
 ]
 
 
@@ -242,26 +308,35 @@ def _write_unlocked(grid: dict) -> None:
 def get_grid(user: dict = Depends(_access)):
     with _lock:
         grid = _read_unlocked()
-    # Admins see every interview; a caller sees only rows where the Caller is them.
+    # Admins see every interview; a caller sees only their own rows; a manager sees their whole team's
+    # (including calls handed to the team that have no Caller assigned yet).
     if not user.get("is_admin"):
-        ids = _caller_ids(user)
-        grid = {**grid, "rows": [r for r in grid["rows"]
-                                 if str((r.get("cells") or {}).get("c_caller", "")).strip().lower() in ids]}
+        can_see = _visibility(user)
+        grid = {**grid, "rows": [r for r in grid["rows"] if can_see(r)]}
     return grid
 
 
 @router.get("/people")
 def list_people(user: dict = Depends(_access)):
-    """All users — feeds the Caller dropdown (filtered by role) and the Creater avatars."""
+    """All users — feeds the Caller dropdown (filtered by role) and the Creater avatars.
+
+    For a manager this is narrowed to their own team, so the Caller dropdown can only ever offer
+    someone they're allowed to assign (the backend rejects the rest anyway — this just stops the UI
+    from presenting a choice that would be refused)."""
+    team_only = is_manager(user)
+    tid = team_id_of(user)
     out = []
     for u in storage.get_users():
         un = str(u.get("username", "")).strip()
         fn = str(u.get("full_name", "")).strip()
         if not (un or fn):
             continue
+        if team_only and str(u.get("team_id", "")).strip() != tid:
+            continue
         out.append({
             "username": un, "full_name": fn, "label": fn or un,
             "roles": u.get("roles") or [],
+            "team_id": str(u.get("team_id", "")).strip(),   # groups the Caller dropdown by team
             "avatar_url": str(u.get("avatar_url", "")).strip(),
         })
     return {"people": out}
@@ -332,8 +407,7 @@ def add_row(body: dict | None = None, user: dict = Depends(_access)):
         else:
             grid["rows"].append(row)
         _write_unlocked(grid)
-    notify.on_row_changed(rid, {}, cells, user)   # push if the new row already names a caller
-    return row
+        return row
 
 
 @router.patch("/rows/{row_id}")
@@ -342,28 +416,27 @@ def patch_row(row_id: str, body: dict, user: dict = Depends(_access)):
         grid = _read_unlocked()
         valid = {c["id"] for c in grid["columns"]}
         patch = {k: v for k, v in ((body or {}).get("cells", {}) or {}).items() if k in valid}
-        if not user.get("is_admin"):     # callers are read-only except Approved + Feedback
-            patch = {k: v for k, v in patch.items() if k in _CALLER_EDITABLE}
+        if not user.get("is_admin"):     # callers: Approved/Status/Feedback. Managers: + Caller.
+            patch = {k: v for k, v in patch.items() if k in _editable_cols(user)}
+            # A manager may hand a call to another caller — but only one of their own team's. Reject
+            # rather than drop it, so a bad re-assign is never silently ignored (it would also make
+            # the row vanish from their board).
+            if "c_caller" in patch:
+                target = str(patch["c_caller"] or "").strip().lower()
+                if target and target not in team_caller_names(team_id_of(user)):
+                    raise HTTPException(status_code=403, detail="You can only assign callers on your own team.")
         if "c_sched" in patch:           # store Scheduled_at as a UTC instant (idempotent)
             patch["c_sched"] = _sched_to_utc(patch["c_sched"], str(user.get("timezone", "")).strip())
-        result = None
-        change = None
         for row in grid["rows"]:
             if row.get("id") == row_id:
                 if not _owns_row(user, row):
                     raise HTTPException(status_code=404, detail="Row not found")
                 if not patch:            # nothing this user is allowed to change → no-op
                     return row
-                before = dict(row.get("cells", {}))
                 row.setdefault("cells", {}).update(patch)
                 _write_unlocked(grid)
-                result = row
-                change = (before, dict(row["cells"]))
-                break
-    if result is None:
-        raise HTTPException(status_code=404, detail="Row not found")
-    notify.on_row_changed(row_id, change[0], change[1], user)   # assignment / time / content push (admin edits only)
-    return result
+                return row
+    raise HTTPException(status_code=404, detail="Row not found")
 
 
 @router.delete("/rows/{row_id}")

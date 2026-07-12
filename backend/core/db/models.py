@@ -94,6 +94,18 @@ class SettingsRow(Base):
     data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class TeamRow(Base):
+    """A caller team (e.g. "Vaccine Team"). Membership lives on the user (`team_id`); a team
+    manager is a user with the 'manager' role whose team_id points here."""
+    __tablename__ = 'teams'
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), default='', index=True)
+    data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
 class OpenAICallRow(Base):
     __tablename__ = 'openai_calls'
 

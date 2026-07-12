@@ -23,7 +23,11 @@ from pywebpush import WebPushException, webpush
 log = logging.getLogger("push")
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
-_VAPID_PEM = DATA_DIR / "vapid_private.pem"
+# The VAPID keypair identifies THIS server to the push services. It is generated once and then must
+# be kept: if it ever changes, every browser subscription made with the old key silently stops
+# receiving pushes and each caller has to re-enable notifications. So it lives outside git (secret)
+# and PUSH_VAPID_PRIVATE_KEY_FILE lets a deploy point at a path that survives redeploys/rebuilds.
+_VAPID_PEM = Path(os.environ.get("PUSH_VAPID_PRIVATE_KEY_FILE", "").strip() or (DATA_DIR / "vapid_private.pem"))
 _SUBS_FILE = DATA_DIR / "push_subscriptions.json"
 # The VAPID "sub" claim must be a mailto: or https: the push service can contact about issues.
 _VAPID_SUB = os.environ.get("PUSH_VAPID_SUB", "mailto:admin@tailorresume.duckdns.org")

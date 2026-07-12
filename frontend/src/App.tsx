@@ -20,7 +20,7 @@ import Account from './pages/Account';
 
 /** Tab → roles allowed. Admin always has access. Order = display order. */
 const TABS: { path: string; label: string; roles: Role[]; method?: 1 | 2 }[] = [
-  { path: '/interviews', label: 'Interviews', roles: ['admin', 'caller'] },
+  { path: '/interviews', label: 'Interviews', roles: ['admin', 'caller', 'manager'] },
   { path: '/jobs',     label: 'Jobs',     roles: ['admin', 'job_adder'] },
   { path: '/bid',      label: 'Bid',      roles: ['admin', 'bidder'], method: 2 },
   { path: '/resumes',  label: 'Resumes',  roles: ['admin', 'bidder'], method: 1 },
@@ -30,14 +30,17 @@ const TABS: { path: string; label: string; roles: Role[]; method?: 1 | 2 }[] = [
   { path: '/metrics',  label: 'Metrics',  roles: ['admin', 'bidder', 'job_adder'] },
   { path: '/help', label: 'Help', roles: ['admin'] },
   { path: '/profiles', label: 'Profiles', roles: ['admin'] },
-  { path: '/users',    label: 'Users',    roles: ['admin'] },
+  // A team manager reaches Users to run their own team (create/approve its callers). The page and
+  // the API both scope them to that team — they never see or touch anyone else.
+  { path: '/users',    label: 'Users',    roles: ['admin', 'manager'] },
   { path: '/sessions', label: 'Sessions', roles: ['admin'] },
   { path: '/settings', label: 'Settings', roles: ['admin'] },
 ];
 
 function roleLabel(roles: Role[]): string {
   if (!roles || roles.length === 0) return '—';
-  return roles.map((r) => r === 'job_adder' ? 'Job-Adder' : r.charAt(0).toUpperCase() + r.slice(1)).join(' · ');
+  const pretty: Partial<Record<Role, string>> = { job_adder: 'Job-Adder', manager: 'Team Manager' };
+  return roles.map((r) => pretty[r] ?? (r.charAt(0).toUpperCase() + r.slice(1))).join(' · ');
 }
 
 /** Tabs the user may see: role-allowed, and (for Bid/Resumes/Apply) matching their
@@ -119,14 +122,14 @@ export default function App() {
           <Route path="/bid"      element={<RoleGate roles={['admin', 'bidder']}><Bid /></RoleGate>} />
           <Route path="/resumes"  element={<RoleGate roles={['admin', 'bidder']}><Resumes /></RoleGate>} />
           <Route path="/apply"    element={<RoleGate roles={['admin', 'bidder']}><Apply /></RoleGate>} />
-          <Route path="/interviews" element={<RoleGate roles={['admin', 'caller']}><Interviews /></RoleGate>} />
+          <Route path="/interviews" element={<RoleGate roles={['admin', 'caller', 'manager']}><Interviews /></RoleGate>} />
           <Route path="/jobs"     element={<RoleGate roles={['admin', 'job_adder']}><Jobs /></RoleGate>} />
           <Route path="/applied"  element={<RoleGate roles={['admin']}><Applied /></RoleGate>} />
           <Route path="/screenshots" element={<RoleGate roles={['admin']}><Screenshots /></RoleGate>} />
           <Route path="/metrics"  element={<RoleGate roles={['admin', 'bidder', 'job_adder']}><Metrics /></RoleGate>} />
           <Route path="/help" element={<RoleGate roles={['admin']}><Help /></RoleGate>} />
           <Route path="/profiles" element={<RoleGate roles={['admin']}><Profiles /></RoleGate>} />
-          <Route path="/users"    element={<RoleGate roles={['admin']}><Users /></RoleGate>} />
+          <Route path="/users"    element={<RoleGate roles={['admin', 'manager']}><Users /></RoleGate>} />
           <Route path="/sessions" element={<RoleGate roles={['admin']}><Devices /></RoleGate>} />
           <Route path="/settings" element={<RoleGate roles={['admin']}><Settings /></RoleGate>} />
           <Route path="/account"  element={<Private><Account /></Private>} />

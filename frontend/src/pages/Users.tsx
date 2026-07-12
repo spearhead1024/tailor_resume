@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, Fragment } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useToast } from '../lib/toast';
-import { Role } from '../lib/auth';
+import { Role, useAuth } from '../lib/auth';
 
 function fmtWhen(iso?: string): string {
   const s = (iso || '').trim();
@@ -26,7 +26,15 @@ const ALL_ROLES: { value: Role; label: string }[] = [
   { value: 'bidder',    label: 'Bidder' },
   { value: 'job_adder', label: 'Job-Adder' },
   { value: 'caller',    label: 'Caller' },
+  { value: 'manager',   label: 'Team Manager' },
 ];
+
+type Team = { id: string; name: string };
+
+const roleSet = (u: any): Set<string> => new Set<string>(u?.roles || []);
+const isCaller = (u: any) => roleSet(u).has('caller') && !roleSet(u).has('admin');
+const isTeamManager = (u: any) => roleSet(u).has('manager') && !roleSet(u).has('admin');
+const teamOf = (u: any) => String(u?.team_id || '').trim();
 
 /** A multi-select rendered as a dropdown: a button shows the current selection,
  *  clicking opens a panel of checkbox items. Closes on outside click. */
@@ -90,11 +98,35 @@ function CheckboxDropdown({
 export default function Users() {
   const qc = useQueryClient();
   const toast = useToast();
+  const { user: me } = useAuth();
+  const isAdmin = !!me?.is_admin;
+  const myTeam = String(me?.team_id || '').trim();
+
   const { data: users = [], isLoading } = useQuery({ queryKey: ['users'], queryFn: () => api.get<any[]>('/api/users') });
   const { data: profiles = [] } = useQuery({ queryKey: ['profiles'], queryFn: () => api.get<any[]>('/api/profiles') });
+  const { data: teams = [] } = useQuery({ queryKey: ['teams'], queryFn: () => api.get<Team[]>('/api/teams') });
 
   const [showForm, setShowForm] = useState(false);
-  const [roleFilter, setRoleFilter] = useState<Role | 'all'>('all');   // "see users by role"
+  const [roleFilter, setRoleFilter] = useState<Role | 'all' | 'teams'>(isAdmin ? 'all' : 'teams');   // "see users by role"
+  const [openTeams, setOpenTeams] = useState<Set<string>>(new Set());
+  const [newTeamName, setNewTeamName] = useState('');
+
+  const afterTeams = () => { qc.invalidateQueries({ queryKey: ['teams'] }); qc.invalidateQueries({ queryKey: ['users'] }); };
+  const createTeam = useMutation({
+    mutationFn: (name: string) => api.post('/api/teams', { name }),
+    onSuccess: () => { afterTeams(); setNewTeamName(''); toast('Team created', 'success'); },
+    onError: (e: any) => toast(e?.response?.data?.detail || 'Failed to create team', 'error'),
+  });
+  const renameTeam = useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) => api.patch(`/api/teams/${id}`, { name }),
+    onSuccess: () => { afterTeams(); toast('Team renamed', 'success'); },
+    onError: (e: any) => toast(e?.response?.data?.detail || 'Failed to rename team', 'error'),
+  });
+  const removeTeam = useMutation({
+    mutationFn: (id: string) => api.delete(`/api/teams/${id}`),
+    onSuccess: () => { afterTeams(); toast('Team deleted — its members are now ungrouped', 'success'); },
+    onError: (e: any) => toast(e?.response?.data?.detail || 'Failed to delete team', 'error'),
+  });
   const [expanded, setExpanded] = useState<string | null>(null);       // user whose full profile is open (admin-only view)
   const [newUser, setNewUser] = useState<{
     username: string; full_name: string; email: string; password: string;
@@ -137,20 +169,30 @@ export default function Users() {
   const inRole = (u: any, role: Role) => (u.roles || []).includes(role) && (role === 'admin' || !(u.roles || []).includes('admin'));
   const roleCount = (role: Role) => users.filter((u: any) => inRole(u, role)).length;
   const noRoleCount = users.filter((u: any) => !(u.roles || []).length).length;
-  const filtered = roleFilter === 'all' ? users : users.filter((u: any) => inRole(u, roleFilter));
+  const filtered = (roleFilter === 'all' || roleFilter === 'teams')
+    ? users
+    : users.filter((u: any) => inRole(u, roleFilter));
   const profileNames = (ids?: string[]) => (ids || []).map((id) => profiles.find((p: any) => p.id === id)?.name || id).join(', ');
 
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', marginBottom: '1rem' }}>
-        <h1 style={{ margin: 0 }}>Users ({users.length})</h1>
+        <h1 style={{ margin: 0 }}>{isAdmin ? `Users (${users.length})` : `My team (${users.length})`}</h1>
         <div style={{ flex: 1 }} />
-        <button onClick={() => setShowForm(!showForm)}>{showForm ? 'Cancel' : '+ New User'}</button>
+        <button onClick={() => { setShowForm(!showForm); if (!showForm && !isAdmin) setNewUser((n) => ({ ...n, roles: ['caller'] })); }}>
+          {showForm ? 'Cancel' : (isAdmin ? '+ New User' : '+ New Caller')}
+        </button>
       </div>
 
       {showForm && (
         <div className="card" style={{ marginBottom: '1rem' }}>
-          <h2 style={{ marginTop: 0 }}>Create user</h2>
+          <h2 style={{ marginTop: 0 }}>{isAdmin ? 'Create user' : 'Add a caller to your team'}</h2>
+          {!isAdmin && (
+            <p className="muted" style={{ marginTop: 0 }}>
+              They're created as a <strong>Caller</strong> on <strong>your team</strong> — that's enforced by the server,
+              so the role and team aren't yours to choose here.
+            </p>
+          )}
           <div className="row">
             <div className="field"><label>Username</label><input value={newUser.username} onChange={(e) => setNewUser({ ...newUser, username: e.target.value })} /></div>
             <div className="field"><label>Full name</label><input value={newUser.full_name} onChange={(e) => setNewUser({ ...newUser, full_name: e.target.value })} /></div>
@@ -159,11 +201,13 @@ export default function Users() {
             <div className="field"><label>Email</label><input value={newUser.email} onChange={(e) => setNewUser({ ...newUser, email: e.target.value })} /></div>
             <div className="field"><label>Password</label><input type="password" value={newUser.password} onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} /></div>
           </div>
-          <div className="field">
-            <label>Roles</label>
-            <CheckboxDropdown options={ALL_ROLES} selected={newUser.roles}
-              onChange={(roles) => setNewUser({ ...newUser, roles: roles as Role[] })} placeholder="Select roles" />
-          </div>
+          {isAdmin && (
+            <div className="field">
+              <label>Roles</label>
+              <CheckboxDropdown options={ALL_ROLES} selected={newUser.roles}
+                onChange={(roles) => setNewUser({ ...newUser, roles: roles as Role[] })} placeholder="Select roles" />
+            </div>
+          )}
           <div className="row">
             <div className="field"><label>Status</label>
               <select value={newUser.status} onChange={(e) => setNewUser({ ...newUser, status: e.target.value })}>
@@ -180,6 +224,11 @@ export default function Users() {
 
       {/* View users by role */}
       <div style={{ display: 'flex', gap: 6, marginBottom: '1rem', flexWrap: 'wrap', alignItems: 'center' }}>
+        <button className={roleFilter === 'teams' ? '' : 'secondary'} onClick={() => setRoleFilter('teams')}
+          style={{ fontSize: '0.82rem', padding: '0.32rem 0.7rem' }}>
+          Teams <span style={{ opacity: 0.6 }}>{teams.length}</span>
+        </button>
+        <span style={{ width: 1, alignSelf: 'stretch', background: 'var(--border, #2a2a2a)', margin: '0 2px' }} />
         <button className={roleFilter === 'all' ? '' : 'secondary'} onClick={() => setRoleFilter('all')}
           style={{ fontSize: '0.82rem', padding: '0.32rem 0.7rem' }}>
           All <span style={{ opacity: 0.6 }}>{users.length}</span>
@@ -193,11 +242,118 @@ export default function Users() {
         {noRoleCount > 0 && <span className="muted" style={{ fontSize: '0.78rem', marginLeft: 4 }}>· {noRoleCount} with no role</span>}
       </div>
 
-      {filtered.length === 0 ? (
+      {/* ── Teams tree: ungrouped callers at the top level, then each team as an expandable group ── */}
+      {roleFilter === 'teams' && (() => {
+        const callers = users.filter(isCaller);
+        const ungrouped = callers.filter((u: any) => !teamOf(u));
+        const setTeam = (u: any, team_id: string) => updateMutation.mutate({ id: u.id, payload: { team_id } });
+        const teamPicker = (u: any) => (
+          <select value={teamOf(u)} disabled={!isAdmin || updateMutation.isPending}
+            onChange={(e) => setTeam(u, e.target.value)} style={{ fontSize: '0.8rem' }}
+            title={isAdmin ? 'Move this caller to a team' : 'Only an admin can move callers between teams'}>
+            <option value="">— no team —</option>
+            {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+        );
+        const callerRow = (u: any, indent: number) => (
+          <div key={u.id} className="card" style={{
+            display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', marginBottom: 6,
+            marginLeft: indent, background: indent ? 'var(--bg-soft, #1c1c1c)' : undefined,
+          }}>
+            <span style={{ fontWeight: 500 }}>{u.full_name || u.username}</span>
+            <span className="muted" style={{ fontSize: '0.8rem' }}>@{u.username}</span>
+            {u.status !== 'approved' && (
+              <span className="muted" style={{ fontSize: '0.75rem', border: '1px solid currentColor', borderRadius: 999, padding: '0 6px' }}>
+                {u.status}
+              </span>
+            )}
+            <span style={{ flex: 1 }} />
+            <select value={u.status} disabled={updateMutation.isPending}
+              onChange={(e) => updateMutation.mutate({ id: u.id, payload: { status: e.target.value } })}
+              style={{ fontSize: '0.8rem' }} title="Approve or suspend this caller">
+              <option value="approved">Approved</option><option value="pending">Pending</option><option value="disabled">Disabled</option>
+            </select>
+            {teamPicker(u)}
+          </div>
+        );
+
+        return (
+          <>
+            <p className="muted">
+              Callers grouped into teams. A <strong>Team Manager</strong> runs one team: they create and approve that
+              team's callers, and on the interview board they can hand a call to any caller on their team and set
+              Approved / Status / Feedback — nothing else, and never outside their team.
+            </p>
+
+            {isAdmin && (
+              <div className="card" style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12 }}>
+                <input placeholder="New team name — e.g. Vaccine Team" value={newTeamName}
+                  onChange={(e) => setNewTeamName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && newTeamName.trim()) createTeam.mutate(newTeamName.trim()); }}
+                  style={{ maxWidth: 280 }} />
+                <button onClick={() => createTeam.mutate(newTeamName.trim())}
+                  disabled={!newTeamName.trim() || createTeam.isPending}>
+                  {createTeam.isPending ? <span className="spinner" /> : '+ Create team'}
+                </button>
+              </div>
+            )}
+
+            {/* ungrouped callers, top level */}
+            {ungrouped.map((u: any) => callerRow(u, 0))}
+
+            {/* each team, expandable */}
+            {teams.map((t) => {
+              const members = callers.filter((u: any) => teamOf(u) === t.id);
+              const mgrs = users.filter((u: any) => isTeamManager(u) && teamOf(u) === t.id);
+              const open = openTeams.has(t.id);
+              return (
+                <div key={t.id} style={{ marginBottom: 6 }}>
+                  <div className="card" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px' }}>
+                    <button className="ghost" title={open ? 'Collapse' : 'Expand'}
+                      onClick={() => setOpenTeams((s) => { const n = new Set(s); n.has(t.id) ? n.delete(t.id) : n.add(t.id); return n; })}
+                      style={{ padding: '0 4px' }}>{open ? '▾' : '▸'}</button>
+                    <strong>{t.name}</strong>
+                    <span className="muted" style={{ fontSize: '0.8rem' }}>
+                      {members.length} caller{members.length === 1 ? '' : 's'}
+                      {mgrs.length > 0 && <> · manager: {mgrs.map((m: any) => m.full_name || m.username).join(', ')}</>}
+                      {mgrs.length === 0 && <> · <em>no manager</em></>}
+                    </span>
+                    <span style={{ flex: 1 }} />
+                    {isAdmin && (
+                      <>
+                        <button className="secondary" style={{ fontSize: '0.78rem', padding: '0.25rem 0.6rem' }}
+                          onClick={() => { const n = prompt('Rename team', t.name); if (n && n.trim() && n.trim() !== t.name) renameTeam.mutate({ id: t.id, name: n.trim() }); }}>
+                          Rename
+                        </button>
+                        <button className="danger" style={{ fontSize: '0.78rem', padding: '0.25rem 0.6rem' }}
+                          onClick={() => { if (confirm(`Delete "${t.name}"? Its ${members.length} caller(s) become ungrouped — no account is deleted.`)) removeTeam.mutate(t.id); }}>
+                          Delete
+                        </button>
+                      </>
+                    )}
+                  </div>
+                  {open && (members.length === 0
+                    ? <div className="card" style={{ marginLeft: 28, marginTop: 6, padding: '8px 12px' }}>
+                        <span className="muted">No callers yet{isAdmin ? ' — assign one with the team dropdown above.' : '.'}</span>
+                      </div>
+                    : <div style={{ marginTop: 6 }}>{members.map((u: any) => callerRow(u, 28))}</div>
+                  )}
+                </div>
+              );
+            })}
+
+            {teams.length === 0 && ungrouped.length === 0 && (
+              <div className="card"><span className="muted">No callers yet.</span></div>
+            )}
+          </>
+        );
+      })()}
+
+      {roleFilter !== 'teams' && (filtered.length === 0 ? (
         <div className="card"><span className="muted">No users with this role.</span></div>
       ) : (
       <table>
-        <thead><tr><th>Username</th><th>Name</th><th>Email</th><th>Roles</th><th>Bid method</th><th>Status</th><th>Assigned profiles</th><th></th></tr></thead>
+        <thead><tr><th>Username</th><th>Name</th><th>Email</th><th>Roles</th><th>Team</th><th>Bid method</th><th>Status</th><th>Assigned profiles</th><th></th></tr></thead>
         <tbody>
           {filtered.map((u) => (
             <Fragment key={u.id}>
@@ -209,7 +365,20 @@ export default function Users() {
               <td>{u.full_name}</td>
               <td>{u.email}</td>
               <td><CheckboxDropdown options={ALL_ROLES} selected={u.roles || []}
-                onChange={(roles) => updateRoles(u, roles as Role[])} disabled={updateMutation.isPending} placeholder="No roles" /></td>
+                onChange={(roles) => updateRoles(u, roles as Role[])}
+                disabled={!isAdmin || updateMutation.isPending} placeholder="No roles" /></td>
+              <td>
+                {/* Team for BOTH callers and managers — a manager's team is the one they run.
+                    (The Teams tree only lists callers, so a manager can only be placed from here.) */}
+                {(isCaller(u) || isTeamManager(u)) ? (
+                  <select value={teamOf(u)} disabled={!isAdmin || updateMutation.isPending}
+                    onChange={(e) => updateMutation.mutate({ id: u.id, payload: { team_id: e.target.value } })}
+                    title={isTeamManager(u) ? 'The team this manager runs' : 'The team this caller belongs to'}>
+                    <option value="">— none —</option>
+                    {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  </select>
+                ) : <span className="muted">—</span>}
+              </td>
               <td>
                 {(u.roles || []).includes('bidder') ? (
                   <select value={u.bid_method ?? 2}
@@ -236,12 +405,14 @@ export default function Users() {
                 />
               </td>
               <td>
-                <button className="danger" onClick={() => { if (confirm('Delete user?')) deleteMutation.mutate(u.id); }}>Delete</button>
+                {isAdmin
+                  ? <button className="danger" onClick={() => { if (confirm('Delete user?')) deleteMutation.mutate(u.id); }}>Delete</button>
+                  : <span className="muted" title="Only an admin can delete an account — you can set the status to Disabled instead.">—</span>}
               </td>
             </tr>
             {expanded === u.id && (
               <tr className="u-detail-row">
-                <td colSpan={8}>
+                <td colSpan={9}>
                   <div className="u-detail">
                     <div className="u-detail-hd">
                       {u.avatar_url
@@ -280,7 +451,7 @@ export default function Users() {
           ))}
         </tbody>
       </table>
-      )}
+      ))}
     </div>
   );
 }

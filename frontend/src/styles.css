@@ -577,12 +577,11 @@ tbody tr:hover td { background: var(--panel-2); color: var(--text); }
   border-bottom: 1px solid rgba(255,255,255,0.094);
 }
 .iv-row:hover td:not(.iv-gutter) { background: #202024; }   /* hover tint on the panel cells, not the margin */
-/* Scheduled_at urgency tint: today's upcoming call = red, tomorrow's = yellow (computed in the
-   viewer's tz; past/other = none). Placed after `.iv-grid td` so it wins the equal-specificity tie. */
-.iv-row--today td    { background: #3d2020; }
-.iv-row--tomorrow td { background: #3b3418; }
-.iv-row--today:hover td:not(.iv-gutter)    { background: #4a2726; }
-.iv-row--tomorrow:hover td:not(.iv-gutter) { background: #484020; }
+/* The NEXT upcoming call — the only coloured row on the board (yellow). Calls that have already
+   passed, and every call after the next one, stay plain. Placed after `.iv-grid td` so it wins the
+   equal-specificity tie. */
+.iv-row--next td { background: #3b3418; }
+.iv-row--next:hover td:not(.iv-gutter) { background: #484020; }
 /* Flash a row that just re-sorted after a Scheduled_at edit, so its jump to a new position is
    obvious. A fading overlay (pseudo-element) is used so it doesn't fight the cell background or
    the selection box-shadow. */
@@ -610,6 +609,12 @@ tbody tr:hover td { background: var(--panel-2); color: var(--text); }
 .iv-sub .iv-disp, .iv-sub .iv-input { color: #9B9B9B; font-size: 13px; }
 .iv-hd-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .iv-hd-sub { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #6b6b6b; font-size: 12px; }
+/* Second header line: the stacked field's label on the left, and (Scheduled_at only) the account
+   timezone badge on the right — sitting under "(min)" so the column's times are never ambiguous. */
+.iv-hd-sub-row { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.iv-hd-sub-row .iv-hd-sub { flex: 1; min-width: 0; }
+.iv-hd-tz { flex: 0 0 auto; color: #9B9B9B; font-size: 11px; line-height: 14px; white-space: nowrap;
+  padding: 0 4px; border: 1px solid rgba(255,255,255,0.14); border-radius: 3px; }
 .iv-hd-name-row { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .iv-hd-tr { flex: 0 0 auto; max-width: 84px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #9B9B9B; font-size: 12px; }
 .iv-hd-icon { font-size: 1.05rem; line-height: 1; color: #c9c9c9; }

@@ -98,6 +98,38 @@ def require_admin(user: dict = Depends(get_current_user)) -> dict:
     return user
 
 
+# ── caller teams ─────────────────────────────────────────────────────────────
+def is_manager(user: dict) -> bool:
+    """A team manager (and not an admin — admins are handled by their own, wider rules)."""
+    return "manager" in _user_roles(user) and "admin" not in _user_roles(user)
+
+
+def team_id_of(user: dict) -> str:
+    return str((user or {}).get("team_id", "")).strip()
+
+
+def team_members(team_id: str) -> list[dict]:
+    """Everyone in a team. Empty team_id matches nobody (never "all ungrouped users")."""
+    tid = str(team_id or "").strip()
+    if not tid:
+        return []
+    return [u for u in storage.get_users() if str(u.get("team_id", "")).strip() == tid]
+
+
+def team_caller_names(team_id: str) -> set[str]:
+    """The identities a team's callers appear under in the board's Caller cell (username + full
+    name, lowercased) — the board stores a display string, not a user id."""
+    out: set[str] = set()
+    for u in team_members(team_id):
+        if "caller" not in {str(r).strip() for r in (u.get("roles") or [])}:
+            continue
+        for key in ("username", "full_name"):
+            v = str(u.get(key, "")).strip().lower()
+            if v:
+                out.add(v)
+    return out
+
+
 def require_role(*roles: str):
     """FastAPI dependency factory: require ANY of the listed roles."""
     def _check(user: dict = Depends(get_current_user)) -> dict:
