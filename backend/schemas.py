@@ -27,6 +27,7 @@ class RegisterRequest(BaseModel):
 
 class ChangePasswordRequest(BaseModel):
     new_password: str
+    current_password: str = ''
 
 
 # -------- Jobs --------

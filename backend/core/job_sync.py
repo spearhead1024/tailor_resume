@@ -43,6 +43,7 @@ except Exception:
 import requests
 
 from auth import storage
+from core.storage import COMPANY_DEDUP_DAYS
 
 # ---------------------------------------------------------------------------
 # Config
@@ -355,15 +356,16 @@ def sync_once() -> dict:
             log.info("Blocked (%s): %s — %s — %s", block_reason, company, job_title, link)
             continue
 
-        # One job per company per region per week: if this company already has an
-        # active job in the same region within the last 7 days, skip the new one.
-        recent = storage.find_recent_company_job(payload["company"], payload["region"], within_days=7)
+        # One job per company per region per month: if this company already has an
+        # active job in the same region within the dedup window, skip the new one.
+        recent = storage.find_recent_company_job(payload["company"], payload["region"])
         if recent is not None:
             skipped += 1
             log.info(
-                "Skipped company-week dup: %s [%s] — already have '%s' (%s) within 7d",
+                "Skipped company-dup: %s [%s] — already have '%s' (%s) within %dd",
                 payload["company"] or remote_id, payload["region"],
                 recent.get("job_title", ""), recent.get("id", ""),
+                COMPANY_DEDUP_DAYS,
             )
             continue
 

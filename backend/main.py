@@ -34,6 +34,7 @@ from routers import screenshots as screenshots_router
 from routers import extension as extension_router
 from routers import guide as guide_router
 from routers import external as external_router
+from routers import interviews as interviews_router
 
 FRONTEND_DIST = PROJECT_ROOT.parent / "frontend" / "dist"
 
@@ -70,6 +71,7 @@ app.include_router(screenshots_router.router)
 app.include_router(extension_router.router)
 app.include_router(guide_router.router)
 app.include_router(external_router.router)
+app.include_router(interviews_router.router)
 
 
 @app.get("/api/health")
@@ -84,15 +86,19 @@ def health():
 if FRONTEND_DIST.exists():
     app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="assets")
 
+    # index.html must never be cached, or browsers keep loading a stale JS bundle after a rebuild
+    # (the hashed /assets/* files are safe to cache — a new build gives them new URLs).
+    _NO_CACHE = {"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache"}
+
     @app.get("/{full_path:path}")
     def spa_fallback(full_path: str):
         # /api/* is handled by routers; anything else returns index.html for client-side routing
         if full_path.startswith("api/"):
             return JSONResponse({"detail": "Not Found"}, status_code=404)
         target = FRONTEND_DIST / full_path
-        if target.is_file():
+        if target.is_file() and target.name != "index.html":
             return FileResponse(str(target))
-        return FileResponse(str(FRONTEND_DIST / "index.html"))
+        return FileResponse(str(FRONTEND_DIST / "index.html"), headers=_NO_CACHE)
 else:
     @app.get("/")
     def root():

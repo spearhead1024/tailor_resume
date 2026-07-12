@@ -138,6 +138,43 @@ export default function Jobs() {
     onError: (e: any) => toast(formatJobError(e, 'Sync failed'), 'error'),
   });
 
+  // ── Bulk selection (admin) ──────────────────────────────────────────────
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  // Selection is per-page: clear it whenever the query (page/filters) changes.
+  useEffect(() => { setSelected(new Set()); }, [params]);
+
+  const pageIds: string[] = jobs.map((j: any) => j.id);
+  const allSelected = pageIds.length > 0 && pageIds.every((id) => selected.has(id));
+  const someSelected = pageIds.some((id) => selected.has(id));
+  const toggleAll = () => setSelected((prev) => {
+    const next = new Set(prev);
+    if (allSelected) pageIds.forEach((id) => next.delete(id));
+    else pageIds.forEach((id) => next.add(id));
+    return next;
+  });
+  const toggleOne = (id: string) => setSelected((prev) => {
+    const n = new Set(prev);
+    n.has(id) ? n.delete(id) : n.add(id);
+    return n;
+  });
+
+  async function runBulk(label: string, fn: (id: string) => Promise<any>) {
+    const ids = [...selected];
+    if (!ids.length) return;
+    setBulkBusy(true);
+    const results = await Promise.allSettled(ids.map(fn));
+    const ok = results.filter((r) => r.status === 'fulfilled').length;
+    const fail = ids.length - ok;
+    setBulkBusy(false);
+    qc.invalidateQueries({ queryKey: ['jobs'] });
+    setSelected(new Set());
+    toast(`${label}: ${ok} done${fail ? `, ${fail} failed` : ''}`, fail ? 'error' : 'success');
+  }
+  const bulkApprove = () => runBulk('Approved', (id) => api.patch(`/api/jobs/${id}`, { payload: { status: 'approved' } }));
+  const bulkReject = () => runBulk('Rejected', (id) => api.patch(`/api/jobs/${id}`, { payload: { status: 'rejected' } }));
+  const bulkDelete = () => { if (!confirm(`Delete ${selected.size} selected job(s)?`)) return; runBulk('Deleted', (id) => api.delete(`/api/jobs/${id}`)); };
+
   // Group the current page by the selected dimension.
   const groups = useMemo(() => {
     const keyOf = (job: any): { key: string; label: string } => {
@@ -342,9 +379,27 @@ export default function Jobs() {
       ) : jobs.length === 0 ? (
         <div className="card"><span className="muted">No jobs match the current filters.</span></div>
       ) : (
+        <>
+        {isAdmin && selected.size > 0 && (
+          <div className="card" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '0.5rem 0.8rem', marginBottom: 8 }}>
+            <strong>{selected.size} selected</strong>
+            <button className="secondary" onClick={bulkApprove} disabled={bulkBusy}>Approve</button>
+            <button className="secondary" onClick={bulkReject} disabled={bulkBusy}>Reject</button>
+            <button className="danger" onClick={bulkDelete} disabled={bulkBusy}>Delete</button>
+            <button className="ghost" style={{ marginLeft: 'auto' }} onClick={() => setSelected(new Set())} disabled={bulkBusy}>Clear</button>
+            {bulkBusy && <span className="spinner" />}
+          </div>
+        )}
         <table>
           <thead>
             <tr>
+              {isAdmin && (
+                <th style={{ width: 28 }}>
+                  <input type="checkbox" checked={allSelected} title="Select all on this page"
+                    ref={(el) => { if (el) el.indeterminate = someSelected && !allSelected; }}
+                    onChange={toggleAll} />
+                </th>
+              )}
               <th>Company</th><th>Job title</th><th>Region</th><th>Status</th>
               <th style={{ whiteSpace: 'nowrap' }}>AddedAt</th>
               {isAdmin && <th style={{ whiteSpace: 'nowrap' }}>Added by</th>}
@@ -355,7 +410,7 @@ export default function Jobs() {
             {groups.map((group) => (
               <React.Fragment key={group.key}>
                 <tr>
-                  <td colSpan={isAdmin ? 7 : 5} style={{
+                  <td colSpan={isAdmin ? 8 : 5} style={{
                     padding: '0.5rem 0.75rem', fontWeight: 600, fontSize: '0.85rem',
                     color: 'var(--muted)', background: 'var(--panel-2)', borderTop: '2px solid var(--border)',
                   }}>
@@ -365,6 +420,11 @@ export default function Jobs() {
                 {group.jobs.map((job) => (
                   <React.Fragment key={job.id}>
                     <tr style={job.flagged ? { background: 'rgba(220,38,38,0.06)' } : undefined}>
+                      {isAdmin && (
+                        <td style={{ width: 28 }}>
+                          <input type="checkbox" checked={selected.has(job.id)} onChange={() => toggleOne(job.id)} />
+                        </td>
+                      )}
                       <td>
                         {job.flagged && (
                           <span title={`Reported ${job.reports_count}×`} style={{ color: 'var(--danger,#dc2626)', marginRight: 5 }}>⚑</span>
@@ -404,7 +464,7 @@ export default function Jobs() {
                     </tr>
                     {job.flagged && (job.reports?.length || 0) > 0 && (
                       <tr>
-                        <td colSpan={isAdmin ? 7 : 5} style={{ padding: '0.75rem 1rem', background: 'rgba(220,38,38,0.06)', borderBottom: '1px solid var(--border)' }}>
+                        <td colSpan={isAdmin ? 8 : 5} style={{ padding: '0.75rem 1rem', background: 'rgba(220,38,38,0.06)', borderBottom: '1px solid var(--border)' }}>
                           <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: 12 }}>
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <div style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--danger,#dc2626)', marginBottom: 4 }}>
@@ -441,7 +501,7 @@ export default function Jobs() {
                     )}
                     {editingId === job.id && (
                       <tr>
-                        <td colSpan={isAdmin ? 7 : 5} style={{ padding: '1rem', background: 'var(--panel-2)' }}>
+                        <td colSpan={isAdmin ? 8 : 5} style={{ padding: '1rem', background: 'var(--panel-2)' }}>
                           <div className="row">
                             <div className="field"><label>Company</label><input value={editDraft.company} onChange={(e) => setEditDraft({ ...editDraft, company: e.target.value })} /></div>
                             <div className="field"><label>Job title</label><input value={editDraft.job_title} onChange={(e) => setEditDraft({ ...editDraft, job_title: e.target.value })} /></div>
@@ -476,6 +536,7 @@ export default function Jobs() {
             ))}
           </tbody>
         </table>
+        </>
       )}
 
       {/* Pagination — bottom */}

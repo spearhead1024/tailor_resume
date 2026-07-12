@@ -39,6 +39,12 @@ from .db.models import (
 
 _ALLOWED_REGIONS = {'ANY', 'US', 'EU', 'LATAM'}
 
+# Company de-duplication window: at most one active job per company + region
+# within this many days (a rolling "one month"). Single source of truth — the
+# manual-create check (routers/jobs.py) and the sync poller (core/job_sync.py)
+# both inherit this default.
+COMPANY_DEDUP_DAYS = 15
+
 _URL_TRACKING_PARAMS = frozenset({
     'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
     'ref', 'source', 'src', 'referral', 'referer', 'fbclid', 'gclid',
@@ -55,6 +61,49 @@ def _normalize_market_region(value: str) -> str:
     if not raw or raw in {'ALL', 'GLOBAL', 'ANYWHERE', 'REMOTE'}:
         return 'ANY'
     return raw if raw in _ALLOWED_REGIONS else raw
+
+
+# ── Tech-stack matching ────────────────────────────────────────────────────
+# A profile carries a small set of main tech skills (profile.tech_stacks). A job
+# is eligible for that profile when ANY of those skills is mentioned as a WHOLE
+# WORD in the job description (case-insensitive). Whole-word matching is what
+# keeps 'Java' from matching 'JavaScript' — they're different languages.
+_skill_pattern_cache: dict[str, "re.Pattern[str]"] = {}
+
+
+def _skill_pattern(skill: str) -> "re.Pattern[str]":
+    """Case-insensitive WHOLE-WORD matcher for one tech skill.
+
+    Boundaries are alphanumerics only, so a skill never bleeds into a longer
+    identifier ('Java' ∌ 'JavaScript', 'Go' ∌ 'Golang') while punctuation such
+    as spaces, dots, slashes and parentheses still counts as a boundary. The
+    skill text is escaped, so punctuated tokens like 'C#', '.NET', 'C++' and
+    'Node.js' match literally.
+    """
+    key = skill.lower()
+    pat = _skill_pattern_cache.get(key)
+    if pat is None:
+        esc = re.escape(skill.strip())
+        pat = re.compile(rf'(?<![A-Za-z0-9]){esc}(?![A-Za-z0-9])', re.IGNORECASE)
+        _skill_pattern_cache[key] = pat
+    return pat
+
+
+def tech_stacks_match(description: str, profile_stacks: list) -> bool:
+    """Whether a job matches a profile's tech-stack filter.
+
+    Rules (product spec):
+      - profile_stacks empty  → True  (All-Stack profile: every job matches)
+      - otherwise             → True iff ANY profile skill appears as a whole
+                                word (case-insensitive) in the job description.
+    """
+    stacks = [str(s).strip() for s in (profile_stacks or []) if str(s).strip()]
+    if not stacks:
+        return True  # All-Stack
+    text = str(description or '')
+    if not text:
+        return False
+    return any(_skill_pattern(s).search(text) for s in stacks)
 
 
 def build_password_record(password: str) -> dict[str, str]:
@@ -76,6 +125,16 @@ def _hash_auth_token(token: str) -> str:
 
 def _job_compare_key(value: str) -> str:
     return ''.join(ch.lower() if ch.isalnum() else ' ' for ch in str(value or '')).strip()
+
+
+def _company_fold_key(value: str) -> str:
+    """Company key for the 30-day de-dup that ALSO folds visually-confusable
+    characters, so 'Jorie AI' and 'Jorie Al' (capital-i vs lowercase-L) collapse
+    to the same key. Lowercases, folds l/I/1/| -> 'i' and O/0 -> 'o', and keeps
+    only alphanumerics (spaces/punctuation ignored). Used ONLY by the dedup check
+    — it does not change the stored company_key index or any existing row."""
+    s = str(value or '').lower().translate(str.maketrans({'l': 'i', '1': 'i', '|': 'i', '0': 'o'}))
+    return re.sub(r'[^a-z0-9]', '', s)
 
 
 def normalize_job_url(url: str) -> str:
@@ -158,7 +217,7 @@ def _default_templates() -> list[dict]:
 
 
 DEFAULT_PROMPT_TEMPLATE = """\
-You are a senior resume writer. Generate a JSON resume tailored to the Job Description below.
+You are a senior resume writer and ATS optimizer. Generate a JSON resume tailored to the Job Description below. Build it from a clean slate every time — do not rely on any previous resume, prior generation, or example. Use only the PROFILE JSON and JOB DESCRIPTION JSON in this message.
 
 # RESPONSE FORMAT — ABSOLUTE, NON-NEGOTIABLE
 This message IS the work order. The instant you finish reading this prompt, GENERATE the JSON. Do not reply with anything else first.
@@ -193,6 +252,7 @@ The user has automated tooling that reads ONLY the fenced JSON. Any question, pr
 The JSON inside must have EXACTLY these top-level keys:
 - "job_id": copy from the input JOB JSON
 - "profile_id": copy from the input PROFILE JSON
+- "headline": string — a professional positioning line (see RULES)
 - "professional_summary": string
 - "professional_experience": array of {company, role, duration, bullets: [string]}
 - "technical_skills": array of {skill_category, skills: [string]}
@@ -205,7 +265,7 @@ The PROFILE JSON is intentionally minimal. It contains only:
   - target lengths: `summary_char_count`, `skills_count`, `total_years_of_experience`
   - `profile_id` and `job_id` to echo back
 
-It DOES NOT contain — and is NOT supposed to contain — the candidate's full prior resume, real prior bullets, their name, their education, their skills, or their projects. This is by design. The candidate's name, education, and any other identity fields are filled in downstream by the rendering pipeline.
+It DOES NOT contain — and is NOT supposed to contain — the candidate's full prior resume, real prior bullets, their name, their education, their skills, or their projects. This is by design. The candidate's name, education, and contact details are filled in downstream by the rendering pipeline. Treat any uploaded resume only as a visual template — never as a source of facts to copy.
 
 Your job is to GENERATE plausible, JD-aligned content for each company in PROFILE.work_history, using only the company name, duration, and legacy_role as anchors. Treat each company as a fixed placement; invent realistic achievements, technologies, and metrics that:
   1. Could credibly have been done at a company of that kind during that date range, AND
@@ -214,52 +274,58 @@ Your job is to GENERATE plausible, JD-aligned content for each company in PROFIL
 DO NOT refuse. DO NOT ask the user to upload anything more. DO NOT say "I need more information." The two JSONs below are sufficient — proceed.
 
 # RULES
-1. Read the JOB DESCRIPTION deeply. Extract every required skill, framework, tool, service, methodology, and domain term.
-2. Wrap each tech-relevant keyword in <B>...</B> tags wherever it appears in "professional_summary", in each bullet of "professional_experience", and skills inside "technical_skills". These tags will be rendered as bold in the final PDF.
-3. "professional_summary":
-   - Length MUST be within ±20 characters of `summary_char_count` (from PROFILE). For example, if `summary_char_count` is 700, the summary MUST be between 680 and 720 characters (including spaces, INCLUDING the <B>...</B> tags). Count the characters before returning. A summary outside this range is REJECTED.
-   - If your first draft is too short, expand with additional context about scope, scale, leadership, and measurable outcomes — do not pad with filler. If too long, tighten redundant phrasing. Never finish under the minimum.
-   - Bold every required skill and tech term with <B>...</B>.
-4. "professional_experience":
-   - Emit one entry per item in PROFILE.work_history, in the same order.
+1. Read the JOB DESCRIPTION deeply. Identify every required skill, framework, tool, service, methodology, and domain term. MIRROR THE JD'S EXACT TERMINOLOGY — if the JD writes "CI/CD", "RESTful APIs", or "PostgreSQL", use those exact strings (you may include both an acronym and its expansion where natural). Exact-match wording is what an ATS scores highest.
+
+2. BOLD: wrap each tech-relevant keyword in <B>...</B> wherever it appears in "professional_summary", in each bullet of "professional_experience", and as the category name inside "technical_skills". These tags render as bold in the final PDF. Never bold an entire sentence or a whole skill line.
+
+3. "headline" — a polished professional positioning line (NOT a sentence, NOT a keyword dump):
+   - Format: a seniority-qualified role followed by one or two specializations separated by a vertical bar, e.g. "Senior Full-Stack Engineer | Cloud & Machine Learning" or "Backend Engineer | Distributed Systems & APIs".
+   - It MUST contain the job's target title from the JOB DESCRIPTION — this drives ATS title alignment.
+   - Under ~12 words, Title Case, third person, no first-person pronouns, no weak connectors ("for", "and … Solutions" tacked on), no trailing comma-separated tech list.
+   - Do NOT wrap the headline in <B> tags.
+
+4. "professional_summary":
+   - Length MUST be within ±20 characters of `summary_char_count` (from PROFILE), counting spaces and the <B>...</B> tags. Count before returning; a summary outside this range is REJECTED.
+   - Voice: confident THIRD person — never use "I", "my", or any first-person pronoun. Open with seniority + role + total years of experience (from `total_years_of_experience`), then the domains worked and the measurable value delivered, and close with the specialization or AI angle most relevant to this job.
+   - Weave only a handful of the MOST important JD technologies into the prose and bold them with <B>. Do NOT stuff the summary with long comma-separated technology or responsibility lists.
+   - Never write raw tokens or shorthand such as "JS(ES+)", "MS SQL objects", "SQL objects", or "Transact SQL objects" — use clean professional terms like JavaScript, SQL Server development, and stored procedures. Describe engineering practices in natural language ("test automation and code-review practices"), not as terse comma lists.
+   - If your first draft is short, EXPAND with concrete scope, scale, leadership, and measurable outcomes — never pad with filler.
+
+5. "professional_experience":
+   - Emit one entry per item in PROFILE.work_history, in the same order. Copy `company` and `duration` from the matching PROFILE.work_history item.
+   - "role": INFER a sharp, JD-aligned role title for each company from the job description and the bullet evidence — for example Machine Learning Engineer, DevOps Engineer, Platform Engineer, Data Engineer, Backend Engineer, Frontend Engineer, or Full-Stack Engineer. Do NOT default to a generic "Software Engineer" unless the JD itself targets exactly that. Make every role title sharply aligned to the core function of the job description.
    - For each company, generate EXACTLY `bullet_count` bullets (no more, no less).
-   - Each bullet MUST render as EXACTLY 2 LINES in the final PDF. The resume column wraps at roughly 95–105 characters per line, so each bullet must be between 180 and 200 characters (including spaces). The server REJECTS any bullet under 110 characters because it would render as only 1 line — that is an automatic failure of the entire submission.
-   - The 180–200 char count is the VISIBLE TEXT only — do NOT count the literal characters of <B> and </B> markup. Each <B>...</B> wrapper adds 7 invisible chars that the server strips before counting. So if you wrap 5 tech terms, your visible bullet must still be ~190 chars; the raw string you submit may be ~225 chars.
-   - HARD COUNTING RULE — before you write a bullet, decide the target VISIBLE length (≈190 chars after removing every <B> and </B>). After drafting, mentally delete every <B> and </B> and count what remains. If the visible text is under 180, EXPAND with more concrete detail (named tools, named systems, specific %/$/qty metrics, scope of users/data/team). If under 110 visible chars, you have failed — rewrite the bullet entirely longer. Do NOT shrug and submit a short bullet.
-   - Structure each bullet as: [Action verb] + [what you built/led/delivered] + [the technology/stack used] + [measurable impact or scope]. Pack all four parts into one flowing sentence — never split into two sentences, never use "and then", and never write filler.
-   - Examples of length (chars shown are VISIBLE chars after stripping <B>/</B>):
-     * BAD — 1 line (75 visible chars, will be REJECTED): "Built CI/CD pipelines in <B>GitHub Actions</B> that cut deploy times by 40% across services." (raw string is 96 chars; once you strip the 21 chars of <B>...</B> markup the visible text is only 75 chars — under the 110-char floor.)
-     * GOOD — 2 lines (~190 visible chars, accepted): "Architected a multi-tenant microservices platform on <B>Kubernetes</B> using <B>Go</B> and <B>gRPC</B>, cutting p99 latency from 480ms to 90ms across 14 services serving 12M daily requests in production." (raw string is ~213 chars; visible text after stripping <B>/</B> is ~192 chars — comfortably in the 180–200 band.)
-   - If you find yourself writing short, generic bullets ("Built X using Y, improving Z"), STOP and re-expand each one with two of: real scale (users, requests, GB, $), team/scope (engineers, teams, BU), or before/after numbers. Length comes from concrete specifics, not adjectives.
-   - Bullets must be realistic for the role's `duration` and `legacy_role`.
-   - TEMPORAL CONSTRAINT — only mention a technology in a bullet if that tech existed AND was widely adopted during that role's date range. Examples of emergence dates to respect:
-     * Generative AI / OpenAI API / LLMs / ChatGPT: 2022+
-     * LangChain / vector DBs (Pinecone, Weaviate): 2023+
-     * Solana mainnet: 2020+
-     * Ethereum / Solidity: 2015+
-     * React: 2013+
-     * Kubernetes: 2015+
-     * Docker: 2014+
-     * TypeScript widespread: 2017+
-     * Rust widespread: 2018+
+   - Each bullet MUST render as EXACTLY 2 LINES in the final PDF: the column wraps at ~95–105 chars per line, so each bullet's VISIBLE text (after deleting every <B> and </B>) must be 180–200 chars. The server REJECTS any bullet whose visible text is under 110 chars. The <B>/</B> markup does NOT count toward this number.
+   - LENGTH MUST COME FROM SUBSTANCE, NEVER FILLER. Reach ~190 visible chars by packing concrete specifics: exact named technologies from the JD, real scope (users, requests, GB, $, team size), and before/after metrics (%, latency, throughput). Adjectives and generic phrases do not count as length.
+   - Each bullet describes a DISTINCT responsibility, problem, or outcome and NAMES exact technologies from the JD. No two bullets anywhere in the resume may share the same opening verb, the same wording, or the same sentence structure.
+   - VARY the opening verb across bullets (own, design, ship, build, migrate, harden, instrument, refactor, mentor, lead, automate, optimize, integrate, debug, profile, partner, scale).
+   - FORBIDDEN generic openings / filler — never use these or anything like them: "Delivered production work across", "Collaborated with product and engineering stakeholders", "Strengthened reliability and delivery confidence", "Contributed as a … in a fast-moving environment", "modern tools", "backend services", "cloud-based systems", "web technologies", or any sentence whose only technical content is a comma-separated tech list.
+   - Structure each bullet as: [action verb] + [what you built/led/delivered] + [the exact technology/stack used] + [measurable impact or scope] — one flowing sentence, never two, never "and then".
+   - ATS: every technology you list under "technical_skills" should also appear, used in context, inside at least one bullet.
+   - TEMPORAL CONSTRAINT — only mention a technology in a bullet if it existed AND was widely adopted during that role's date range:
+     * Generative AI / OpenAI API / LLMs / ChatGPT: 2022+ ; LangChain / vector DBs (Pinecone, Weaviate): 2023+
+     * Solana mainnet: 2020+ ; Ethereum / Solidity: 2015+ ; React: 2013+ ; Kubernetes: 2015+ ; Docker: 2014+ ; TypeScript widespread: 2017+ ; Rust widespread: 2018+
    Anything before its emergence year is hallucination — DO NOT include it.
-5. "technical_skills":
-   - The total number of individual skills across ALL categories combined must be EXACTLY `skills_count` (from PROFILE). Count them before returning. No more, no less.
-   - Group those skills into 8–10 logical categories. Wrap the category name in <B>...</B>.
-   - DO NOT bold the individual skill items (keep them plain).
-   - Include every skill required by the JD first, then pad with closely-related tech/frameworks (e.g. if JD mentions React, also list Next.js, Redux; if Solidity, also Hardhat, Foundry) until the total reaches exactly `skills_count`.
-6. Tone: confident, specific, achievement-driven. No fluff. (The candidate's name, contact info, and education are filled in downstream by the rendering pipeline — DO NOT add them to the JSON, and DO NOT ask the user for them.)
-7. Reminder: wrap the JSON in ```json ... ``` fences so the chat UI shows a copy button.
+
+6. "technical_skills":
+   - The total number of individual skills across ALL categories combined must be EXACTLY `skills_count` (from PROFILE). Count them before returning.
+   - Group them into 8–10 ATS-friendly categories such as Frontend, Backend, Data, Cloud / DevOps, Testing, AI / Automation, and Other Relevant. Wrap each category NAME in <B>...</B>; keep the individual skill items plain (do not bold them).
+   - List the JD-required skills FIRST using the JD's exact terms, then pad to `skills_count` with closely-related, role-appropriate technologies (e.g. if the JD mentions React, add Next.js and Redux; if Solidity, add Hardhat and Foundry). Technical items ONLY — no soft skills, no vague architecture labels.
+
+7. Tone: confident, specific, achievement-driven. No fluff. The candidate's name, contact info, and education are filled in downstream by the rendering pipeline — DO NOT add them to the JSON and DO NOT ask the user for them. Wrap the JSON in ```json ... ``` fences so the chat UI shows a copy button.
 
 # SELF-CHECK BEFORE RETURNING (MANDATORY)
 Before you output the final JSON, silently run this checklist. If ANY check fails, fix it and re-check. Do not return a JSON that fails any check — the server will reject it and the user will have to re-prompt you.
 
-  [ ] Summary length (including spaces and <B>...</B> tags) is within ±20 chars of PROFILE.summary_char_count.
-  [ ] professional_experience has exactly the same number of entries as PROFILE.work_history, in the same order.
+  [ ] "headline" is a positioning line under ~12 words that contains the JD's target title, third person, with no <B> tags.
+  [ ] Summary length (including spaces and <B>...</B> tags) is within ±20 chars of PROFILE.summary_char_count, written in third person with no first-person pronouns.
+  [ ] professional_experience has exactly the same number of entries as PROFILE.work_history, in the same order, each with a sharp, non-generic role title.
   [ ] For each company i, the bullets array has EXACTLY PROFILE.work_history[i].bullet_count entries.
-  [ ] Every bullet's VISIBLE length (after deleting every <B> and </B> from the string) is between 180 and 200 chars, spaces included. Any bullet whose visible text is under 110 chars is an automatic rejection — rewrite it longer with concrete metrics/scope. Bold markup does NOT count toward this number.
-  [ ] technical_skills total skill count (summed across all categories) equals PROFILE.skills_count exactly.
-  [ ] No prose outside the ```json fence."""
+  [ ] Every bullet's VISIBLE length (after deleting every <B> and </B>) is between 180 and 200 chars; none is under 110. The length comes from named technologies and metrics, never filler. Bold markup does NOT count.
+  [ ] No two bullets share an opening verb, wording, or sentence structure, and no forbidden filler phrase appears anywhere.
+  [ ] technical_skills total skill count (summed across all categories) equals PROFILE.skills_count exactly, with JD-exact skills listed first and technical items only.
+  [ ] No prose outside the ```json fence.
+"""
 
 
 def _default_settings() -> dict:
@@ -427,6 +493,10 @@ def _normalize_profile(item: dict) -> dict:
         'summary_seed': item.get('summary_seed', ''),
         'uploaded_resume': _normalize_uploaded_resume(item.get('uploaded_resume', {})),
         'technical_skills': [str(s).strip() for s in item.get('technical_skills', []) if str(s).strip()],
+        # Admin-set main skills (2-3) used to match jobs to this profile. Empty
+        # = "All-Stack" (every job matches). Separate from technical_skills,
+        # which feeds résumé keyword bolding.
+        'tech_stacks': [str(s).strip() for s in item.get('tech_stacks', []) if str(s).strip()],
         'region': _normalize_market_region(item.get('region', item.get('market_region', ''))),
         'active': bool(item.get('active', True)),
         'status': 'restricted' if str(item.get('status', 'active') or 'active').strip().lower() == 'restricted' else 'active',
@@ -459,7 +529,7 @@ def _normalize_template(item: dict, *, fallback_index: int = 0) -> dict:
     return merged
 
 
-ALLOWED_ROLES = {'admin', 'bidder', 'job_adder'}
+ALLOWED_ROLES = {'admin', 'bidder', 'job_adder', 'caller'}
 
 
 def _normalize_roles(item: dict) -> list[str]:
@@ -489,12 +559,22 @@ def _normalize_user(item: dict) -> dict:
         'is_admin': 'admin' in roles,
         'status': str(item.get('status', 'pending') or 'pending').strip(),
         'assigned_profile_ids': [str(v).strip() for v in item.get('assigned_profile_ids', []) if str(v).strip()],
+        # Bidder workflow: 1 = Resumes + Apply tabs, 2 = Bid tab. Default 2 (current Bid).
+        'bid_method': 1 if str(item.get('bid_method', 2)).strip() == '1' else 2,
         'created_at': str(item.get('created_at', '')),
         'approved_at': str(item.get('approved_at', '')),
         'approved_by_user_id': str(item.get('approved_by_user_id', '')).strip(),
         'parent_admin_id': str(item.get('parent_admin_id', '')).strip(),
         'force_password_change': bool(item.get('force_password_change', False)),
         'auth_tokens': _normalize_auth_tokens(item.get('auth_tokens', []) or []),
+        # Self-service account profile (the "Profile" / Account page).
+        'avatar_url': str(item.get('avatar_url', '')).strip(),
+        'country': str(item.get('country', '')).strip(),
+        'telegram': str(item.get('telegram', '')).strip(),
+        'whatsapp': str(item.get('whatsapp', '')).strip(),
+        'discord': str(item.get('discord', '')).strip(),
+        'emergency_contacts': str(item.get('emergency_contacts', '')),
+        'timezone': str(item.get('timezone', '')).strip(),        # IANA zone, e.g. "Europe/Bucharest"
         # Per-user keyboard-shortcut overrides for the Chrome extension card
         # ({action_id: single_key}). Validated at the API layer.
         'shortcuts': {
@@ -1476,21 +1556,26 @@ class Storage:
             return _normalize_job(dict(row.data or {})) if row else None
 
     def find_recent_company_job(
-        self, company: str, region: str, within_days: int = 7, exclude_job_id: str = '',
+        self, company: str, region: str, within_days: int = COMPANY_DEDUP_DAYS, exclude_job_id: str = '',
     ) -> dict | None:
         """Most recent ACTIVE (approved/pending) job for the same company + region
-        added within `within_days`. Used to enforce one job per company per week.
-        Rejected/deleted jobs don't hold the slot."""
-        company_key = _job_compare_key(company)
-        if not company_key:
+        added within `within_days` (default one month). Used to enforce one job
+        per company per region per month. Rejected/deleted jobs don't hold the slot.
+
+        Company matching uses `_company_fold_key`, which folds visually-confusable
+        characters (e.g. 'Jorie AI' == 'Jorie Al'). The region + status + recency
+        filters narrow the candidate set in SQL; the fold compare runs in Python
+        over that small set, so no stored key/index changes are needed."""
+        fold = _company_fold_key(company)
+        if not fold:
             return None
         region_key = _normalize_market_region(region)
-        cutoff = datetime.utcnow() - timedelta(days=max(1, int(within_days or 7)))
+        cutoff = datetime.utcnow() - timedelta(days=max(1, int(within_days or COMPANY_DEDUP_DAYS)))
         with session_scope(self.db_path) as session:
+            # Scan only id+company (not the heavy data JSON) for the fold compare.
             stmt = (
-                select(JobRow)
+                select(JobRow.id, JobRow.company)
                 .where(
-                    JobRow.company_key == company_key,
                     JobRow.region == region_key,
                     JobRow.status.in_(('approved', 'pending')),
                     JobRow.submitted_at.is_not(None),
@@ -1500,7 +1585,15 @@ class Storage:
             )
             if exclude_job_id:
                 stmt = stmt.where(JobRow.id != str(exclude_job_id).strip())
-            row = session.scalar(stmt.limit(1))
+            # Newest-first; take the first whose folded company name matches.
+            match_id = next(
+                (jid for jid, comp in session.execute(stmt)
+                 if _company_fold_key(comp or '') == fold),
+                None,
+            )
+            if not match_id:
+                return None
+            row = session.get(JobRow, match_id)
             return _normalize_job(dict(row.data or {})) if row else None
 
     def find_job_by_url(self, url: str, exclude_job_id: str = '') -> dict | None:

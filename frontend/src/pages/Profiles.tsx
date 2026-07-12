@@ -32,6 +32,7 @@ const BLANK_PROFILE = {
   github: '',
   portfolio: '',
   region: 'US',
+  tech_stacks: [] as string[],
   work_history: [] as any[],
   education_history: [] as any[],
   resume_template: 'spear-1',
@@ -55,6 +56,8 @@ export default function Profiles() {
   const [workHistoryError, setWorkHistoryError] = useState(false);
   const [eduHistoryRaw, setEduHistoryRaw]   = useState('[]');
   const [eduHistoryError, setEduHistoryError] = useState(false);
+  // Comma-separated raw string so commas type naturally; parsed to array on save.
+  const [techStacksRaw, setTechStacksRaw]   = useState('');
 
   // File queued for upload when creating a new profile (uploaded after save returns the id)
   const [pendingFile, setPendingFile] = useState<File | null>(null);
@@ -110,6 +113,7 @@ export default function Profiles() {
     setEduHistoryRaw(JSON.stringify(eh, null, 2));
     setEduHistoryError(false);
     setBulletCounts((p.generation_settings?.bullet_counts || []).map(Number));
+    setTechStacksRaw(((p.tech_stacks as string[]) || []).join(', '));
     setPendingFile(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
     setSelected({ ...p });
@@ -167,6 +171,7 @@ export default function Profiles() {
     if (workHistoryError || eduHistoryError) return;
     const payload = {
       ...selected,
+      tech_stacks: techStacksRaw.split(',').map((s) => s.trim()).filter(Boolean),
       total_years_of_experience: Number(selected.total_years_of_experience) || 0,
       summary_seed: selected.summary_seed || '',
       generation_settings: {
@@ -356,6 +361,32 @@ export default function Profiles() {
                   <textarea rows={4} readOnly value={JSON.stringify(selected.education_history || [], null, 2)} style={{ userSelect: 'text' }} />
                 )}
               </Field>
+
+              {/* ── Tech stacks for job matching (admin) ── */}
+              {isAdmin && (
+                <div style={{ marginTop: '1.25rem', borderTop: '1px solid var(--border)', paddingTop: '1rem' }}>
+                  <div style={{ fontWeight: 600, marginBottom: '0.75rem' }}>Tech stacks (job matching)</div>
+                  {editing ? (
+                    <Field label="Main skills — comma separated. Leave empty for All-Stack (matches every job).">
+                      <input
+                        value={techStacksRaw}
+                        onChange={(e) => setTechStacksRaw(e.target.value)}
+                        placeholder="e.g. Java, Spring Boot" />
+                      <div className="muted" style={{ fontSize: '0.8rem', marginTop: 4 }}>
+                        A job is assigned to this profile when any of these skills appears as a
+                        whole word in its description (case-insensitive; “Java” ≠ “JavaScript”).
+                        These skills are also added to every resume this profile generates.
+                      </div>
+                    </Field>
+                  ) : selected.id ? (
+                    <Field label="Tech stacks">
+                      <ReadValue value={((selected.tech_stacks as string[]) || []).length
+                        ? (selected.tech_stacks as string[]).join(', ')
+                        : 'All-Stack (matches every job)'} />
+                    </Field>
+                  ) : null}
+                </div>
+              )}
 
               {/* ── Generation settings (admin) ── */}
               {isAdmin && (

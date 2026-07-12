@@ -87,6 +87,24 @@ export default function Applied() {
     }
   }
 
+  // Schedule → pull this application's resume + job description into a new row on the Interviews board.
+  async function scheduleInterview(r: Row) {
+    try {
+      const jd = await api.get<JobDetail>(`/api/resumes/${r.saved_resume_id}/job`).catch(() => null);
+      await api.post('/api/interviews/rows', {
+        cells: {
+          c_title: r.job_title || '',
+          c_account: r.profile_name || '',
+          c_resume: `/api/resumes/${r.saved_resume_id}/pdf`,   // downloadable resume link (see ResumeCell)
+          c_jd: (jd?.description || '').trim(),
+        },
+      });
+      toast('Added to the Interviews board', 'success');
+    } catch (e: any) {
+      toast(e?.response?.data?.detail || 'Failed to schedule interview', 'error');
+    }
+  }
+
   function clearFilters() {
     setQuery(''); setProfileId(''); setBidder(''); setDateFrom(''); setDateTo('');
   }
@@ -152,6 +170,7 @@ export default function Applied() {
                 onToggle={() => setExpanded(expanded === r.saved_resume_id ? null : r.saved_resume_id)}
                 onPdf={() => viewPdf(r.saved_resume_id)}
                 onJump={() => navigate(`/jobs?company=${encodeURIComponent(r.job_company)}`)}
+                onSchedule={() => scheduleInterview(r)}
               />
             ))}
           </tbody>
@@ -169,9 +188,10 @@ export default function Applied() {
   );
 }
 
-function RowView({ row, open, onToggle, onPdf, onJump }: {
-  row: Row; open: boolean; onToggle: () => void; onPdf: () => void; onJump: () => void;
+function RowView({ row, open, onToggle, onPdf, onJump, onSchedule }: {
+  row: Row; open: boolean; onToggle: () => void; onPdf: () => void; onJump: () => void; onSchedule: () => Promise<void>;
 }) {
+  const [scheduling, setScheduling] = useState(false);
   const { data: detail, isLoading } = useQuery({
     queryKey: ['applied', 'job', row.saved_resume_id],
     queryFn: () => api.get<JobDetail>(`/api/resumes/${row.saved_resume_id}/job`),
@@ -191,6 +211,9 @@ function RowView({ row, open, onToggle, onPdf, onJump }: {
         <td style={{ whiteSpace: 'nowrap' }}>
           <button className="secondary" onClick={(e) => { e.stopPropagation(); onPdf(); }}>📄 PDF</button>
           <button className="secondary" style={{ marginLeft: 4 }} onClick={(e) => { e.stopPropagation(); onJump(); }} title="Find this job in the Jobs tab">↗ Job</button>
+          <button className="secondary" style={{ marginLeft: 4 }} disabled={scheduling}
+            onClick={async (e) => { e.stopPropagation(); setScheduling(true); try { await onSchedule(); } finally { setScheduling(false); } }}
+            title="Add this resume + job description as a row on the Interviews board">{scheduling ? '…' : '📅 Schedule'}</button>
         </td>
       </tr>
       {open && (

@@ -91,11 +91,12 @@ def _check_duplicate(payload: dict, exclude_job_id: str = "") -> None:
 
 
 def _check_company_week(payload: dict, exclude_job_id: str = "") -> None:
-    """Enforce one job per company per region per week. Raises 409 if this
-    company already has an active job in the same region within the last 7 days."""
+    """Enforce one job per company per region per month. Raises 409 if this
+    company already has an active job in the same region within the dedup window
+    (storage.COMPANY_DEDUP_DAYS, currently one month)."""
     recent = storage.find_recent_company_job(
         payload.get("company", ""), payload.get("region", ""),
-        within_days=7, exclude_job_id=exclude_job_id,
+        exclude_job_id=exclude_job_id,
     )
     if recent:
         raise HTTPException(
@@ -103,9 +104,9 @@ def _check_company_week(payload: dict, exclude_job_id: str = "") -> None:
             detail={
                 "kind": "company_week",
                 "message": (
-                    f"{recent.get('company','')} already has a job this week "
+                    f"{recent.get('company','')} already has a job this month "
                     f"({recent.get('job_title','')}). Only one job per company per "
-                    f"region is accepted within 7 days."
+                    f"region is accepted within one month."
                 ),
                 "existing_id":      recent.get("id", ""),
                 "existing_company": recent.get("company", ""),

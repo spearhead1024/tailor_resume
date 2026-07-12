@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,13 +22,37 @@ from fastapi.responses import Response
 
 from auth import get_current_user, has_role, storage
 from core.docx_resume_export import build_docx_style_pdf_bundle
-from core.storage import normalize_job_url
+from core.storage import normalize_job_url, tech_stacks_match
 
 router = APIRouter(prefix="/api/resumes", tags=["resumes"])
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 PDF_CACHE_DIR = DATA_DIR / "pdf_cache"
 PDF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# ── Bid activity tracking (anti-cheat audit) ────────────────────────────────
+# Bid-tab buttons are no longer gated; instead every click is logged here so an
+# admin can see who skipped steps. When a job is marked applied we evaluate
+# whether the bidder actually did the full flow and flag any that didn't.
+LOG_DIR = DATA_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+BID_ACTIVITY_LOG = LOG_DIR / "bid_activity.jsonl"     # every event, one JSON per line
+BID_SUSPICIOUS_LOG = LOG_DIR / "bid_suspicious.log"   # human-readable cheat flags
+
+_BID_ACTIONS = {"copy_prompt", "generate", "download", "open_link", "mark_applied", "report"}
+# Steps a bidder is expected to have done before marking a job applied.
+_BID_REQUIRED_BEFORE_APPLY = ["copy_prompt", "generate", "download", "open_link"]
+
+_bid_log_lock = threading.Lock()
+# In-memory per (user_id, profile_id, job_id) -> {action: timestamp}; used only
+# to score completeness at mark-applied time. The JSONL file is the durable log.
+_bid_steps: dict[tuple, dict] = {}
+
+
+def _append_line(path: Path, text: str) -> None:
+    with _bid_log_lock:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(text + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -345,6 +370,8 @@ def list_pending_for_profile(profile_id: str, user: dict = Depends(get_current_u
             continue
         if not _regions_match(str(job.get("region") or "ANY").upper(), p_region):
             continue
+        if not tech_stacks_match(job.get("description"), profile.get("tech_stacks") or []):
+            continue  # profile's main skills aren't mentioned in this job
         if job.get("id") in processed_ids:
             continue
         if not _is_recent_job(job):  # configurable deadline from settings
@@ -360,6 +387,194 @@ def list_pending_for_profile(profile_id: str, user: dict = Depends(get_current_u
 
     out.sort(key=lambda j: j.get("submitted_at") or "", reverse=True)
     return out
+
+
+def _eligible_bid_items(profile: dict) -> list[dict]:
+    """Unified Bid queue for one profile: approved, region- + tech-stack-matched,
+    within-deadline jobs the profile has NOT applied to yet. Each item carries an
+    existing résumé id (when one was already generated) so the Bid card can skip
+    straight to Download instead of regenerating."""
+    pid = profile.get("id", "")
+    p_region = str(profile.get("region") or "ANY").upper()
+
+    latest_by_job: dict[str, dict] = {}
+    applied_jobs: set[str] = set()
+    for r in storage.get_generated_resumes():
+        if r.get("profile_id") != pid:
+            continue
+        jid = r.get("job_id") or ""
+        if not jid:
+            continue
+        if r.get("applied_status") == "applied":
+            applied_jobs.add(jid)
+        if r.get("status") == "generated":
+            cur = latest_by_job.get(jid)
+            if cur is None or (r.get("created_at") or "") > (cur.get("created_at") or ""):
+                latest_by_job[jid] = r
+
+    items: list[dict] = []
+    for job in storage.get_jobs():
+        if job.get("status") != "approved":
+            continue
+        if job.get("flagged") or job.get("admin_applied"):
+            continue
+        jid = job.get("id") or ""
+        if not jid or jid in applied_jobs:
+            continue  # already applied for this profile
+        if not _regions_match(str(job.get("region") or "ANY").upper(), p_region):
+            continue
+        if not tech_stacks_match(job.get("description"), profile.get("tech_stacks") or []):
+            continue
+        if not _is_recent_job(job):
+            continue
+        existing = latest_by_job.get(jid)
+        items.append({
+            "id": jid,
+            "company": job.get("company", ""),
+            "job_title": job.get("job_title", ""),
+            "region": job.get("region", "ANY"),
+            "link": job.get("link", ""),
+            "submitted_at": job.get("submitted_at", ""),
+            "resume_id": (existing or {}).get("saved_resume_id", ""),
+        })
+    items.sort(key=lambda j: j.get("submitted_at") or "", reverse=True)
+    return items
+
+
+def _bid_public_profile(p: dict) -> dict:
+    """The profile fields the Bid sidebar shows (click-to-copy)."""
+    return {
+        "id": p.get("id", ""),
+        "name": p.get("name", ""),
+        "email": p.get("email", ""),
+        "phone": p.get("phone", ""),
+        "location": p.get("location", ""),
+        "address": p.get("address", ""),
+        "zip_code": p.get("zip_code", ""),
+        "linkedin": p.get("linkedin", ""),
+        "github": p.get("github", ""),
+        "portfolio": p.get("portfolio", ""),
+        "status": p.get("status", "active"),
+        "education_history": [
+            {
+                "university": e.get("university", ""),
+                "degree": e.get("degree", ""),
+                "duration": e.get("duration", ""),
+                "location": e.get("location", ""),
+            }
+            for e in (p.get("education_history", []) or [])
+        ],
+        "work_history": [
+            {
+                "company_name": w.get("company_name", ""),
+                "duration": w.get("duration", ""),
+                "location": w.get("location", ""),
+                "legacy_role": w.get("legacy_role", ""),
+            }
+            for w in (p.get("work_history", []) or [])
+        ],
+    }
+
+
+@router.get("/bid/profiles")
+def bid_profiles(user: dict = Depends(get_current_user)):
+    """Accessible profiles for the Bid tab — full copyable fields + to-bid count."""
+    if not has_role(user, "admin", "bidder"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    profiles = storage.get_profiles()
+    if not user.get("is_admin"):
+        allowed = set(user.get("assigned_profile_ids") or [])
+        profiles = [p for p in profiles if p.get("id") in allowed]
+    out = [
+        {**_bid_public_profile(p), "bid_count": len(_eligible_bid_items(p))}
+        for p in profiles
+    ]
+    return {"role": "admin" if user.get("is_admin") else "bidder", "profiles": out}
+
+
+@router.get("/bid")
+def bid_queue(profile_id: str, user: dict = Depends(get_current_user)):
+    """The ordered Bid queue (jobs to bid) for one profile."""
+    if not has_role(user, "admin", "bidder"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    _check_profile_access(user, profile_id)
+    return _eligible_bid_items(_get_profile(profile_id))
+
+
+@router.get("/bid-job/{job_id}")
+def bid_job_detail(job_id: str, user: dict = Depends(get_current_user)):
+    """Public detail (incl. full description) of an approved job, for the Bid tab."""
+    if not has_role(user, "admin", "bidder"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    job = storage.get_job_by_id(job_id)
+    if not job or job.get("status") != "approved" or job.get("flagged") or job.get("admin_applied"):
+        raise HTTPException(status_code=404, detail="Job not available")
+    return {
+        "id": job.get("id", ""),
+        "company": job.get("company", ""),
+        "job_title": job.get("job_title", ""),
+        "region": job.get("region", "ANY"),
+        "link": job.get("link", ""),
+        "description": job.get("description", ""),
+    }
+
+
+@router.post("/bid/track")
+def bid_track(body: dict, user: dict = Depends(get_current_user)):
+    """Record a Bid-tab button click for the anti-cheat audit log.
+
+    Buttons are enabled (not gated); every click is appended to bid_activity.jsonl.
+    On `mark_applied` we check the bidder did copy_prompt → generate → download →
+    open_link and flag the job in bid_suspicious.log when any step is missing.
+    """
+    if not has_role(user, "admin", "bidder"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    body = body or {}
+    action = str(body.get("action") or "").strip()
+    if action not in _BID_ACTIONS:
+        raise HTTPException(status_code=400, detail="Unknown action")
+
+    uid = user.get("id", "")
+    uname = user.get("username", "") or uid
+    pid = str(body.get("profile_id") or "")
+    jid = str(body.get("job_id") or "")
+    company = str(body.get("company") or "")
+    title = str(body.get("job_title") or "")
+    ts = _utcnow_iso()
+
+    # Never persist the opaque ids — only the human-readable audit fields.
+    rec = {"ts": ts, "username": uname, "company": company, "job_title": title, "action": action}
+    _append_line(BID_ACTIVITY_LOG, json.dumps(rec, ensure_ascii=False))
+
+    key = (uid, pid, jid)   # transient in-memory correlation only (not written anywhere)
+    steps = _bid_steps.setdefault(key, {})
+    steps[action] = ts
+
+    if action == "mark_applied":
+        done = [s for s in _BID_REQUIRED_BEFORE_APPLY if s in steps]
+        missing = [s for s in _BID_REQUIRED_BEFORE_APPLY if s not in steps]
+        summary = {"ts": ts, "username": uname, "company": company, "job_title": title,
+                   "action": "apply_summary", "steps_done": done,
+                   "missing": missing, "suspicious": bool(missing)}
+        _append_line(BID_ACTIVITY_LOG, json.dumps(summary, ensure_ascii=False))
+        if missing:
+            _append_line(
+                BID_SUSPICIOUS_LOG,
+                f'{ts}  SUSPICIOUS  {uname}  applied "{company} — {title}"  '
+                f'| missing steps: {", ".join(missing)}',
+            )
+        _bid_steps.pop(key, None)   # reset for a possible re-bid of the same job
+    return {"ok": True}
+
+
+@router.get("/bid/logs")
+def bid_logs(which: str = Query("activity"), user: dict = Depends(get_current_user)):
+    """Download the Bid audit log (admin only). which=activity|suspicious."""
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admins only")
+    path = BID_SUSPICIOUS_LOG if which == "suspicious" else BID_ACTIVITY_LOG
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    return Response(content=text, media_type="text/plain")
 
 
 def _latest_resume_for(profile_id: str, job_id: str) -> dict | None:
@@ -517,15 +732,36 @@ def _build_prompt(profile: dict, job: dict, template: str) -> str:
         "summary_char_count": int(gs.get("summary_char_count") or 650),
         "work_history": work_history,
     }
+    # Restricted profiles carry 2-3 main skills (their real/LinkedIn stack) that
+    # MUST appear on the résumé even when the JD doesn't mention them — this is
+    # also what keeps the résumé from being a perfect, AI-detectable JD match.
+    # All-Stack profiles (no tech_stacks) leave the prompt byte-identical to before.
+    must_include = [str(s).strip() for s in (profile.get("tech_stacks") or []) if str(s).strip()]
+    if must_include:
+        profile_json["must_include_skills"] = must_include
     job_json = {
         "job_id": job.get("id", ""),
         "description": job.get("description", ""),
     }
 
+    extra = ""
+    if must_include:
+        extra = (
+            "\n# REQUIRED PROFILE SKILLS\n"
+            f"The candidate's core stack is: {', '.join(must_include)}.\n"
+            "Include EVERY one of these in technical_skills even if the job "
+            "description does not mention it, and weave the most relevant one or "
+            "two into professional_experience bullets, consistent with the work "
+            "history timeline. Do NOT wrap a skill in <B>...</B> unless the job "
+            "description itself requests it, so the résumé reads as naturally "
+            "curated rather than keyword-matched to the posting.\n"
+        )
+
     return (
         f"{template.strip()}\n\n"
         f"# PROFILE JSON\n```json\n{json.dumps(profile_json, indent=2)}\n```\n\n"
         f"# JOB DESCRIPTION JSON\n```json\n{json.dumps(job_json, indent=2)}\n```\n"
+        f"{extra}"
     )
 
 
@@ -775,6 +1011,11 @@ def _resume_blob_from_json(data: dict, profile: dict, job: dict) -> dict:
     _extract_bold_phrases(summary_raw, bold_phrases)
     summary_clean = _strip_bold_tags(summary_raw)
 
+    # Headline: ChatGPT's professional positioning line feeds the resume's
+    # title placeholder. Falls back to the candidate name (legacy behaviour)
+    # when the model omits it. The name itself is static in the uploaded DOCX.
+    headline_clean = _strip_bold_tags(str(data.get("headline") or "")).strip() or profile.get("name", "")
+
     # Use ChatGPT's bold phrases as auto-bold keywords for the exporter.
     # technical_skills is already used as a keyword list by docx_resume_export,
     # so merging the bold phrases in here means they get bolded wherever they
@@ -785,7 +1026,7 @@ def _resume_blob_from_json(data: dict, profile: dict, job: dict) -> dict:
             merged_keywords.append(phrase)
 
     return {
-        "headline": profile.get("name", ""),
+        "headline": headline_clean,
         "summary": summary_clean,
         "technical_skills": merged_keywords,
         "skill_groups": skill_groups,
@@ -852,6 +1093,14 @@ def generate_from_json(
         raise HTTPException(
             status_code=400,
             detail=f"Region mismatch: job is {job_region}, profile is {profile_region}.",
+        )
+    if not tech_stacks_match(job.get("description"), profile.get("tech_stacks") or []):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Tech-stack mismatch: none of this profile's skills "
+                f"({', '.join(profile.get('tech_stacks') or []) or '—'}) appear in this job."
+            ),
         )
 
     # Format validation (summary length, bullet counts/lengths, skills count)

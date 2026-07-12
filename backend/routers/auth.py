@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import re
+import uuid
 from datetime import datetime
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
+from pathlib import Path
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi.responses import FileResponse
 
 from auth import (
     authenticate_user,
@@ -13,7 +16,7 @@ from auth import (
     storage,
 )
 from core.devices import is_mobile_or_tablet, parse_user_agent
-from core.storage import build_password_record
+from core.storage import build_password_record, verify_password
 from schemas import (
     ChangePasswordRequest,
     LoginRequest,
@@ -72,6 +75,68 @@ def login(body: LoginRequest, request: Request):
 @router.get("/me")
 def me(user: dict = Depends(get_current_user)):
     return {k: v for k, v in user.items() if k not in ("password_hash", "password_salt")}
+
+
+# ─── Self-service account profile (the "Profile" page) ───────────────────────
+_AVATAR_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "avatars"
+_AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+_AVATAR_EXT = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif"}
+_PROFILE_FIELDS = ("full_name", "email", "country", "telegram", "whatsapp", "discord", "emergency_contacts", "timezone")
+
+try:                                              # validate timezone against the IANA database when available
+    from zoneinfo import available_timezones
+    _VALID_TZS = available_timezones()
+except Exception:
+    _VALID_TZS = set()
+
+
+@router.patch("/me")
+def update_me(body: dict = Body(...), user: dict = Depends(get_current_user)):
+    """Update the current user's own account profile fields."""
+    patch = {k: str(body.get(k, "")).strip() if k != "emergency_contacts" else str(body.get(k, ""))
+             for k in _PROFILE_FIELDS if k in (body or {})}
+    if patch.get("email") and not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", patch["email"]):
+        raise HTTPException(status_code=400, detail="Invalid email")
+    if patch.get("timezone") and _VALID_TZS and patch["timezone"] not in _VALID_TZS:
+        raise HTTPException(status_code=400, detail="Invalid time zone")
+    storage.update_user(user["id"], patch)
+    updated = storage.get_user_by_id(user["id"]) or {}
+    return {k: v for k, v in updated.items() if k not in ("password_hash", "password_salt")}
+
+
+@router.post("/me/avatar")
+async def upload_avatar(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
+    """Upload/replace the current user's avatar image (≤ 3 MB)."""
+    ext = _AVATAR_EXT.get((file.content_type or "").lower())
+    if not ext:
+        raise HTTPException(status_code=400, detail="Avatar must be a PNG, JPG, WEBP or GIF image.")
+    data = await file.read()
+    if len(data) > 3 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Avatar too large — max 3 MB.")
+    uid = user["id"]
+    # Remove any prior avatar files (extension may change), then write the new one.
+    for old in _AVATAR_DIR.glob(f"{uid}.*"):
+        try:
+            old.unlink()
+        except OSError:
+            pass
+    (_AVATAR_DIR / f"{uid}{ext}").write_bytes(data)
+    avatar_url = f"/api/auth/avatar/{uid}?v={uuid.uuid4().hex[:8]}"   # cache-bust on each upload
+    storage.update_user(uid, {"avatar_url": avatar_url})
+    return {"avatar_url": avatar_url}
+
+
+@router.get("/avatar/{user_id}")
+def get_avatar(user_id: str):
+    """Serve a user's avatar image. Public (no auth header) so it renders in <img src=…>."""
+    if not re.match(r"^[A-Za-z0-9_-]+$", user_id):   # ids only — no path traversal
+        raise HTTPException(status_code=404, detail="No avatar")
+    matches = sorted(_AVATAR_DIR.glob(f"{user_id}.*"))
+    if not matches:
+        raise HTTPException(status_code=404, detail="No avatar")
+    path = matches[0]
+    mime = {".png": "image/png", ".jpg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif"}.get(path.suffix, "application/octet-stream")
+    return FileResponse(str(path), media_type=mime)
 
 
 # ─── Keyboard-shortcut bindings (Chrome extension card) ──────────────────────
@@ -191,6 +256,12 @@ def change_password(body: ChangePasswordRequest, user: dict = Depends(get_curren
     err = _password_policy_error(body.new_password)
     if err:
         raise HTTPException(status_code=400, detail=err)
+    # If the caller supplies their current password (the Profile page does),
+    # verify it. The force-password-change flow omits it and is unaffected.
+    if body.current_password:
+        full = storage.get_user_by_id(user["id"]) or {}
+        if not verify_password(body.current_password, full.get("password_salt", ""), full.get("password_hash", "")):
+            raise HTTPException(status_code=400, detail="Current password is incorrect.")
     pw = build_password_record(body.new_password)
     storage.update_user(user["id"], pw | {"force_password_change": False})
     return {"ok": True}

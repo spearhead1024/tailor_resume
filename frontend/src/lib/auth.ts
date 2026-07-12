@@ -3,7 +3,7 @@ import { api } from '../api/client';
 
 const TOKEN_KEY = 'tailorresume.token';
 
-export type Role = 'admin' | 'bidder' | 'job_adder';
+export type Role = 'admin' | 'bidder' | 'job_adder' | 'caller';
 
 export type User = {
   id: string;
@@ -14,7 +14,15 @@ export type User = {
   is_admin: boolean; // derived: 'admin' in roles
   status: string;
   assigned_profile_ids?: string[];
+  bid_method?: 1 | 2;        // 1 = Resumes + Apply tabs, 2 = Bid tab
   force_password_change?: boolean;
+  avatar_url?: string;
+  country?: string;
+  telegram?: string;
+  whatsapp?: string;
+  discord?: string;
+  emergency_contacts?: string;
+  timezone?: string;
 };
 
 export function hasRole(user: User | null, ...roles: Role[]): boolean {

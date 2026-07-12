@@ -38,6 +38,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from fastapi import APIRouter, Depends
 from auth import get_current_user, storage
+from core.storage import tech_stacks_match
 
 try:
     from zoneinfo import ZoneInfo
@@ -103,8 +104,9 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
 
     all_jobs = storage.get_jobs()  # every status — used for job-upload metrics
 
-    # To-Do denominator = approved jobs that match the profile's region.
-    # Computed per-profile below using _regions_match.
+    # To-Do denominator = approved jobs eligible for the profile: region match
+    # AND tech-stack match (any of the profile's main skills mentioned as a whole
+    # word in the job description; empty stacks = All-Stack = every job).
     all_approved_jobs = [
         j for j in all_jobs
         if j.get("status") == "approved"
@@ -116,12 +118,15 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
     def _regions_match(job_region: str, profile_region: str) -> bool:
         return "ANY" in (job_region, profile_region) or job_region == profile_region
 
-    def _profile_approved_jobs(profile_region: str) -> list[dict]:
-        p_region = profile_region.upper().strip() or "ANY"
-        return [
-            j for j in all_approved_jobs
-            if _regions_match(str(j.get("region") or "ANY").upper(), p_region)
-        ]
+    def _job_eligible(job: dict, profile: dict) -> bool:
+        """A job counts for a profile only if region AND tech stacks match."""
+        p_region = str(profile.get("region") or "ANY").upper().strip() or "ANY"
+        if not _regions_match(str(job.get("region") or "ANY").upper(), p_region):
+            return False
+        return tech_stacks_match(job.get("description"), profile.get("tech_stacks") or [])
+
+    def _profile_approved_jobs(profile: dict) -> list[dict]:
+        return [j for j in all_approved_jobs if _job_eligible(j, profile)]
 
     # For the bidder view, restrict to the bidder's own assigned profiles.
     if not is_admin:
@@ -161,11 +166,15 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
         applier = r.get("applied_by_user_id") or ""
         if not pid or not job_id or not applier:
             continue
-        # Only count applies against jobs still in the approved to-do pool, so
-        # the numerator stays inside the same cohort as the denominator.
+        # Only count applies against jobs still in the approved to-do pool AND
+        # still eligible for this profile (region + tech stacks), so the
+        # numerator stays inside the same cohort as the denominator.
         job = job_by_id.get(job_id)
         if not job:
             continue  # job deleted / not approved — exclude from metrics
+        prof = profile_by_id.get(pid)
+        if prof is None or not _job_eligible(job, prof):
+            continue  # job no longer matches the profile's region/tech stacks
         job_added = _et_date_str(job.get("submitted_at"))
         if not job_added:
             continue
@@ -194,9 +203,8 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
             if not prof:
                 continue
             b = applies.get((uid, pid)) or _new_bucket()
-            # Denominator filtered by this profile's region.
-            p_region = str(prof.get("region") or "ANY")
-            profile_jobs = _profile_approved_jobs(p_region)
+            # Denominator filtered by this profile's region AND tech stacks.
+            profile_jobs = _profile_approved_jobs(prof)
             p_added_per_day: dict[str, int] = defaultdict(int)
             p_added_in_week = 0
             for j in profile_jobs:

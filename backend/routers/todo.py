@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from auth import get_current_user, storage
+from core.storage import tech_stacks_match
 from routers.resumes import _is_recent_job, _is_recent_resume, deadline_hours
 
 router = APIRouter(prefix="/api/todo", tags=["todo"])
@@ -120,6 +121,7 @@ def get_todo(
                 matched_ids = {
                     j["id"] for j in approved_jobs
                     if _regions_match(str(j.get("region") or "ANY").upper(), p_region)
+                    and tech_stacks_match(j.get("description"), p.get("tech_stacks") or [])
                 }
                 processed = processed_by_profile.get(p.get("id", ""), set())
                 decorated.append({**p, "pending_count": len(matched_ids - processed)})

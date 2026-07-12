@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react';
 import { Navigate, Route, Routes, useLocation, useNavigate, Link } from 'react-router-dom';
-import { hasRole, loadCurrentUser, logout, useAuth, Role } from './lib/auth';
+import { hasRole, loadCurrentUser, logout, useAuth, Role, User } from './lib/auth';
 import { ToastProvider } from './lib/toast';
 import Login from './pages/Login';
+import Bid from './pages/Bid';
+import Resumes from './pages/Resumes';
 import Apply from './pages/Apply';
 import Jobs from './pages/Jobs';
-import Resumes from './pages/Resumes';
 import Profiles from './pages/Profiles';
 import Users from './pages/Users';
 import Settings from './pages/Settings';
@@ -14,12 +15,16 @@ import Devices from './pages/Devices';
 import Help from './pages/Help';
 import Applied from './pages/Applied';
 import Screenshots from './pages/Screenshots';
+import Interviews from './pages/Interviews';
+import Account from './pages/Account';
 
 /** Tab → roles allowed. Admin always has access. Order = display order. */
-const TABS: { path: string; label: string; roles: Role[] }[] = [
+const TABS: { path: string; label: string; roles: Role[]; method?: 1 | 2 }[] = [
+  { path: '/interviews', label: 'Interviews', roles: ['admin', 'caller'] },
   { path: '/jobs',     label: 'Jobs',     roles: ['admin', 'job_adder'] },
-  { path: '/resumes',  label: 'Resumes',  roles: ['admin', 'bidder'] },
-  { path: '/apply',    label: 'Apply',    roles: ['admin', 'bidder'] },
+  { path: '/bid',      label: 'Bid',      roles: ['admin', 'bidder'], method: 2 },
+  { path: '/resumes',  label: 'Resumes',  roles: ['admin', 'bidder'], method: 1 },
+  { path: '/apply',    label: 'Apply',    roles: ['admin', 'bidder'], method: 1 },
   { path: '/applied',  label: 'Applied',  roles: ['admin'] },
   { path: '/screenshots', label: 'Screenshots', roles: ['admin'] },
   { path: '/metrics',  label: 'Metrics',  roles: ['admin', 'bidder', 'job_adder'] },
@@ -35,12 +40,17 @@ function roleLabel(roles: Role[]): string {
   return roles.map((r) => r === 'job_adder' ? 'Job-Adder' : r.charAt(0).toUpperCase() + r.slice(1)).join(' · ');
 }
 
-function defaultLandingPath(roles: Role[]): string {
-  // Pick the first tab the user has access to in display order.
-  for (const t of TABS) {
-    if (t.roles.some((r) => roles.includes(r))) return t.path;
-  }
-  return '/login';
+/** Tabs the user may see: role-allowed, and (for Bid/Resumes/Apply) matching their
+ *  assigned bid method. Admins see every method. */
+function visibleTabs(user: User) {
+  return TABS.filter((t) => hasRole(user, ...t.roles)
+    && (!t.method || user.is_admin || (user.bid_method ?? 2) === t.method));
+}
+
+function defaultLandingPath(user: User | null): string {
+  if (!user) return '/login';
+  const v = visibleTabs(user);
+  return v.length ? v[0].path : '/login';
 }
 
 function TopNav() {
@@ -49,7 +59,7 @@ function TopNav() {
   const loc = useLocation();
   if (!user) return null;
   const linkClass = (path: string) => loc.pathname.startsWith(path) ? 'active' : '';
-  const visible = TABS.filter((t) => hasRole(user, ...t.roles));
+  const visible = visibleTabs(user);
   return (
     <nav className="topnav">
       <div className="brand">TailorResume</div>
@@ -60,9 +70,9 @@ function TopNav() {
       </div>
       <div className="spacer" />
       <div className="user-info">
-        <div>{user.full_name || user.username}</div>
+        <div><Link to="/account" style={{ color: 'inherit', textDecoration: 'none' }}>{user.full_name || user.username}</Link></div>
         <div className="muted" style={{ fontSize: '0.78rem' }}>
-          {roleLabel(user.roles)} · <a href="#" onClick={(e) => { e.preventDefault(); logout(); navigate('/login'); }}>Sign out</a>
+          <Link to="/account">Account</Link> · <a href="#" onClick={(e) => { e.preventDefault(); logout(); navigate('/login'); }}>Sign out</a>
         </div>
       </div>
     </nav>
@@ -80,13 +90,13 @@ function RoleGate({ roles, children }: { roles: Role[]; children: React.ReactNod
   const { user, token } = useAuth();
   if (!token) return <Navigate to="/login" replace />;
   if (!user) return <div className="content"><span className="spinner" /> Loading…</div>;
-  if (!hasRole(user, ...roles)) return <Navigate to={defaultLandingPath(user.roles)} replace />;
+  if (!hasRole(user, ...roles)) return <Navigate to={defaultLandingPath(user)} replace />;
   return <>{children}</>;
 }
 
 function LandingRedirect() {
   const { user } = useAuth();
-  return <Navigate to={user ? defaultLandingPath(user.roles) : '/login'} replace />;
+  return <Navigate to={defaultLandingPath(user)} replace />;
 }
 
 export default function App() {
@@ -106,8 +116,10 @@ export default function App() {
       <main className="content">
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path="/bid"      element={<RoleGate roles={['admin', 'bidder']}><Bid /></RoleGate>} />
           <Route path="/resumes"  element={<RoleGate roles={['admin', 'bidder']}><Resumes /></RoleGate>} />
           <Route path="/apply"    element={<RoleGate roles={['admin', 'bidder']}><Apply /></RoleGate>} />
+          <Route path="/interviews" element={<RoleGate roles={['admin', 'caller']}><Interviews /></RoleGate>} />
           <Route path="/jobs"     element={<RoleGate roles={['admin', 'job_adder']}><Jobs /></RoleGate>} />
           <Route path="/applied"  element={<RoleGate roles={['admin']}><Applied /></RoleGate>} />
           <Route path="/screenshots" element={<RoleGate roles={['admin']}><Screenshots /></RoleGate>} />
@@ -117,6 +129,7 @@ export default function App() {
           <Route path="/users"    element={<RoleGate roles={['admin']}><Users /></RoleGate>} />
           <Route path="/sessions" element={<RoleGate roles={['admin']}><Devices /></RoleGate>} />
           <Route path="/settings" element={<RoleGate roles={['admin']}><Settings /></RoleGate>} />
+          <Route path="/account"  element={<Private><Account /></Private>} />
           {/* Back-compat redirects */}
           <Route path="/todo"      element={<Navigate to="/apply" replace />} />
           <Route path="/devices"   element={<Navigate to="/sessions" replace />} />
