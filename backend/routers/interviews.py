@@ -24,13 +24,15 @@ except Exception:                       # pragma: no cover
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from auth import require_role, storage
+from core import notify
 
 router = APIRouter(prefix="/api/interviews", tags=["interviews"])
 
 # Both admins and callers can use the board.
 _access = require_role("admin", "caller")
-# A caller is read-only on the board except these two columns (Approved + Feedback).
-_CALLER_EDITABLE = {"c_approved", "c_feedback"}
+# A caller is read-only on the board except these columns: Approved, Status, and the
+# Chat & Feedback thread (c_feedback). Chat posts also go through the dedicated /chat endpoint.
+_CALLER_EDITABLE = {"c_approved", "c_status", "c_feedback"}
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 _GRID_FILE = DATA_DIR / "interviews.json"
@@ -330,7 +332,8 @@ def add_row(body: dict | None = None, user: dict = Depends(_access)):
         else:
             grid["rows"].append(row)
         _write_unlocked(grid)
-        return row
+    notify.on_row_changed(rid, {}, cells, user)   # push if the new row already names a caller
+    return row
 
 
 @router.patch("/rows/{row_id}")
@@ -343,16 +346,24 @@ def patch_row(row_id: str, body: dict, user: dict = Depends(_access)):
             patch = {k: v for k, v in patch.items() if k in _CALLER_EDITABLE}
         if "c_sched" in patch:           # store Scheduled_at as a UTC instant (idempotent)
             patch["c_sched"] = _sched_to_utc(patch["c_sched"], str(user.get("timezone", "")).strip())
+        result = None
+        change = None
         for row in grid["rows"]:
             if row.get("id") == row_id:
                 if not _owns_row(user, row):
                     raise HTTPException(status_code=404, detail="Row not found")
                 if not patch:            # nothing this user is allowed to change → no-op
                     return row
+                before = dict(row.get("cells", {}))
                 row.setdefault("cells", {}).update(patch)
                 _write_unlocked(grid)
-                return row
-    raise HTTPException(status_code=404, detail="Row not found")
+                result = row
+                change = (before, dict(row["cells"]))
+                break
+    if result is None:
+        raise HTTPException(status_code=404, detail="Row not found")
+    notify.on_row_changed(row_id, change[0], change[1], user)   # assignment / time / content push (admin edits only)
+    return result
 
 
 @router.delete("/rows/{row_id}")

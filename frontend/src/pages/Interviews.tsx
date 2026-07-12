@@ -12,11 +12,16 @@ type Grid = { columns: Col[]; rows: Row[] };
     Position/Title, Job Description, Creater(last). Hidden/merged-secondary columns keep their
     relative order after the visible ones. Applied to the grid state on load so render + keyboard +
     clipboard all agree on the order. */
-const COL_RANK: Record<string, number> = {
+const COL_RANK_ADMIN: Record<string, number> = {
   c_index: 0, c_sched: 1, c_type: 2, c_company: 3, c_caller: 4, c_account: 5, c_title: 6, c_jd: 7, c_creater: 8,
 };
+// Caller view: the Caller & Creater columns are dropped; Approved + Status are combined into
+// one stacked column (Approved over Status), placed last — after Job Description.
+const COL_RANK_CALLER: Record<string, number> = {
+  c_index: 0, c_sched: 1, c_type: 2, c_company: 3, c_account: 4, c_title: 5, c_jd: 6, c_approved: 7,
+};
 function orderColumns(g: Grid): Grid {
-  const rank = (id: string) => (id in COL_RANK ? COL_RANK[id] : 100);   // unranked (hidden/custom) → after, stable
+  const rank = (id: string) => (id in L.COL_RANK ? L.COL_RANK[id] : 100);   // unranked (hidden/custom) → after, stable
   return { ...g, columns: [...(g.columns || [])].sort((a, b) => rank(a.id) - rank(b.id)) };
 }
 
@@ -56,7 +61,7 @@ const LOCKED_COLS = new Set(['c_index', 'c_title', 'c_skill', 'c_client', 'c_typ
 // A field's `row` is the visual row (0=top, 1=bottom); two fields on row 0 split the top cell
 // horizontally (left|right). Field 0 is the primary column; the rest are hidden as standalone columns.
 type SubField = { colId: string; row: 0 | 1; width?: number; icon?: string; hdText?: string; label?: string };   // width px for a split cell; icon/text/label override shown in the header
-const MERGED: Record<string, SubField[]> = {
+const MERGED_ADMIN: Record<string, SubField[]> = {
   c_title:   [{ colId: 'c_title', row: 0 }, { colId: 'c_skill', row: 1 }],
   c_company: [{ colId: 'c_company', row: 0 }, { colId: 'c_salary', row: 1 }],                     // Company Info / Salary Range
   c_type:    [{ colId: 'c_type', row: 0 }, { colId: 'c_client', row: 1 }],                        // Call Type / Interviewer(role)
@@ -66,19 +71,48 @@ const MERGED: Record<string, SubField[]> = {
   c_account: [{ colId: 'c_account', row: 0 }, { colId: 'c_resume', row: 1, label: 'Resume' }],     // Profile Name(Country) / Resume
   c_jd:      [{ colId: 'c_jd', row: 0 }, { colId: 'c_feedback', row: 1, label: 'Chat & Feedback' }], // Job Description / Chat & Feedback
 };
+// Caller view: the Caller and Creater columns are admin-only and dropped entirely. Approved &
+// Status are combined into one stacked column (Approved over Status), styled like the other
+// two-line cells (Company Info / Salary, Profile Name / Resume, …). Every other stack is
+// identical to the admin view (Scheduled_at keeps min + Meeting Link, etc.).
+const MERGED_CALLER: Record<string, SubField[]> = {
+  c_title:    MERGED_ADMIN.c_title,
+  c_company:  MERGED_ADMIN.c_company,
+  c_type:     MERGED_ADMIN.c_type,
+  c_sched:    MERGED_ADMIN.c_sched,
+  c_account:  MERGED_ADMIN.c_account,
+  c_jd:       MERGED_ADMIN.c_jd,
+  c_approved: [{ colId: 'c_approved', row: 0 }, { colId: 'c_status', row: 1 }],   // Approved / Status
+};
 // Displayed names that differ from the persisted column name (display-only override; used for headers AND cells).
 const DISPLAY_NAME: Record<string, string> = { c_account: 'Profile Name(Country)', c_jd: 'Job Description', c_feedback: 'Chat & Feedback' };
 // Select columns offered as dropdown filters above the table (c_caller is admin-only).
 const FILTER_COLS = ['c_type', 'c_approved', 'c_status', 'c_account', 'c_caller'];
 // Created_at is data-only now: hidden from the grid, surfaced on Index hover (see the row render).
-const STACK_HIDDEN = new Set<string>([...Object.values(MERGED).flatMap((fs) => fs.slice(1).map((f) => f.colId)), 'c_created']);
-const isMerged = (colId: string): boolean => colId in MERGED;
+function buildStackHidden(merged: Record<string, SubField[]>, extra: string[] = []): Set<string> {
+  return new Set<string>([...Object.values(merged).flatMap((fs) => fs.slice(1).map((f) => f.colId)), 'c_created', ...extra]);
+}
+const STACK_HIDDEN_ADMIN = buildStackHidden(MERGED_ADMIN);
+// Callers also hide the admin-only Caller & Creater columns outright (Status is hidden as a
+// standalone column too — it lives inside the combined Approved/Status cell).
+const STACK_HIDDEN_CALLER = buildStackHidden(MERGED_CALLER, ['c_caller', 'c_creater']);
+
+// The board schema is shared; only these three maps differ by role. `L` is the active layout
+// for the session, set once at the top of <Interviews> (the app resolves the user before this
+// route mounts, so the role is known on the first render). The pure helpers above and the
+// once-bound document listeners below all read `L`, so render + keyboard + clipboard agree.
+type Layout = { MERGED: Record<string, SubField[]>; STACK_HIDDEN: Set<string>; COL_RANK: Record<string, number> };
+const ADMIN_LAYOUT: Layout = { MERGED: MERGED_ADMIN, STACK_HIDDEN: STACK_HIDDEN_ADMIN, COL_RANK: COL_RANK_ADMIN };
+const CALLER_LAYOUT: Layout = { MERGED: MERGED_CALLER, STACK_HIDDEN: STACK_HIDDEN_CALLER, COL_RANK: COL_RANK_CALLER };
+let L: Layout = ADMIN_LAYOUT;
+const isMerged = (colId: string): boolean => colId in L.MERGED;
 // Creater fills on CLICK (current user) once the row's Index is set; Created_at is auto-stamped (see commitCell).
 const AUTO_NOW_COLS = new Set<string>();                 // (none: Created_at is auto-stamped, not click-filled)
 const AUTO_ME_COLS = new Set<string>(['c_creater']);    // click an empty cell → stamp current user
 const rowIndexSet = (row: Row): boolean => { const v = row.cells?.c_index; return v != null && v !== ''; };
-// A caller is read-only on the board except these two columns; admins may edit everything.
-const CALLER_EDITABLE = new Set<string>(['c_approved', 'c_feedback']);
+// A caller is read-only on the board except these columns — Approved, Status, and the
+// Chat & Feedback thread (c_feedback); admins may edit everything. Backend enforces this too.
+const CALLER_EDITABLE = new Set<string>(['c_approved', 'c_status', 'c_feedback']);
 function nowLocal(): string {
   const d = new Date();
   const p = (n: number) => String(n).padStart(2, '0');
@@ -90,7 +124,7 @@ type SubState = 'none' | 'fill' | 'anchor';
 type Dir = 'up' | 'down' | 'left' | 'right';
 /** Flat "logical" columns for the whole grid: each merged sub-field becomes one addressable column,
     in visual order. This is what clipboard/fill operate on so the merged layout stays a render concern. */
-function fieldIdsOf(col: Col): string[] { const m = MERGED[col.id]; return m ? m.map((f) => f.colId) : [col.id]; }
+function fieldIdsOf(col: Col): string[] { const m = L.MERGED[col.id]; return m ? m.map((f) => f.colId) : [col.id]; }
 function logicalCols(vis: Col[]): { c: number; sub: number; colId: string }[] {
   const out: { c: number; sub: number; colId: string }[] = [];
   vis.forEach((col, c) => fieldIdsOf(col).forEach((colId, sub) => out.push({ c, sub, colId })));
@@ -315,14 +349,19 @@ function EditInput({ type = 'text', initial, seeded, placeholder, onCommit, onDo
 }) {
   const ref = useRef<HTMLInputElement>(null);
   const done = useRef(false);
+  const dirty = useRef(false);   // true once the user actually edits (typing, or the date/time picker changing the value)
   // commit once; skip a write that didn't change anything (but a seeded/typed edit always commits)
   const commit = (v: string) => { if (done.current) return; done.current = true; if (seeded || v !== initial) onCommit(v); };
   useEffect(() => {
     const el = ref.current;
-    return () => { if (el) commit(el.value); };   // save the pending edit on click-away
+    // Save a pending edit on real click-away (unmount without a blur). Gated on `dirty` so React
+    // StrictMode's dev-only mount→unmount→mount can't fire a premature commit that flips `done` and
+    // blocks the real edit from ever saving (which made date/text cells look uneditable in dev).
+    return () => { if (el && dirty.current) commit(el.value); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <input ref={ref} className="iv-input" type={type} autoFocus defaultValue={initial} placeholder={placeholder} onMouseDown={stop}
+      onChange={() => { dirty.current = true; }}
       onBlur={(e) => { const wasDone = done.current; commit(e.target.value); if (!wasDone) onDone(); }}
       onKeyDown={(e) => {
         // Enter/Tab commit AND move the active cell (Sheets/Notion); Escape cancels in place.
@@ -896,6 +935,11 @@ function ColumnHead({ col, subLabel, topExtra, admin, optionFields, onPatch, onD
 export default function Interviews() {
   const toast = useToast();
   const { user: me } = useAuth();
+  // Pick the column layout for this session's role before render / listeners use it: callers see a
+  // combined Approved/Status column in place of the admin-only Caller & Creater columns. `L.MERGED`
+  // and `L.STACK_HIDDEN` are stable per-session objects, so aliasing them here is render-safe.
+  L = me?.is_admin ? ADMIN_LAYOUT : CALLER_LAYOUT;
+  const { MERGED, STACK_HIDDEN } = L;
   const [grid, setGrid] = useState<Grid | null>(null);
   const [people, setPeople] = useState<{ label: string; roles?: string[]; avatar_url?: string }[]>([]);   // all users (Caller dropdown + Creater avatars)
   const [profiles, setProfiles] = useState<{ id: string; name: string; label: string }[]>([]);            // Profiles tab / DB (Account Profile dropdown)
@@ -914,6 +958,7 @@ export default function Interviews() {
   const [copied, setCopied] = useState<SelRect | null>(null);  // copy-highlight, cleared on paste / Escape / new copy
   const [modal, setModal] = useState<{ rowId: string; colId: string; title: string; subtitle: string; value: string; readOnly: boolean; kind: 'text' | 'chat' } | null>(null);  // JD editor / Chat thread
   const [confirmDel, setConfirmDel] = useState<string | null>(null);   // rowId pending delete-confirmation
+  const [flashRow, setFlashRow] = useState<string | null>(null);       // row just re-sorted by a Scheduled_at edit → scroll to + flash it
   const dragging = useRef(false);
   const anchor = useRef<{ r: number; c: number } | null>(null);
   const selRef = useRef(sel); useEffect(() => { selRef.current = sel; }, [sel]);
@@ -927,6 +972,14 @@ export default function Interviews() {
   const fillRef = useRef<(dir: 'down' | 'right') => void>(() => {});
   const anchorTdRef = useRef<HTMLTableCellElement | null>(null);
   useEffect(() => { anchorTdRef.current?.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }, [sel]);  // keep the active cell in view
+  // A Scheduled_at edit re-sorts the board, so the edited row jumps to its new chronological spot.
+  // Scroll it back into view + let the flash highlight (see .iv-row--flash) run, then clear the marker.
+  useEffect(() => {
+    if (!flashRow) return;
+    document.querySelector(`tr[data-rid="${flashRow}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    const t = window.setTimeout(() => setFlashRow(null), 1500);
+    return () => window.clearTimeout(t);
+  }, [flashRow]);
   useEffect(() => {
     const up = () => { dragging.current = false; };
     document.addEventListener('mouseup', up);
@@ -1184,7 +1237,7 @@ export default function Interviews() {
   const undoRef = useRef(undo); undoRef.current = undo;
   const redoRef = useRef(redo); redoRef.current = redo;
 
-  // Callers may write only Approved + Feedback; admins anything. Backend enforces this too.
+  // Callers may write only Approved, Status, and Feedback; admins anything. Backend enforces this too.
   const canEditCol = (colId: string) => !!me?.is_admin || CALLER_EDITABLE.has(colId);
   canEditRef.current = canEditCol;
   const commitCell = (rowId: string, colId: string, value: any) => {
@@ -1196,6 +1249,9 @@ export default function Interviews() {
       if (row && !row.cells?.c_created) changes.push({ rowId, colId: 'c_created', value: new Date().toISOString() });
     }
     recordCells(changes);
+    // Editing Scheduled_at re-sorts the row to a new position — flag it so the effect above scrolls
+    // to + flashes it, making the change (and where the row went) obvious instead of looking unchanged.
+    if (colId === 'c_sched') setFlashRow(rowId);
   };
   const addRow = async () => {
     try {
@@ -1286,10 +1342,37 @@ export default function Interviews() {
   const meName = me ? (me.full_name || me.username) : '';
   const isAdmin = !!me?.is_admin;   // only admins may edit columns / select-option lists
   const userTz = me?.timezone || undefined;   // display/enter Scheduled_at in the current user's zone
+  // Urgency colour for a row's Scheduled_at, computed in the viewer's tz: an UPCOMING call today → red,
+  // a call tomorrow → yellow, anything already past or further out → none (see .iv-row--today/tomorrow).
+  const nowMs = Date.now();
+  const todayStr = utcToWall(new Date(nowMs).toISOString(), userTz).slice(0, 10);            // YYYY-MM-DD today, in tz
+  const [ty, tm, td] = todayStr.split('-').map(Number);
+  const tomorrowStr = new Date(Date.UTC(ty, tm - 1, td + 1)).toISOString().slice(0, 10);     // +1 calendar day (handles rollover)
+  const schedColor = (row: Row): '' | 'today' | 'tomorrow' => {
+    const s = String(row.cells?.c_sched ?? '').trim();
+    if (!s) return '';
+    const ms = new Date(s).getTime();
+    if (isNaN(ms) || ms < nowMs) return '';                                                   // unparseable or already passed → no colour
+    const day = /(?:z|[+-]\d\d:?\d\d)$/i.test(s) ? utcToWall(new Date(s).toISOString(), userTz).slice(0, 10) : s.slice(0, 10);
+    return day === todayStr ? 'today' : day === tomorrowStr ? 'tomorrow' : '';
+  };
   const colById = Object.fromEntries(cols.map((c) => [c.id, c] as const));
   const visibleCols = cols.filter((c) => !STACK_HIDDEN.has(c.id));   // hide stacked-secondary columns
   const ncols = visibleCols.length;
   effColsRef.current = colById;   // give the clipboard codec the effective columns (incl. Caller options)
+
+  // Filter dropdown options = the distinct values ACTUALLY present in the rows for that column.
+  // The schema's select options can be empty (Call Type lost its options) or drift from the
+  // injected/pasted values (Account stored without a region; Caller stored as a username while
+  // the schema lists full names), which left those filters showing nothing or offering choices
+  // that matched no row. Sourcing options from real values guarantees every option matches ≥1
+  // row and every stored value is selectable. Built from grid.rows (not the filtered view) so the
+  // option list stays stable as you filter.
+  const filterOptionsFor = (cid: string): string[] => {
+    const present = new Set<string>();
+    for (const r of grid.rows) { const v = String(r.cells?.[cid] ?? ''); if (v) present.add(v); }
+    return Array.from(present).sort((a, b) => a.localeCompare(b));
+  };
 
   // ── filter bar: viewRows is what the grid shows AND operates on (keyboard/clipboard) ──
   const fltQ = (flt.q || '').trim().toLowerCase();
@@ -1404,7 +1487,7 @@ export default function Interviews() {
         {FILTER_COLS.filter((cid) => (cid !== 'c_caller' || isAdmin) && colById[cid]).map((cid) => {
           const col = colById[cid];
           return (
-            <FilterDropdown key={cid} label={DISPLAY_NAME[cid] || col.name} options={col.options.map((o) => o.label)}
+            <FilterDropdown key={cid} label={DISPLAY_NAME[cid] || col.name} options={filterOptionsFor(cid)}
               selected={colFlt[cid] || []} onChange={(next) => setColFlt((f) => ({ ...f, [cid]: next }))} />
           );
         })}
@@ -1457,7 +1540,7 @@ export default function Interviews() {
               <tr><td className="iv-gutter" /><td colSpan={ncols} className="muted" style={{ padding: '14px 12px', fontSize: '0.85rem' }}>No interviews match the filters.</td></tr>
             )}
             {viewRows.map((row, ri) => (
-              <tr key={row.id} className="iv-row">
+              <tr key={row.id} data-rid={row.id} className={'iv-row' + (row.id === flashRow ? ' iv-row--flash' : '') + (schedColor(row) ? ' iv-row--' + schedColor(row) : '')}>
                 <td className="iv-gutter" title={`Row ${ri + 1}`}
                     onMouseDown={(e) => {
                       if (e.button !== 0 || (e.target as HTMLElement).closest('.iv-del')) return;   // ignore the delete button

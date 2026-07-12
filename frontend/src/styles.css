@@ -577,6 +577,21 @@ tbody tr:hover td { background: var(--panel-2); color: var(--text); }
   border-bottom: 1px solid rgba(255,255,255,0.094);
 }
 .iv-row:hover td:not(.iv-gutter) { background: #202024; }   /* hover tint on the panel cells, not the margin */
+/* Scheduled_at urgency tint: today's upcoming call = red, tomorrow's = yellow (computed in the
+   viewer's tz; past/other = none). Placed after `.iv-grid td` so it wins the equal-specificity tie. */
+.iv-row--today td    { background: #3d2020; }
+.iv-row--tomorrow td { background: #3b3418; }
+.iv-row--today:hover td:not(.iv-gutter)    { background: #4a2726; }
+.iv-row--tomorrow:hover td:not(.iv-gutter) { background: #484020; }
+/* Flash a row that just re-sorted after a Scheduled_at edit, so its jump to a new position is
+   obvious. A fading overlay (pseudo-element) is used so it doesn't fight the cell background or
+   the selection box-shadow. */
+.iv-row--flash td { position: relative; }
+.iv-row--flash td::after {
+  content: ''; position: absolute; inset: 0; z-index: 3; pointer-events: none;
+  background: rgba(35,131,226,0.30); animation: iv-row-flash 1.5s ease-out forwards;
+}
+@keyframes iv-row-flash { from { opacity: 1; } to { opacity: 0; } }
 .iv-input { width: 100%; border: none; background: transparent; color: #D4D4D4; font: inherit; font-size: 14px; padding: 6px 8px; outline: none; box-sizing: border-box; user-select: text; }
 .iv-input:focus { background: transparent; }   /* the cell's selection border shows the edit state */
 .iv-input[type=number] { -moz-appearance: textfield; }

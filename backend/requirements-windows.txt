@@ -1,0 +1,11 @@
+# Windows-only extras for LOCAL development.
+#
+# These enable DOCX -> PDF export via Microsoft Word / docx2pdf when running
+# on Windows. They are intentionally kept OUT of requirements.txt because
+# pywin32 has no Linux wheel and would break the production (Linux) deploy,
+# where PDF conversion is handled by LibreOffice / unoserver instead.
+#
+# Installed automatically by run_backend.bat.
+
+docx2pdf>=0.1.8
+pywin32>=306
