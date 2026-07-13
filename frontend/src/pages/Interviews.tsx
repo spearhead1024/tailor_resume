@@ -1637,6 +1637,9 @@ export default function Interviews() {
   // future. `shownScheduled` is already sorted ascending, so the first one at/after now is it. Calls
   // that have passed, and every call after the next one, stay uncoloured.
   const nextUpId = shownScheduled.find((r) => { const ms = schedMs(r); return !isNaN(ms) && ms >= nowMs; })?.id ?? '';
+  // A call whose time has already gone is greyed out — done with, but still on the board. Unscheduled
+  // rows are NOT past (they simply haven't been booked yet), so they stay normal.
+  const isPast = (r: Row) => { const ms = schedMs(r); return !isNaN(ms) && ms < nowMs; };
   gridRef.current = { ...grid, rows: viewRows };   // keyboard/clipboard index into the visible (filtered) rows
 
   // Shared cell movement: collapse + move (sub-aware) or Shift-extend the focus. Used by keys AND editor nav.
@@ -1778,7 +1781,9 @@ export default function Interviews() {
               <tr><td className="iv-gutter" /><td colSpan={ncols} className="muted" style={{ padding: '14px 12px', fontSize: '0.85rem' }}>No interviews match the filters.</td></tr>
             )}
             {viewRows.map((row, ri) => (
-              <tr key={row.id} data-rid={row.id} className={'iv-row' + (row.id === flashRow ? ' iv-row--flash' : '') + (row.id === nextUpId ? ' iv-row--next' : '')}>
+              <tr key={row.id} data-rid={row.id} className={'iv-row'
+                + (row.id === flashRow ? ' iv-row--flash' : '')
+                + (row.id === nextUpId ? ' iv-row--next' : isPast(row) ? ' iv-row--past' : '')}>
                 <td className="iv-gutter" title={`Row ${ri + 1}`}
                     onMouseDown={(e) => {
                       if (e.button !== 0 || (e.target as HTMLElement).closest('.iv-del')) return;   // ignore the delete button

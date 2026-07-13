@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="TailorResume">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#24409c"/>
+      <stop offset="1" stop-color="#0f2560"/>
+    </linearGradient>
+    <linearGradient id="pencil" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f8ef7"/>
+      <stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+  </defs>
+
+  <!-- rounded navy tile -->
+  <rect x="26" y="26" width="460" height="460" rx="112" fill="url(#bg)"/>
+
+  <!-- résumé sheet, with a folded top-right corner -->
+  <path d="M150 92h182l60 60v268a20 20 0 0 1-20 20H150a20 20 0 0 1-20-20V112a20 20 0 0 1 20-20z" fill="#fbfcff"/>
+  <path d="M332 92l60 60h-42a18 18 0 0 1-18-18V92z" fill="#d9e5fb"/>
+
+  <!-- avatar -->
+  <circle cx="199" cy="172" r="49" fill="#3b82f6"/>
+  <circle cx="199" cy="157" r="18" fill="#fff"/>
+  <path d="M167 208a32 32 0 0 1 64 0z" fill="#fff"/>
+
+  <!-- headline rules beside the avatar -->
+  <rect x="264" y="150" width="98" height="12" rx="6" fill="#2b4a7e"/>
+  <rect x="264" y="180" width="112" height="12" rx="6" fill="#5b83b5"/>
+  <rect x="264" y="210" width="84" height="12" rx="6" fill="#5b83b5"/>
+
+  <!-- section rule -->
+  <rect x="163" y="256" width="176" height="13" rx="6.5" fill="#24406f"/>
+
+  <!-- bulleted experience -->
+  <circle cx="172" cy="303" r="10" fill="#4a7fc4"/>
+  <rect x="194" y="296" width="128" height="12" rx="6" fill="#8aa8cf"/>
+  <circle cx="172" cy="347" r="10" fill="#4a7fc4"/>
+  <rect x="194" y="340" width="106" height="12" rx="6" fill="#8aa8cf"/>
+  <circle cx="172" cy="391" r="10" fill="#4a7fc4"/>
+  <rect x="194" y="384" width="122" height="12" rx="6" fill="#8aa8cf"/>
+
+  <!-- growth arrow -->
+  <path d="M392 424c56-36 78-96 74-176" fill="none" stroke="#4fd1a5" stroke-width="30" stroke-linecap="round"/>
+  <path d="M466 236l-42 30 76 22z" fill="#4fd1a5"/>
+
+  <!-- pencil, tilted over the sheet -->
+  <g transform="rotate(41 372 300)">
+    <rect x="342" y="212" width="58" height="150" rx="8" fill="url(#pencil)"/>
+    <rect x="342" y="212" width="58" height="30" rx="8" fill="#111827"/>
+    <rect x="342" y="238" width="58" height="26" fill="#f7c948"/>
+    <path d="M342 362h58l-29 44z" fill="#f2b46b"/>
+    <path d="M357 384h28l-14 22z" fill="#1e293b"/>
+  </g>
+
+  <!-- briefcase -->
+  <path d="M232 332v-12a22 22 0 0 0-22-22h-40a22 22 0 0 0-22 22v12" fill="none" stroke="#243a6b" stroke-width="17" stroke-linecap="round"/>
+  <rect x="96" y="330" width="196" height="140" rx="20" fill="#2b3f70"/>
+  <rect x="96" y="330" width="196" height="46" rx="20" fill="#243a6b"/>
+  <rect x="172" y="378" width="44" height="40" rx="8" fill="#f5b32c"/>
+
+  <!-- settings sliders -->
+  <rect x="326" y="308" width="182" height="162" rx="26" fill="#3f7fe8"/>
+  <rect x="350" y="342" width="134" height="11" rx="5.5" fill="#eaf2ff"/>
+  <circle cx="404" cy="347" r="17" fill="#7db2fb"/>
+  <rect x="350" y="384" width="134" height="11" rx="5.5" fill="#eaf2ff"/>
+  <circle cx="443" cy="389" r="17" fill="#f0a92e"/>
+  <rect x="350" y="426" width="134" height="11" rx="5.5" fill="#eaf2ff"/>
+  <circle cx="381" cy="431" r="17" fill="#3fd3ac"/>
+</svg>
