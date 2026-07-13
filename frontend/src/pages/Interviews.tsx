@@ -860,7 +860,18 @@ function StackedCell({ fields, row, subState, editSub, editSeed, meName, avatarB
   commit: (colId: string, v: any) => void;
 }) {
   const cellFor = (f: { col: Col; sub: number; width?: number }) => {
-    const { col, sub } = f;
+    const { col: rawCol, sub } = f;
+    // Workflow rule (the server enforces it too — this just stops the UI offering a choice that
+    // would be refused): Approved can't be 'Confirmed' until a Caller is assigned, so drop that
+    // option and leave Pending. Status is locked until Confirmed — handled by canEditCell, NOT by
+    // emptying its options, which would also strip the coloured pill off an already-set Status.
+    // A legacy row that is somehow already Confirmed with no caller keeps its option (and its pill).
+    const hasCaller = !!String(row.cells?.c_caller ?? '').trim();
+    const alreadyConfirmed = String(row.cells?.c_approved ?? '').trim() === 'Confirmed';
+    const col: Col = (rawCol.id === 'c_approved' && !hasCaller && !alreadyConfirmed)
+      ? { ...rawCol, options: rawCol.options.filter((o) => o.label !== 'Confirmed') }
+      : rawCol;
+
     const isSelect = col.type === 'select';
     // There is no Team column on the board — the Caller cell IS the assignment. Until a person is
     // picked it shows the team the call was handed to, so a team-assigned row never looks blank.
@@ -1421,7 +1432,13 @@ export default function Interviews() {
       .map((s) => s.trim().toLowerCase()).filter(Boolean);
     return mineNames.includes(c);
   };
-  const canEditCell = (row: Row | null | undefined, colId: string) => canEditCol(colId) && ownsRow(row);
+  const canEditCell = (row: Row | null | undefined, colId: string) => {
+    if (!canEditCol(colId) || !ownsRow(row)) return false;
+    // Workflow: no outcome before the call is even agreed. Status stays locked until Approved is
+    // 'Confirmed' (which itself needs a Caller). The server rejects it either way.
+    if (colId === 'c_status' && String(row?.cells?.c_approved ?? '').trim() !== 'Confirmed') return false;
+    return true;
+  };
   const commitCell = (rowId: string, colId: string, value: any) => {
     // read-only column, or someone else's call (a team caller can see team-mates' rows) → ignore
     if (!canEditCell(gridRef.current?.rows.find((r) => r.id === rowId), colId)) return;

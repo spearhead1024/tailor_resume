@@ -410,6 +410,27 @@ def add_row(body: dict | None = None, user: dict = Depends(_access)):
         return row
 
 
+def _check_workflow(before: dict, patch: dict) -> None:
+    """Interview workflow rules, enforced server-side so the UI can't be worked around:
+
+      1. Approved can only be 'Confirmed' once a Caller is assigned — you can't confirm a call that
+         nobody is going to make. Unassigned calls stay 'Pending'.
+      2. Status can only be set once the call is 'Confirmed' — no outcome before it's even agreed.
+
+    Checked against the row as it will look AFTER the patch, so setting the caller and confirming in
+    the same write is fine.
+    """
+    after = {**before, **patch}
+    caller = str(after.get("c_caller", "") or "").strip()
+    approved = str(after.get("c_approved", "") or "").strip()
+
+    if str(patch.get("c_approved", "") or "").strip() == "Confirmed" and not caller:
+        raise HTTPException(status_code=400, detail="Assign a caller before confirming this interview.")
+
+    if str(patch.get("c_status", "") or "").strip() and approved != "Confirmed":
+        raise HTTPException(status_code=400, detail="Confirm the interview before setting its status.")
+
+
 @router.patch("/rows/{row_id}")
 def patch_row(row_id: str, body: dict, user: dict = Depends(_access)):
     with _lock:
@@ -433,6 +454,7 @@ def patch_row(row_id: str, body: dict, user: dict = Depends(_access)):
                     raise HTTPException(status_code=404, detail="Row not found")
                 if not patch:            # nothing this user is allowed to change → no-op
                     return row
+                _check_workflow(row.get("cells") or {}, patch)
                 row.setdefault("cells", {}).update(patch)
                 _write_unlocked(grid)
                 return row
