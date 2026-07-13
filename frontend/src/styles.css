@@ -140,6 +140,20 @@ input, textarea, select {
   transition: border-color 0.15s, box-shadow 0.15s;
   appearance: auto;
 }
+/* Checkboxes and radios must NOT inherit the `width: 100%` above — it stretches the box across its
+   whole row and shoves the label off to the side (it was wrecking every checkbox in the app: the
+   notification settings, the availability days, the role pickers). Reset them to their natural size. */
+input[type="checkbox"], input[type="radio"] {
+  width: auto;
+  min-width: 0;
+  flex: 0 0 auto;
+  padding: 0;
+  border-radius: 4px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+input[type="checkbox"]:focus, input[type="radio"]:focus { box-shadow: 0 0 0 3px var(--accent-glow); }
+
 input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.75; }
 input:focus, textarea:focus, select:focus {
   outline: none;
@@ -577,11 +591,15 @@ tbody tr:hover td { background: var(--panel-2); color: var(--text); }
   border-bottom: 1px solid rgba(255,255,255,0.094);
 }
 .iv-row:hover td:not(.iv-gutter) { background: #202024; }   /* hover tint on the panel cells, not the margin */
-/* The NEXT upcoming call — the only coloured row on the board (yellow). Calls that have already
-   passed, and every call after the next one, stay plain. Placed after `.iv-grid td` so it wins the
-   equal-specificity tie. */
+/* The NEXT upcoming call — the only *highlighted* row on the board (yellow). Every call after the
+   next one stays plain. Placed after `.iv-grid td` so it wins the equal-specificity tie. */
 .iv-row--next td { background: #3b3418; }
 .iv-row--next:hover td:not(.iv-gutter) { background: #484020; }
+/* A call whose time has already gone: greyed out — still readable, clearly finished. The text is
+   dimmed as well as the background, so a past row reads as inactive at a glance. */
+.iv-row--past td { background: #2b2b2e; color: #8b8b90; }
+.iv-row--past:hover td:not(.iv-gutter) { background: #33333a; }
+.iv-row--past .iv-disp, .iv-row--past .iv-cell { opacity: 0.72; }
 /* Flash a row that just re-sorted after a Scheduled_at edit, so its jump to a new position is
    obvious. A fading overlay (pseudo-element) is used so it doesn't fight the cell background or
    the selection box-shadow. */
@@ -734,3 +752,75 @@ body.iv-col-resizing { cursor: col-resize !important; user-select: none !importa
   user-select: text; -webkit-user-select: text; }
 .iv-modal-ft { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 18px 16px; }
 .iv-search:focus { border-color: #2383E2; }
+
+/* ── Responsive ─────────────────────────────────────────────────────────────
+   The app was built desktop-only: the top nav sits on one fixed-height line, forms are two-up, and
+   the data tables have no horizontal scroll — so below ~1000px the nav squashes and wide tables push
+   the page sideways. These layers fix that without touching any component.                        */
+
+/* Small laptops — reclaim the outer gutters so wide tables get more room. */
+@media (max-width: 1200px) {
+  .content  { padding: 1.5rem 1.25rem; }
+  .iv-full  { margin-left: calc(50% - 50vw + 1.25rem); margin-right: calc(50% - 50vw + 1.25rem); }
+}
+
+/* Tablets — the nav can no longer fit on one line. Give the links their own full-width row that
+   scrolls sideways, instead of letting them squash. Brand + account stay on the first line. */
+@media (max-width: 900px) {
+  .topnav {
+    height: auto;
+    flex-wrap: wrap;
+    align-items: center;
+    padding: 0.55rem 1rem;
+    row-gap: 0.45rem;
+  }
+  .topnav .brand      { margin-right: auto; }     /* pushes Account / Sign out to the right */
+  .topnav .spacer     { display: none; }
+  .topnav .nav-links {
+    order: 3;                                     /* second line */
+    flex: 1 0 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding-bottom: 1px;
+  }
+  .topnav .nav-links::-webkit-scrollbar { display: none; }
+  .topnav .nav-links a { white-space: nowrap; }
+
+  .content { padding: 1.1rem 1rem; }
+  .iv-full { margin-left: calc(50% - 50vw + 1rem); margin-right: calc(50% - 50vw + 1rem); }
+
+  /* Wide data tables scroll sideways rather than blowing out the page. The interviews grid is
+     excluded — it already lives in its own scroll container (.iv-wrap). */
+  table:not(.iv-grid) {
+    display: block;
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .u-detail      { max-width: 100%; }
+  .u-detail-grid { grid-template-columns: 1fr 1fr; }
+}
+
+/* Phones — one field per line, tighter chrome, and nothing may exceed the viewport. */
+@media (max-width: 600px) {
+  .content { padding: 0.9rem 0.75rem; }
+  .iv-full { margin-left: calc(50% - 50vw + 0.75rem); margin-right: calc(50% - 50vw + 0.75rem); }
+  .card    { padding: 1rem 0.95rem; border-radius: 11px; }
+
+  h1 { font-size: 1.35rem; }
+  h2 { font-size: 1.05rem; }
+
+  /* two-up form rows (.row) collapse to a single column */
+  .row     { gap: 0; }
+  .row > * { flex: 1 1 100%; min-width: 0; }
+
+  .u-detail-grid { grid-template-columns: 1fr; }
+  .iv-wrap       { max-height: calc(100vh - 9rem); }
+
+  /* pop-overs must never run off-screen */
+  .tz-menu, .iv-flt-dd { max-width: calc(100vw - 1.5rem); }
+
+  /* buttons wrap instead of overflowing their card */
+  .card button { max-width: 100%; }
+}

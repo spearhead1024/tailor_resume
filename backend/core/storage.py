@@ -346,6 +346,7 @@ def _default_settings() -> dict:
         # and how long a generated resume stays in the Apply queue.
         'job_deadline_hours': 12,
         # Interview reminder push notifications. Hours are on the CALLER's clock.
+        # Only interviews whose Status is "Scheduled" ever notify.
         'notifications': {
             'lead_enabled': True,
             'lead_minutes': 60,        # "Interview in 1 hour" — set 30 for half an hour, etc.
@@ -353,6 +354,8 @@ def _default_settings() -> dict:
             'day_before_hour': 19,     # 7pm the day before: "N interviews tomorrow"
             'day_of_enabled': True,
             'day_of_hour': 8,          # 8am on the day:     "N interviews today"
+            'creator_enabled': True,   # ping the row's Creater ahead of the call
+            'creator_minutes': 90,
         },
     }
 
@@ -364,6 +367,7 @@ def _normalize_notifications(raw: Any) -> dict:
         'lead_enabled': True, 'lead_minutes': 60,
         'day_before_enabled': True, 'day_before_hour': 19,
         'day_of_enabled': True, 'day_of_hour': 8,
+        'creator_enabled': True, 'creator_minutes': 90,
     }
 
     def _int(key: str, lo: int, hi: int) -> int:
@@ -386,6 +390,8 @@ def _normalize_notifications(raw: Any) -> dict:
         'day_before_hour': _int('day_before_hour', 0, 23),
         'day_of_enabled': _bool('day_of_enabled'),
         'day_of_hour': _int('day_of_hour', 0, 23),
+        'creator_enabled': _bool('creator_enabled'),
+        'creator_minutes': _int('creator_minutes', 5, 1440),   # ping the Creater this long before
     }
 
 

@@ -327,7 +327,7 @@
       "cells": {
         "c_index": "4",
         "c_created": "2026-07-05T14:04",
-        "c_sched": "2026-07-12T20:30:00.000Z",
+        "c_sched": "2026-07-14T20:30:00.000Z",
         "c_min": "90",
         "c_link": "meet.google.com/taq-mfnr-ssu",
         "c_title": "Senior Software Engineer",
@@ -352,7 +352,7 @@
       "cells": {
         "c_index": "5",
         "c_created": "2026-07-12T13:29:09.955Z",
-        "c_sched": "2026-07-13T16:44:00.000Z",
+        "c_sched": "2026-07-13T15:11:00.000Z",
         "c_min": "90",
         "c_link": "meet.google.com/taq-mfnr-ssu",
         "c_type": "Tech Call(1)",
@@ -360,13 +360,14 @@
         "c_company": "Assistwell",
         "c_salary": "10k-12k / month",
         "c_team": "Hamna team",
-        "c_caller": "",
-        "c_approved": "Pending",
+        "c_caller": "test_caller4",
+        "c_approved": "Confirmed",
         "c_account": "Nikolay Kashev(EU)",
         "c_resume": "/api/resumes/resume_6a4a4669fe/pdf",
         "c_title": "Senior Software Engineer",
         "c_skill": "Python, AI, ML",
-        "c_creater": "superadmin"
+        "c_creater": "superadmin",
+        "c_status": "Scheduled"
       }
     },
     {

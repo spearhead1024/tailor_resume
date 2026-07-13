@@ -10,13 +10,67 @@ type Notif = {
   lead_enabled: boolean; lead_minutes: number;
   day_before_enabled: boolean; day_before_hour: number;
   day_of_enabled: boolean; day_of_hour: number;
+  creator_enabled: boolean; creator_minutes: number;
 };
 const NOTIF_DEFAULTS: Notif = {
   lead_enabled: true, lead_minutes: 60,
   day_before_enabled: true, day_before_hour: 19,   // 7pm
   day_of_enabled: true, day_of_hour: 8,            // 8am
+  creator_enabled: true, creator_minutes: 90,      // ping whoever booked the call
 };
 const hourName = (h: number) => `${(h % 12) || 12}:00 ${h < 12 ? 'AM' : 'PM'}`;
+
+/** Mirrors the server's wording, so the previews below show exactly what will be pushed. */
+function leadLabel(minutes: number): string {
+  const n = Math.max(1, Math.round(minutes || 0));
+  const h = Math.floor(n / 60), m = n % 60;
+  const parts: string[] = [];
+  if (h) parts.push(`${h} hour${h === 1 ? '' : 's'}`);
+  if (m) parts.push(`${m} minute${m === 1 ? '' : 's'}`);
+  return parts.join(' ');
+}
+
+/** The explanatory text beside a control. Given its own flex basis so it wraps as a paragraph
+    instead of being squeezed into a one-word-per-line column. */
+function Hint({ children }: { children: React.ReactNode }) {
+  return <span className="muted" style={{ flex: '1 1 240px', minWidth: 150, fontSize: '0.82rem', lineHeight: 1.5 }}>{children}</span>;
+}
+
+/** One reminder, as a card: who gets it, when it fires, and what it will actually say. */
+function ReminderCard({ on, onToggle, icon, title, when, to, preview }: {
+  on: boolean; onToggle: (v: boolean) => void; icon: string; title: string;
+  when: React.ReactNode; to: 'Caller' | 'Creator'; preview: string;
+}) {
+  const toColour = to === 'Caller' ? '#3b82f6' : '#a855f7';
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'flex-start', gap: 12, padding: '13px 14px', borderRadius: 10,
+      border: `1px solid ${on ? 'rgba(255,255,255,0.10)' : 'transparent'}`,
+      background: on ? 'rgba(255,255,255,0.03)' : 'transparent',
+      opacity: on ? 1 : 0.5, transition: 'opacity .12s ease, background .12s ease',
+    }}>
+      {/* the flex-basis values are explicit: the checkbox and icon must never grow, and the body
+          must be free to shrink (minWidth:0), or the text wraps one word per line */}
+      <input type="checkbox" checked={on} onChange={(e) => onToggle(e.target.checked)}
+        style={{ flex: '0 0 auto', width: 16, height: 16, marginTop: 3 }} />
+      <span style={{ flex: '0 0 auto', fontSize: '1.05rem', lineHeight: 1.35 }}>{icon}</span>
+      <div style={{ flex: '1 1 auto', minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <strong>{title}</strong>
+          <span style={{
+            fontSize: '0.68rem', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 600,
+            padding: '1px 7px', borderRadius: 999, color: toColour, whiteSpace: 'nowrap',
+            background: `${toColour}22`, border: `1px solid ${toColour}55`,
+          }}>{to}</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 7 }}>{when}</div>
+        <div className="muted" style={{ fontSize: '0.78rem', marginTop: 8, fontStyle: 'italic' }}>
+          🔔 “{preview}”
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function toLines(arr: any): string {
   return Array.isArray(arr) ? arr.join('\n') : '';
@@ -178,53 +232,91 @@ export default function Settings() {
         return (
           <>
             <p className="muted">
-              Interview reminders pushed to the <strong>caller's</strong> desktop. Every time below is on the{' '}
-              <strong>caller's own timezone</strong> (from their profile) — not yours. A caller with several calls on
-              one day gets a <em>single</em> combined "today"/"tomorrow" notification, plus one reminder before each call.
+              Desktop reminders for an upcoming interview. Each one is sent on the{' '}
+              <strong>recipient's own timezone</strong> — the caller's, or the creator's — never yours.
             </p>
+
+            <div className="card" style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginBottom: 12,
+              background: 'rgba(59,130,246,0.07)', border: '1px solid rgba(59,130,246,0.28)' }}>
+              <span style={{ fontSize: '1rem' }}>ℹ️</span>
+              <span style={{ fontSize: '0.85rem' }}>
+                Only interviews whose <strong>Status is “Scheduled”</strong> ever notify. The moment a call becomes
+                Done, Closed, On-hold, Not Done — anything else — it goes silent on its own.
+              </span>
+            </div>
+
             <div className="card">
               <label style={{ fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--muted)' }}>
-                Interview reminders
+                Before the call
               </label>
+              <div style={{ display: 'grid', gap: 8, marginTop: 10 }}>
+                {/* Creator first: its 90-minute heads-up fires BEFORE the caller's 60-minute one. */}
+                <ReminderCard
+                  on={notif.creator_enabled} onToggle={(v) => setN({ creator_enabled: v })}
+                  icon="🗓️" title="Heads-up to whoever booked it" to="Creator"
+                  when={<>
+                    <input type="number" min={5} max={1440} value={notif.creator_minutes} disabled={!notif.creator_enabled}
+                      onChange={(e) => setN({ creator_minutes: parseInt(e.target.value, 10) || 0 })}
+                      style={{ flex: '0 0 auto', width: 82 }} />
+                    <Hint>
+                      minutes before the call — sent to the <strong>Creater</strong>, and it names the caller.
+                      Sent <strong>once</strong>, even if you reschedule.
+                    </Hint>
+                  </>}
+                  preview={`Interview you booked — in ${leadLabel(notif.creator_minutes)}`} />
 
-              <div style={{ display: 'grid', gap: 14, marginTop: 12 }}>
-                <div style={row}>
-                  <input type="checkbox" checked={notif.lead_enabled}
-                    onChange={(e) => setN({ lead_enabled: e.target.checked })} />
-                  <strong style={{ minWidth: 120 }}>Before each call</strong>
-                  <input type="number" min={5} max={1440} value={notif.lead_minutes} disabled={!notif.lead_enabled}
-                    onChange={(e) => setN({ lead_minutes: parseInt(e.target.value, 10) || 0 })}
-                    style={{ width: 90 }} />
-                  <span className="muted">minutes before it starts — e.g. <code>30</code> for half an hour, <code>60</code> for an hour</span>
-                </div>
+                <ReminderCard
+                  on={notif.lead_enabled} onToggle={(v) => setN({ lead_enabled: v })}
+                  icon="🔔" title="Just before the call" to="Caller"
+                  when={<>
+                    <input type="number" min={5} max={1440} value={notif.lead_minutes} disabled={!notif.lead_enabled}
+                      onChange={(e) => setN({ lead_minutes: parseInt(e.target.value, 10) || 0 })}
+                      style={{ flex: '0 0 auto', width: 82 }} />
+                    <Hint>minutes before it starts — one per call</Hint>
+                  </>}
+                  preview={`Interview in ${leadLabel(notif.lead_minutes)}`} />
+              </div>
 
-                <div style={row}>
-                  <input type="checkbox" checked={notif.day_before_enabled}
-                    onChange={(e) => setN({ day_before_enabled: e.target.checked })} />
-                  <strong style={{ minWidth: 120 }}>Day before</strong>
-                  <select value={notif.day_before_hour} disabled={!notif.day_before_enabled}
-                    onChange={(e) => setN({ day_before_hour: parseInt(e.target.value, 10) })} style={{ width: 120 }}>
-                    {hours.map((h) => <option key={h} value={h}>{hourName(h)}</option>)}
-                  </select>
-                  <span className="muted">the evening before — "N interviews tomorrow"</span>
-                </div>
+              <label style={{ fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.04em',
+                color: 'var(--muted)', display: 'block', marginTop: 22 }}>
+                Daily summary
+              </label>
+              <div style={{ display: 'grid', gap: 8, marginTop: 10 }}>
+                <ReminderCard
+                  on={notif.day_before_enabled} onToggle={(v) => setN({ day_before_enabled: v })}
+                  icon="🌙" title="Evening before" to="Caller"
+                  when={<>
+                    <select value={notif.day_before_hour} disabled={!notif.day_before_enabled}
+                      onChange={(e) => setN({ day_before_hour: parseInt(e.target.value, 10) })}
+                      style={{ flex: '0 0 auto', width: 118 }}>
+                      {hours.map((h) => <option key={h} value={h}>{hourName(h)}</option>)}
+                    </select>
+                    <Hint>the night before — one message for <em>all</em> of the next day's calls</Hint>
+                  </>}
+                  preview="2 interviews tomorrow" />
 
-                <div style={row}>
-                  <input type="checkbox" checked={notif.day_of_enabled}
-                    onChange={(e) => setN({ day_of_enabled: e.target.checked })} />
-                  <strong style={{ minWidth: 120 }}>Morning of</strong>
-                  <select value={notif.day_of_hour} disabled={!notif.day_of_enabled}
-                    onChange={(e) => setN({ day_of_hour: parseInt(e.target.value, 10) })} style={{ width: 120 }}>
-                    {hours.map((h) => <option key={h} value={h}>{hourName(h)}</option>)}
-                  </select>
-                  <span className="muted">on the interview day — "N interviews today"</span>
-                </div>
+                <ReminderCard
+                  on={notif.day_of_enabled} onToggle={(v) => setN({ day_of_enabled: v })}
+                  icon="☀️" title="Morning of" to="Caller"
+                  when={<>
+                    <select value={notif.day_of_hour} disabled={!notif.day_of_enabled}
+                      onChange={(e) => setN({ day_of_hour: parseInt(e.target.value, 10) })}
+                      style={{ flex: '0 0 auto', width: 118 }}>
+                      {hours.map((h) => <option key={h} value={h}>{hourName(h)}</option>)}
+                    </select>
+                    <Hint>one message for <em>all</em> of that day's calls</Hint>
+                  </>}
+                  preview="2 interviews today" />
               </div>
 
               <div style={{ display: 'flex', gap: 8, marginTop: 16, alignItems: 'center' }}>
                 <button
                   onClick={() => save({
-                    notifications: { ...notif, lead_minutes: Math.min(Math.max(notif.lead_minutes || 60, 5), 1440) },
+                    notifications: {
+                      ...notif,
+                      lead_minutes: Math.min(Math.max(notif.lead_minutes || 60, 5), 1440),
+                      creator_minutes: Math.min(Math.max(notif.creator_minutes || 90, 5), 1440),
+                    },
                   }, 'Notifications')}
                   disabled={!notifDirty || saveMutation.isPending}>
                   {saveMutation.isPending ? <span className="spinner" /> : 'Save notifications'}
@@ -236,8 +328,9 @@ export default function Settings() {
                 {notifDirty && <span className="muted" style={{ fontSize: '0.82rem' }}>Unsaved changes</span>}
               </div>
               <p className="muted" style={{ fontSize: '0.8rem', marginTop: 12, marginBottom: 0 }}>
-                Changing a value re-arms the affected reminders, so an upcoming call whose new moment has already
-                passed is sent right away (never a stale "tomorrow" once it's today).
+                A reminder always states the time that is <strong>actually</strong> left, so it can never announce
+                “in 90 minutes” for a call that is 40 minutes away. If a call is booked at such short notice that a
+                reminder's moment has already gone, that one is skipped rather than sent late.
               </p>
             </div>
           </>

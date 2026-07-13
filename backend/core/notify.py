@@ -39,6 +39,14 @@ _GRID_FILE = DATA_DIR / "interviews.json"
 _STATE_FILE = DATA_DIR / "notif_state.json"
 _lock = threading.Lock()
 
+# How late a "N minutes before" reminder (caller lead / creator ping) may still fire.
+#
+# It must be generous enough that a call booked at short notice STILL warns the caller — dropping the
+# reminder entirely would be worse than the bug it fixes — but tight enough that a 90-minute creator
+# ping never goes out when the call is nearly starting. With the truthful label below, a late fire
+# says what's actually left ("in 50 minutes"), so it is never a lie either way.
+_LEAD_GRACE = timedelta(minutes=30)
+
 
 
 # ── sent-reminder log (de-dupe) ──────────────────────────────────────────────
@@ -117,11 +125,18 @@ def _read_grid() -> dict:
         return {}
 
 
+# Only an interview in this Status is live enough to remind anyone about. Anything else — Done,
+# Closed, On-hold, Not Done, Failed, … — is finished or parked, so it must stay silent.
+NOTIFY_STATUS = "scheduled"
+
+
 def _upcoming(now: datetime) -> list[dict]:
-    """Every future interview on the board that has both a caller and a schedule, resolved to a user."""
+    """Every future, still-Scheduled interview that has a caller, resolved to users."""
     out = []
     for row in (_read_grid().get("rows", []) or []):
         cells = row.get("cells") or {}
+        if str(cells.get("c_status", "")).strip().lower() != NOTIFY_STATUS:
+            continue                                # not Scheduled → no reminders at all
         caller_id = str(cells.get("c_caller", "")).strip()
         sched_raw = str(cells.get("c_sched", "")).strip()
         if not caller_id or not sched_raw:
@@ -132,11 +147,14 @@ def _upcoming(now: datetime) -> list[dict]:
         user = _resolve_person(caller_id)
         if not user:
             continue
+        creater_name = str(cells.get("c_creater", "") or "").strip()
         out.append({
             "row_id": row.get("id"), "user": user, "tz": str(user.get("timezone", "")).strip(),
             "sched": sched_utc, "sched_raw": sched_raw, "title": _title_of(cells),
             "index": str(cells.get("c_index", "") or "").strip(),      # the call number
             "who": str(cells.get("c_client", "") or "").strip(),       # Interviewer(role) — who they speak to
+            "caller": caller_id,                                       # shown to the creater
+            "creater": _resolve_person(creater_name) if creater_name else None,
         })
     return out
 
@@ -190,6 +208,15 @@ def _lead_label(minutes: int) -> str:
     return " ".join(parts)
 
 
+def _remaining_label(sched_utc: datetime, now: datetime) -> str:
+    """How long is ACTUALLY left, so a reminder can never overstate its own lead time.
+
+    Rounded to the nearest 5 minutes: a tick firing 40s after the 90-minute mark still reads as a
+    clean "1 hour 30 minutes", while a genuinely late one tells the truth instead of lying."""
+    mins = (sched_utc - now).total_seconds() / 60.0
+    return _lead_label(max(5, int(round(mins / 5.0)) * 5))
+
+
 def run_due_reminders() -> int:
     """Scan the board once and fire every reminder whose moment has arrived.
 
@@ -206,6 +233,7 @@ def run_due_reminders() -> int:
     calls = _upcoming(now)
     cfg = _config()
     lead_min = int(cfg.get("lead_minutes", 60) or 60)
+    creator_min = int(cfg.get("creator_minutes", 90) or 90)
     h_before = int(cfg.get("day_before_hour", 19))
     h_of = int(cfg.get("day_of_hour", 8))
     with _lock:
@@ -214,17 +242,32 @@ def run_due_reminders() -> int:
     fired, dirty = 0, False
 
     def claim(key: str, target: datetime, deadline: datetime) -> bool:
-        """True if this reminder is due AND still meaningful. Marks it sent either way, so it fires once.
-
-        A reminder whose moment already passed still fires — catching up matters: an interview booked
-        for later today must tell the caller "today" straight away, not stay silent until an hour
-        before. `deadline` is when the wording stops being true (e.g. "interview tomorrow" is only
-        true until that day actually begins); past it the reminder is dropped rather than sent wrong."""
+        """For the DAY digests. Fires once; catching up matters here — an interview booked for later
+        today must say "today" straight away rather than stay silent. `deadline` is when the wording
+        stops being true (e.g. "tomorrow" only holds until that day begins); past it, it's dropped."""
         nonlocal dirty
         if key in sent or now < target:
             return False
         sent.add(key); dirty = True
         return now < deadline
+
+    def claim_at_moment(key: str, target: datetime, sched: datetime) -> bool:
+        """For the "N minutes before" reminders (caller lead + creator ping).
+
+        These must land near their moment. A call booked with less notice than the configured lead
+        has already missed it — firing then announced "in 90 minutes" with far less time left, which
+        is what produced the bogus creator ping. Past the grace window we stay silent.
+
+        Crucially the key is consumed ONLY when we actually send. A reminder we skipped is not
+        "already sent": if the call is later moved to a time that gives it a real moment again, it
+        must still be able to fire."""
+        nonlocal dirty
+        if key in sent or now < target:
+            return False
+        if (now - target) > _LEAD_GRACE or now >= sched:
+            return False                       # moment missed / call already started → silent, NOT consumed
+        sent.add(key); dirty = True
+        return True
 
     # (1) the lead reminder (admin-set, default 60 min before) — one per call. Keyed on the sched AND
     #     the lead, so changing either the interview time or the setting re-arms it. Meaningful right
@@ -232,10 +275,10 @@ def run_due_reminders() -> int:
     if cfg.get("lead_enabled", True):
         for c in calls:
             key = f"{c['row_id']}|lead{lead_min}m|{c['sched_raw']}"
-            if claim(key, c["sched"] - timedelta(minutes=lead_min), c["sched"]):
+            if claim_at_moment(key, c["sched"] - timedelta(minutes=lead_min), c["sched"]):
                 try:
                     push.send_push(c["user"]["id"], {
-                        "title": f"Interview in {_lead_label(lead_min)}",
+                        "title": f"Interview in {_remaining_label(c['sched'], now)}",
                         "body": _call_line(c, c["tz"]),
                         "tag": f"lead-{c['row_id']}",
                         "url": "/interviews", "requireInteraction": True,
@@ -243,6 +286,34 @@ def run_due_reminders() -> int:
                     fired += 1
                 except Exception:
                     log.exception("lead push failed (row %s)", c["row_id"])
+
+    # (1b) the CREATER's own heads-up (admin-set, default 90 min before) — goes to whoever booked the
+    #      call, not the caller, and names the caller so they know who's covering it. Times are shown
+    #      on the CREATER's clock, since it's their reminder.
+    if cfg.get("creator_enabled", True):
+        for c in calls:
+            creater = c.get("creater")
+            if not creater:
+                continue                       # nobody in the Creater cell (or it matched no user)
+            # Keyed on the ROW ALONE — deliberately not on the scheduled time. The creator is the one
+            # who books and reschedules the call, so one heads-up is all they need; re-arming on every
+            # time change is what pinged them twice for the same interview.
+            key = f"{c['row_id']}|creator"
+            if claim_at_moment(key, c["sched"] - timedelta(minutes=creator_min), c["sched"]):
+                try:
+                    ctz = str(creater.get("timezone", "")).strip()
+                    body = _call_line(c, ctz)
+                    if c.get("caller"):
+                        body += f" · caller: {c['caller']}"
+                    push.send_push(creater["id"], {
+                        "title": f"Interview you booked — in {_remaining_label(c['sched'], now)}",
+                        "body": body,
+                        "tag": f"creator-{c['row_id']}",
+                        "url": "/interviews", "requireInteraction": True,
+                    })
+                    fired += 1
+                except Exception:
+                    log.exception("creator push failed (row %s)", c["row_id"])
 
     # (2) day-before + day-of digests — ONE per caller per day, covering all that day's calls. Both
     #     need the caller's timezone; without one they can't be placed (the lead reminder still works).
