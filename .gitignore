@@ -19,3 +19,19 @@ data/extension/keys/
 data/vapid_private.pem
 data/push_subscriptions.json
 data/notif_state.json
+
+# ── Runtime data — NEVER commit ────────────────────────────────────────────
+# A live SQLite DB committed mid-write is a torn snapshot (corrupt), and a pull
+# overwrites the running DB/JSON underneath the process. Keep all runtime state
+# out of git. (data/extension/ and data/guide/ are shipped assets and stay tracked.)
+data/*.db
+data/*.db.bak-*
+data/interviews.json
+data/interviews.json.*
+data/avatars/
+data/chat_images/
+data/screenshots/
+data/profile_resumes/
+data/logs/
+data/notif_state.json*
+data/_dbrecovery/
