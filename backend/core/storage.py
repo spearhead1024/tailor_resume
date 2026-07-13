@@ -589,6 +589,46 @@ def _normalize_roles(item: dict) -> list[str]:
     return ['admin'] if bool(item.get('is_admin', False)) else ['bidder']
 
 
+# Weekly availability: Monday–Saturday, each with an on/off flag and a working window.
+AVAIL_DAYS = ('mon', 'tue', 'wed', 'thu', 'fri', 'sat')
+_TIME_RE = re.compile(r'^([01]\d|2[0-3]):([0-5]\d)$')     # 24h HH:MM
+
+
+def _normalize_availability(raw: Any) -> dict:
+    """{day: {on, start, end}} for Mon–Sat. Bad/missing values fall back to a 09:00–18:00 weekday
+    default (Saturday off), so a malformed payload can never produce an unusable schedule."""
+    src = raw if isinstance(raw, dict) else {}
+    out: dict[str, dict] = {}
+    for d in AVAIL_DAYS:
+        e = src.get(d) if isinstance(src.get(d), dict) else {}
+        start = str(e.get('start', '') or '').strip()
+        end = str(e.get('end', '') or '').strip()
+        if not _TIME_RE.match(start):
+            start = '09:00'
+        if not _TIME_RE.match(end):
+            end = '18:00'
+        if end <= start:                                   # zero/negative window → back to the default
+            start, end = '09:00', '18:00'
+        on = e.get('on', d != 'sat')                       # default: Mon–Fri on, Sat off
+        out[d] = {'on': bool(on), 'start': start, 'end': end}
+    return out
+
+
+def _normalize_days_off(raw: Any) -> list[str]:
+    """Specific dates the person cannot work, as sorted, de-duped YYYY-MM-DD strings."""
+    if not isinstance(raw, list):
+        return []
+    out: set[str] = set()
+    for v in raw:
+        s = str(v or '').strip()[:10]
+        try:
+            datetime.strptime(s, '%Y-%m-%d')
+        except (TypeError, ValueError):
+            continue
+        out.add(s)
+    return sorted(out)
+
+
 def _normalize_user(item: dict) -> dict:
     roles = _normalize_roles(item)
     return {
@@ -612,6 +652,9 @@ def _normalize_user(item: dict) -> dict:
         # Caller team membership. For a 'caller' this is the team they belong to; for a 'manager'
         # it is the team they run. Empty = ungrouped (shown at the top level of the Users tree).
         'team_id': str(item.get('team_id', '')).strip(),
+        # When this person can take calls: a Mon–Sat weekly window, plus specific days they can't.
+        'availability': _normalize_availability(item.get('availability')),
+        'days_off': _normalize_days_off(item.get('days_off')),
         'force_password_change': bool(item.get('force_password_change', False)),
         'auth_tokens': _normalize_auth_tokens(item.get('auth_tokens', []) or []),
         # Self-service account profile (the "Profile" / Account page).

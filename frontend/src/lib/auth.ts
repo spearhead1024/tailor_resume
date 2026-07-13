@@ -13,6 +13,8 @@ export type User = {
   roles: Role[];
   is_admin: boolean; // derived: 'admin' in roles
   team_id?: string;  // caller: the team they're in; manager: the team they run
+  availability?: Record<string, { on: boolean; start: string; end: string }>;  // mon..sat working window
+  days_off?: string[];                                                          // YYYY-MM-DD they can't work
   status: string;
   assigned_profile_ids?: string[];
   bid_method?: 1 | 2;        // 1 = Resumes + Apply tabs, 2 = Bid tab

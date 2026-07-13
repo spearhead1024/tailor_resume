@@ -81,7 +81,12 @@ def me(user: dict = Depends(get_current_user)):
 _AVATAR_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "avatars"
 _AVATAR_DIR.mkdir(parents=True, exist_ok=True)
 _AVATAR_EXT = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif"}
-_PROFILE_FIELDS = ("full_name", "email", "country", "telegram", "whatsapp", "discord", "emergency_contacts", "timezone")
+_PROFILE_FIELDS = ("full_name", "email", "country", "telegram", "whatsapp", "discord", "timezone")
+# Free text — kept verbatim (newlines matter).
+_PROFILE_TEXTAREAS = ("emergency_contacts",)
+# Structured — a dict / list, so they must NOT be stringified on the way through. Storage validates
+# and clamps them (bad times → the 09:00–18:00 default; bad dates → dropped).
+_PROFILE_STRUCTS = ("availability", "days_off")
 
 try:                                              # validate timezone against the IANA database when available
     from zoneinfo import available_timezones
@@ -93,8 +98,10 @@ except Exception:
 @router.patch("/me")
 def update_me(body: dict = Body(...), user: dict = Depends(get_current_user)):
     """Update the current user's own account profile fields."""
-    patch = {k: str(body.get(k, "")).strip() if k != "emergency_contacts" else str(body.get(k, ""))
-             for k in _PROFILE_FIELDS if k in (body or {})}
+    body = body or {}
+    patch: dict = {k: str(body.get(k, "")).strip() for k in _PROFILE_FIELDS if k in body}
+    patch.update({k: str(body.get(k, "")) for k in _PROFILE_TEXTAREAS if k in body})
+    patch.update({k: body[k] for k in _PROFILE_STRUCTS if k in body})
     if patch.get("email") and not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", patch["email"]):
         raise HTTPException(status_code=400, detail="Invalid email")
     if patch.get("timezone") and _VALID_TZS and patch["timezone"] not in _VALID_TZS:
