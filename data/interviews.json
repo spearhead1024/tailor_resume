@@ -12,13 +12,42 @@
       "name": "Scheduled_at",
       "type": "date",
       "options": [],
-      "width": 139
+      "width": 187
     },
     {
       "id": "c_type",
       "name": "Call Type",
       "type": "select",
-      "options": [],
+      "options": [
+        {
+          "label": "Intro 1(Recruiter)",
+          "color": "#6366f1"
+        },
+        {
+          "label": "Intro 2(Company)",
+          "color": "#8b5cf6"
+        },
+        {
+          "label": "Tech Call(1)",
+          "color": "#ef4444"
+        },
+        {
+          "label": "Tech Call(2)",
+          "color": "#f97316"
+        },
+        {
+          "label": "Intro + Tech",
+          "color": "#22c55e"
+        },
+        {
+          "label": "Phone Call",
+          "color": "#64748b"
+        },
+        {
+          "label": "Final call",
+          "color": "#eab308"
+        }
+      ],
       "width": 149
     },
     {
@@ -211,6 +240,13 @@
       "type": "text",
       "options": [],
       "width": 130
+    },
+    {
+      "id": "c_team",
+      "name": "Team",
+      "type": "select",
+      "options": [],
+      "width": 140
     }
   ],
   "rows": [
@@ -291,89 +327,54 @@
       "cells": {
         "c_index": "4",
         "c_created": "2026-07-05T14:04",
-        "c_sched": "2026-07-06T13:00:00+00:00",
+        "c_sched": "2026-07-12T20:30:00.000Z",
         "c_min": "90",
         "c_link": "meet.google.com/taq-mfnr-ssu",
         "c_title": "Senior Software Engineer",
         "c_skill": "Python, AI, ML",
         "c_company": "Assistwell",
         "c_salary": "10k-12k / month",
-        "c_type": "Intro 1(R`",
+        "c_type": "Intro 1(Recruiter)",
         "c_client": "Robert James (HR manager)",
-        "c_caller": "test_caller2",
+        "c_caller": "test_caller4",
         "c_approved": "Confirmed",
         "c_creater": "Spearhead1024",
-        "c_status": "Done",
+        "c_status": "Scheduled",
         "c_account": "Alexandro Palacios(US)",
         "c_resume": "https://drive.google.com/file/d/1HMYI6V14YRJSTw3Jo_4UvYcug3D8s4qK/view?usp=sharing",
         "c_jd": "",
-        "c_feedback": ""
+        "c_feedback": "",
+        "c_team": "Hamna team"
       }
     },
     {
-      "id": "r_d7418b6815",
+      "id": "r_8058cb0ff1",
       "cells": {
-        "c_title": "Software Engineer - Full-stack",
-        "c_account": "Ivan Montoya",
-        "c_resume": "/api/resumes/resume_6a4a4669fe/pdf",
-        "c_jd": "Company Description\nSwiftly is on a mission to help cities move more efficiently. We are the leading transit data platform for agencies to share real-time passenger information, manage day-to-day operations, and improve service performance. Today, over 200 transit agencies in 12 countries – including LA Metro, MARTA, SEPTA, and MBTA – rely on Swiftly to improve on-time performance by up to 40% and increase passenger information accuracy by up to 50%. The result is better service reliability, increased ridership, and more efficient transit operations.\n \nEven though Swiftly's HQ office is located in San Francisco, CA, we are open to candidates in most locations across the U.S. as well as Ontario and British Columbia, Canada. At this time we are unable to provide Visa sponsorship.\n \nEngineering at Swiftly\nEngineering at Swiftly is not only about writing code – we believe in creating empowered product teams that work together to conceptualize new features and bring them to life. Each team aims to strike a balance between delivering incremental improvements, creating prototypes to test new ideas and mitigate risks, and building scalable software using industry best practices. We’re guided by a mission to positively impact transit riders, and we embrace humility and intentionality in how we make technical decisions so that we best meet our customers’ needs.\n \n\nAbout the Role\n \nSwiftly is looking for a Senior Software Engineer with experience building scalable cloud-based services. You'll collaborate seamlessly with Product Managers, Designers, and teammates to discover the right solutions. You will work across the stack, contributing to backend services as well as modern frontend applications, to deliver seamless, end-to-end experiences for our customers. Our backend environment includes Java, Node.js, and Python; our MV* framework of choice is Vue.js, but we welcome applicants who are excited to work across languages and have strong experience with any major MV* framework.\nWhat You'll Do\n\nDesign, build, maintain, and extend products, features, and functionality that solve real customer problems.\nPartner with Product, Design, and Engineering to discover and validate customer needs and technical approaches.\nPrototype quickly, and as necessary, to de-risk projects, test assumptions, and iterate ideas into production-ready solutions.\nConsistently deliver incremental value by anticipating dependencies, breaking down work, and regularly demoing progress.\nCommunicate technical trade-offs, present system design proposals clearly, and document architectural decisions.\nApply modern software engineering practices to deliver robust, maintainable, and extensible systems.\nUplevel teammates through code reviews, pairing, and strong collaboration.\nTake ownership of your code and product domain, engaging in retrospectives and continuously improving how the team works.\nWhat Will Set You Up for Success\n\nMotivated by mission-driven work and excited to improve public transit.\n5+ years of relevant software engineering experience.\nExperience building real-time data processing systems.\nComfort applying modern AI tools to accelerate development and improve quality.\nFull-stack skills: strong in at least one of Java, Python, or Node/JavaScript; comfortable building modern frontends (Vue.js a plus); eager to learn across the stack.\nExperience building and consuming APIs; proficiency with SQL and non-relational databases, including making informed schema and data modeling decisions.\nExperience with cloud-native architectures and services (AWS preferred).\nStrong product mindset: you use technology pragmatically to solve meaningful customer problems.\nContinuous learner who embraces emerging technologies and helps others grow.\nCollaborative team player who contributes wherever needed to support team goals.\nOpen to feedback (a core Swiftly value), humble in technical debate, and committed to blameless learning and improvement.\nWe encourage you to apply if the above is exciting to you and if you meet half or more of the requirements below. Above all else, we value candidates who angle toward growth, leveraging a positive attitude and the aptitude to relentlessly seek and solve problems to deliver impact. We know the tech landscape is ever-changing and strongly support individual growth. If this sounds like you, we'd love to talk.\n\n \n\nPay Range\n\nIn accordance with pay transparency laws, please see the approximate salary ranges below. These ranges represents the anticipated low and high end of the salary and any on-target earnings (if applicable) for this position. Actual salaries will vary and are based on a multitude of non-discriminatory factors including final role leveling decisions, a candidate’s relevant work experiences/skills, and geographic location. Salary is one component of Swiftly’s total compensation package, which also includes stock options, competitive benefits, 401(k)/ RRSP matching, a fantastic team and culture, opportunity to have a huge impact, emphasis on professional growth and holistic wellness, and other perks.\n\nUS Salary Range: $130,000 - $180,000\n\nCanadian Salary Range: $140,000 - $190,000\n\n\nBenefits:\n• Competitive salary\n• Equity compensation (company ownership) for every employee\n• Medical, Dental and Vision\n• Retirement with Employer Match\n• Flexible Spending Account (FSA)\n• Home office setup reimbursement\n• Monthly cell/internet reimbursement\n• Monthly \"Be Well\" stipend\n• Flexible PTO with a recommended minimum\n• Flexible work environment\n• 16 paid holidays - including months without US national holidays\n• 12 fully paid weeks of leave for child birth/adoption\n \nTravel note: Swiftly employees can generally expect to travel 1–2 times a year for in-person company or team offsites. As a fully distributed company, we consider these offsites important for cultivating strong relationships across our teams! Attending these in-person is expected and encouraged, although we understand everyone has different personal circumstances and we will consider requests for exceptions. Customer-facing team members and other specific roles may be expected to travel more frequently.\n \nWe are an equal opportunity employer - we are committed to a workplace that is as dynamic, diverse, and passionate as the communities we serve.\nWe may use artificial intelligence (AI) tools to support parts of the hiring process, such as reviewing applications, analyzing resumes, or assessing responses. These tools assist our recruitment team but do not replace human judgment. Final hiring decisions are ultimately made by humans. If you would like more information about how your data is processed, please contact us. This is an active, open role that we are currently hiring for at Swiftly.",
-        "c_sched": "2026-07-08T04:00:00.000Z",
+        "c_index": "5",
+        "c_created": "2026-07-12T13:29:09.955Z",
+        "c_sched": "2026-07-13T16:44:00.000Z",
+        "c_min": "90",
         "c_link": "meet.google.com/taq-mfnr-ssu",
-        "c_min": "60",
-        "c_type": "Intro 1(Recruiter)",
+        "c_type": "Tech Call(1)",
         "c_client": "Robert James (HR manager)",
         "c_company": "Assistwell",
         "c_salary": "10k-12k / month",
-        "c_caller": "test_caller2",
+        "c_team": "Hamna team",
+        "c_caller": "",
         "c_approved": "Pending",
+        "c_account": "Nikolay Kashev(EU)",
+        "c_resume": "/api/resumes/resume_6a4a4669fe/pdf",
+        "c_title": "Senior Software Engineer",
         "c_skill": "Python, AI, ML",
-        "c_creater": "Spearhead1024",
-        "c_status": "Done"
+        "c_creater": "superadmin"
       }
     },
     {
-      "id": "r_64d5ae35e1",
-      "cells": {
-        "c_index": "5",
-        "c_created": "2026-07-06T19:30:01.183Z",
-        "c_creater": "",
-        "c_status": "",
-        "c_resume": ""
-      }
-    },
-    {
-      "id": "r_30ab89bc46",
+      "id": "r_e3f78f9977",
       "cells": {
         "c_index": "6",
-        "c_created": "2026-07-07T04:18:16.377Z"
-      }
-    },
-    {
-      "id": "r_0a1ef17d88",
-      "cells": {
-        "c_index": "7",
-        "c_created": "2026-07-07T04:18:17.874Z"
-      }
-    },
-    {
-      "id": "r_1d324c38c2",
-      "cells": {
-        "c_index": "8",
-        "c_created": "2026-07-10T13:28:14.140Z"
-      }
-    },
-    {
-      "id": "r_1173092cf0",
-      "cells": {
-        "c_index": "9",
-        "c_created": "2026-07-10T13:28:16.260Z"
-      }
-    },
-    {
-      "id": "r_89c07ebf1c",
-      "cells": {
-        "c_index": "10",
-        "c_created": "2026-07-10T13:28:24.900Z"
+        "c_created": "2026-07-12T14:23:23.028Z",
+        "c_creater": ""
       }
     }
   ]

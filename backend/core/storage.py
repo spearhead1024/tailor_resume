@@ -32,6 +32,7 @@ from .db.models import (
     OpenAICallRow,
     ProfileRow,
     SettingsRow,
+    TeamRow,
     TemplateRow,
     UserRow,
 )
@@ -344,6 +345,47 @@ def _default_settings() -> dict:
         # Rolling deadline (hours): how long a job stays in the Resumes queue,
         # and how long a generated resume stays in the Apply queue.
         'job_deadline_hours': 12,
+        # Interview reminder push notifications. Hours are on the CALLER's clock.
+        'notifications': {
+            'lead_enabled': True,
+            'lead_minutes': 60,        # "Interview in 1 hour" — set 30 for half an hour, etc.
+            'day_before_enabled': True,
+            'day_before_hour': 19,     # 7pm the day before: "N interviews tomorrow"
+            'day_of_enabled': True,
+            'day_of_hour': 8,          # 8am on the day:     "N interviews today"
+        },
+    }
+
+
+def _normalize_notifications(raw: Any) -> dict:
+    """Interview-reminder settings. Clamped so a bad value can never wedge the scheduler."""
+    src = raw if isinstance(raw, dict) else {}
+    defaults = {
+        'lead_enabled': True, 'lead_minutes': 60,
+        'day_before_enabled': True, 'day_before_hour': 19,
+        'day_of_enabled': True, 'day_of_hour': 8,
+    }
+
+    def _int(key: str, lo: int, hi: int) -> int:
+        try:
+            v = int(src.get(key, defaults[key]))
+        except (TypeError, ValueError):
+            v = int(defaults[key])
+        return min(max(v, lo), hi)
+
+    def _bool(key: str) -> bool:
+        v = src.get(key, defaults[key])
+        if isinstance(v, bool):
+            return v
+        return str(v).strip().lower() not in ('', '0', 'false', 'no', 'off')
+
+    return {
+        'lead_enabled': _bool('lead_enabled'),
+        'lead_minutes': _int('lead_minutes', 5, 1440),      # 5 minutes – 24 hours before the call
+        'day_before_enabled': _bool('day_before_enabled'),
+        'day_before_hour': _int('day_before_hour', 0, 23),
+        'day_of_enabled': _bool('day_of_enabled'),
+        'day_of_hour': _int('day_of_hour', 0, 23),
     }
 
 
@@ -529,7 +571,9 @@ def _normalize_template(item: dict, *, fallback_index: int = 0) -> dict:
     return merged
 
 
-ALLOWED_ROLES = {'admin', 'bidder', 'job_adder', 'caller'}
+# 'manager' = team manager: runs one caller team (creates/approves that team's callers, and on the
+# interview board may re-assign a call within their team + set Approved/Status/Feedback).
+ALLOWED_ROLES = {'admin', 'bidder', 'job_adder', 'caller', 'manager'}
 
 
 def _normalize_roles(item: dict) -> list[str]:
@@ -543,6 +587,46 @@ def _normalize_roles(item: dict) -> list[str]:
             return [r for r in roles if not (r in seen or seen.add(r))]
     # Legacy migration: is_admin=True → ['admin'], else → ['bidder']
     return ['admin'] if bool(item.get('is_admin', False)) else ['bidder']
+
+
+# Weekly availability: Monday–Saturday, each with an on/off flag and a working window.
+AVAIL_DAYS = ('mon', 'tue', 'wed', 'thu', 'fri', 'sat')
+_TIME_RE = re.compile(r'^([01]\d|2[0-3]):([0-5]\d)$')     # 24h HH:MM
+
+
+def _normalize_availability(raw: Any) -> dict:
+    """{day: {on, start, end}} for Mon–Sat. Bad/missing values fall back to a 09:00–18:00 weekday
+    default (Saturday off), so a malformed payload can never produce an unusable schedule."""
+    src = raw if isinstance(raw, dict) else {}
+    out: dict[str, dict] = {}
+    for d in AVAIL_DAYS:
+        e = src.get(d) if isinstance(src.get(d), dict) else {}
+        start = str(e.get('start', '') or '').strip()
+        end = str(e.get('end', '') or '').strip()
+        if not _TIME_RE.match(start):
+            start = '09:00'
+        if not _TIME_RE.match(end):
+            end = '18:00'
+        if end <= start:                                   # zero/negative window → back to the default
+            start, end = '09:00', '18:00'
+        on = e.get('on', d != 'sat')                       # default: Mon–Fri on, Sat off
+        out[d] = {'on': bool(on), 'start': start, 'end': end}
+    return out
+
+
+def _normalize_days_off(raw: Any) -> list[str]:
+    """Specific dates the person cannot work, as sorted, de-duped YYYY-MM-DD strings."""
+    if not isinstance(raw, list):
+        return []
+    out: set[str] = set()
+    for v in raw:
+        s = str(v or '').strip()[:10]
+        try:
+            datetime.strptime(s, '%Y-%m-%d')
+        except (TypeError, ValueError):
+            continue
+        out.add(s)
+    return sorted(out)
 
 
 def _normalize_user(item: dict) -> dict:
@@ -565,6 +649,12 @@ def _normalize_user(item: dict) -> dict:
         'approved_at': str(item.get('approved_at', '')),
         'approved_by_user_id': str(item.get('approved_by_user_id', '')).strip(),
         'parent_admin_id': str(item.get('parent_admin_id', '')).strip(),
+        # Caller team membership. For a 'caller' this is the team they belong to; for a 'manager'
+        # it is the team they run. Empty = ungrouped (shown at the top level of the Users tree).
+        'team_id': str(item.get('team_id', '')).strip(),
+        # When this person can take calls: a Mon–Sat weekly window, plus specific days they can't.
+        'availability': _normalize_availability(item.get('availability')),
+        'days_off': _normalize_days_off(item.get('days_off')),
         'force_password_change': bool(item.get('force_password_change', False)),
         'auth_tokens': _normalize_auth_tokens(item.get('auth_tokens', []) or []),
         # Self-service account profile (the "Profile" / Account page).
@@ -811,6 +901,7 @@ def _normalize_settings(item: Any) -> dict:
     except (TypeError, ValueError):
         dh = 12
     merged['job_deadline_hours'] = min(max(dh, 1), 168)  # clamp 1h–7d
+    merged['notifications'] = _normalize_notifications(merged.get('notifications'))
     return merged
 
 
@@ -1126,6 +1217,49 @@ class Storage:
         normalized = _normalize_settings(payload)
         with session_scope(self.db_path) as session:
             session.merge(SettingsRow(key='app', data=normalized))
+
+    # ---- teams (caller teams) ----
+
+    def get_teams(self) -> list[dict]:
+        with session_scope(self.db_path) as session:
+            rows = session.query(TeamRow).order_by(TeamRow.name).all()
+            return [{'id': r.id, 'name': r.name} for r in rows]
+
+    def get_team(self, team_id: str) -> dict | None:
+        tid = str(team_id or '').strip()
+        if not tid:
+            return None
+        with session_scope(self.db_path) as session:
+            r = session.get(TeamRow, tid)
+            return {'id': r.id, 'name': r.name} if r else None
+
+    def upsert_team(self, payload: dict) -> dict:
+        tid = str((payload or {}).get('id') or '').strip() or f'team_{uuid.uuid4().hex[:10]}'
+        name = str((payload or {}).get('name', '')).strip()
+        if not name:
+            raise ValueError('Team name is required')
+        with session_scope(self.db_path) as session:
+            row = session.get(TeamRow, tid)
+            if row is None:
+                session.add(TeamRow(id=tid, name=name))
+            else:
+                row.name = name
+        return {'id': tid, 'name': name}
+
+    def delete_team(self, team_id: str) -> None:
+        """Remove the team and un-group everyone who was in it (members are never deleted)."""
+        tid = str(team_id or '').strip()
+        if not tid:
+            return
+        with session_scope(self.db_path) as session:
+            for row in session.query(UserRow).all():
+                data = dict(row.data or {})
+                if str(data.get('team_id', '')).strip() == tid:
+                    data['team_id'] = ''
+                    row.data = data
+            row = session.get(TeamRow, tid)
+            if row is not None:
+                session.delete(row)
 
     # ---- users ----
 

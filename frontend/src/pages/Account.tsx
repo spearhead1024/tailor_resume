@@ -8,6 +8,30 @@ type ProfileForm = {
   telegram: string; whatsapp: string; discord: string; emergency_contacts: string; timezone: string;
 };
 
+/* ── availability ───────────────────────────────────────────────────────────
+   When this person can take calls: a Monday–Saturday window, plus specific dates they can't work
+   (holidays, appointments…). Times are plain HH:MM on their own clock — the timezone above is what
+   gives them meaning. The server re-validates all of it. */
+type DayKey = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat';
+type Slot = { on: boolean; start: string; end: string };
+type Availability = Record<DayKey, Slot>;
+
+const DAYS: { key: DayKey; label: string }[] = [
+  { key: 'mon', label: 'Monday' }, { key: 'tue', label: 'Tuesday' }, { key: 'wed', label: 'Wednesday' },
+  { key: 'thu', label: 'Thursday' }, { key: 'fri', label: 'Friday' }, { key: 'sat', label: 'Saturday' },
+];
+const DEFAULT_AVAIL: Availability = DAYS.reduce((a, d) => {
+  a[d.key] = { on: d.key !== 'sat', start: '09:00', end: '18:00' };   // Mon–Fri on, Saturday off
+  return a;
+}, {} as Availability);
+
+const todayISO = () => new Date().toISOString().slice(0, 10);
+const prettyDate = (iso: string) => {
+  const d = new Date(`${iso}T00:00:00`);
+  return isNaN(d.getTime()) ? iso
+    : d.toLocaleDateString(undefined, { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' });
+};
+
 const BROWSER_TZ: string = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch { return ''; } })();
 
 // Country / alias keywords per zone so the picker is searchable by country too (city/capital comes from the zone id).
@@ -115,6 +139,11 @@ export default function Account() {
   const [pw, setPw] = useState({ current: '', next: '', confirm: '' });
   const [pwSaving, setPwSaving] = useState(false);
 
+  const [avail, setAvail] = useState<Availability>(DEFAULT_AVAIL);
+  const [daysOff, setDaysOff] = useState<string[]>([]);
+  const [newDayOff, setNewDayOff] = useState('');
+  const [availSaving, setAvailSaving] = useState(false);
+
   useEffect(() => {
     if (!user) return;
     setForm({
@@ -122,11 +151,21 @@ export default function Account() {
       telegram: user.telegram || '', whatsapp: user.whatsapp || '', discord: user.discord || '',
       emergency_contacts: user.emergency_contacts || '', timezone: user.timezone || '',
     });
+    setAvail({ ...DEFAULT_AVAIL, ...((user.availability || {}) as Availability) });
+    setDaysOff([...(user.days_off || [])].sort());
   }, [user]);
 
   if (!user) return <div><span className="spinner" /> Loading…</div>;
 
   const set = (k: keyof ProfileForm, v: string) => setForm((f) => ({ ...f, [k]: v }));
+  const setDay = (d: DayKey, patch: Partial<Slot>) => setAvail((a) => ({ ...a, [d]: { ...a[d], ...patch } }));
+
+  const addDayOff = () => {
+    const d = newDayOff.trim();
+    if (!d || daysOff.includes(d)) { setNewDayOff(''); return; }
+    setDaysOff((xs) => [...xs, d].sort());
+    setNewDayOff('');
+  };
 
   const save = async () => {
     setSaving(true);
@@ -137,6 +176,19 @@ export default function Account() {
     } catch (e: any) {
       toast(e?.response?.data?.detail || 'Failed to save profile', 'error');
     } finally { setSaving(false); }
+  };
+
+  const saveAvailability = async () => {
+    const bad = DAYS.filter((d) => avail[d.key].on && avail[d.key].end <= avail[d.key].start);
+    if (bad.length) { toast(`${bad[0].label}: end time must be after the start time`, 'error'); return; }
+    setAvailSaving(true);
+    try {
+      await api.patch('/api/auth/me', { availability: avail, days_off: daysOff });
+      await loadCurrentUser();
+      toast('Availability saved', 'success');
+    } catch (e: any) {
+      toast(e?.response?.data?.detail || 'Failed to save availability', 'error');
+    } finally { setAvailSaving(false); }
   };
 
   const onPickAvatar = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -198,20 +250,21 @@ export default function Account() {
       {/* Account details */}
       <div className="card" style={{ marginBottom: '1rem' }}>
         <h2 style={{ marginTop: 0 }}>Account details</h2>
+        {/* Left column = identity, right column = how to reach them / where they are. */}
         <div className="row">
           <div className="field"><label>Full name</label><input value={form.full_name} onChange={(e) => set('full_name', e.target.value)} /></div>
-          <div className="field"><label>Username</label><input value={user.username} disabled /></div>
-        </div>
-        <div className="row">
-          <div className="field"><label>Email</label><input value={form.email} onChange={(e) => set('email', e.target.value)} /></div>
-          <div className="field"><label>Country</label><input value={form.country} onChange={(e) => set('country', e.target.value)} placeholder="e.g. Romania" /></div>
-        </div>
-        <div className="row">
-          <div className="field"><label>Telegram</label><input value={form.telegram} onChange={(e) => set('telegram', e.target.value)} placeholder="@handle" /></div>
           <div className="field"><label>WhatsApp</label><input value={form.whatsapp} onChange={(e) => set('whatsapp', e.target.value)} placeholder="+1 555…" /></div>
         </div>
         <div className="row">
+          <div className="field"><label>Username</label><input value={user.username} disabled /></div>
+          <div className="field"><label>Telegram</label><input value={form.telegram} onChange={(e) => set('telegram', e.target.value)} placeholder="@handle" /></div>
+        </div>
+        <div className="row">
+          <div className="field"><label>Email</label><input value={form.email} onChange={(e) => set('email', e.target.value)} /></div>
           <div className="field"><label>Discord</label><input value={form.discord} onChange={(e) => set('discord', e.target.value)} placeholder="user#0000" /></div>
+        </div>
+        <div className="row">
+          <div className="field"><label>Location</label><input value={form.country} onChange={(e) => set('country', e.target.value)} placeholder="e.g. Romania" /></div>
           <div className="field">
             <label>Time zone</label>
             <TimezonePicker value={form.timezone} onChange={(tz) => set('timezone', tz)} />
@@ -227,6 +280,76 @@ export default function Account() {
             placeholder="Name · relationship · phone (one per line)" />
         </div>
         <button onClick={save} disabled={saving}>{saving ? <span className="spinner" /> : 'Save profile'}</button>
+      </div>
+
+      {/* Availability */}
+      <div className="card" style={{ marginBottom: '1rem' }}>
+        <h2 style={{ marginTop: 0 }}>Availability</h2>
+        <p className="muted" style={{ marginTop: 0, fontSize: '0.84rem' }}>
+          The hours you can take calls, Monday to Saturday. Times are on <strong>your own clock</strong>
+          {form.timezone ? <> ({tzDisplay(form.timezone)})</> : <> — set your time zone above so they mean something</>}.
+          Untick a day to mark it as one you don't work.
+        </p>
+
+        <div style={{ display: 'grid', gap: 8 }}>
+          {DAYS.map((d) => {
+            const s = avail[d.key];
+            const invalid = s.on && s.end <= s.start;
+            return (
+              <div key={d.key} style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 130, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={s.on} onChange={(e) => setDay(d.key, { on: e.target.checked })} />
+                  <span style={{ fontWeight: s.on ? 600 : 400, opacity: s.on ? 1 : 0.55 }}>{d.label}</span>
+                </label>
+                {s.on ? (
+                  <>
+                    <input type="time" value={s.start} onChange={(e) => setDay(d.key, { start: e.target.value })} style={{ width: 120 }} />
+                    <span className="muted">to</span>
+                    <input type="time" value={s.end} onChange={(e) => setDay(d.key, { end: e.target.value })} style={{ width: 120 }} />
+                    {invalid && <span style={{ color: '#ef4444', fontSize: '0.78rem' }}>end must be after start</span>}
+                  </>
+                ) : (
+                  <span className="muted" style={{ fontSize: '0.82rem' }}>Not working</span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="field" style={{ marginTop: 18 }}>
+          <label>Days I can't work</label>
+          <p className="muted" style={{ marginTop: 0, fontSize: '0.8rem' }}>
+            One-off dates that override the week above — holidays, appointments, anything.
+          </p>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <input type="date" min={todayISO()} value={newDayOff}
+              onChange={(e) => setNewDayOff(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addDayOff(); } }}
+              style={{ width: 180 }} />
+            <button className="secondary" onClick={addDayOff} disabled={!newDayOff}>+ Add day off</button>
+          </div>
+
+          {daysOff.length === 0 ? (
+            <span className="muted" style={{ fontSize: '0.82rem', marginTop: 8 }}>No days off added.</span>
+          ) : (
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 10 }}>
+              {daysOff.map((d) => (
+                <span key={d} style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 6, padding: '3px 6px 3px 10px',
+                  borderRadius: 999, background: '#3b82f628', border: '1px solid #3b82f655', fontSize: '0.82rem',
+                }}>
+                  {prettyDate(d)}
+                  <button className="ghost" title="Remove" style={{ padding: '0 4px', lineHeight: 1 }}
+                    onClick={() => setDaysOff((xs) => xs.filter((x) => x !== d))}>✕</button>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <button style={{ marginTop: 14 }} onClick={saveAvailability} disabled={availSaving}>
+          {availSaving ? <span className="spinner" /> : 'Save availability'}
+        </button>
       </div>
 
       {/* Change password */}

@@ -3,7 +3,20 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useToast } from '../lib/toast';
 
-type SubTab = 'general' | 'prompt' | 'domains' | 'titles' | 'companies';
+type SubTab = 'general' | 'notifications' | 'prompt' | 'domains' | 'titles' | 'companies';
+
+/* Interview reminder settings. Every time here is on the CALLER's clock (their profile timezone). */
+type Notif = {
+  lead_enabled: boolean; lead_minutes: number;
+  day_before_enabled: boolean; day_before_hour: number;
+  day_of_enabled: boolean; day_of_hour: number;
+};
+const NOTIF_DEFAULTS: Notif = {
+  lead_enabled: true, lead_minutes: 60,
+  day_before_enabled: true, day_before_hour: 19,   // 7pm
+  day_of_enabled: true, day_of_hour: 8,            // 8am
+};
+const hourName = (h: number) => `${(h % 12) || 12}:00 ${h < 12 ? 'AM' : 'PM'}`;
 
 function toLines(arr: any): string {
   return Array.isArray(arr) ? arr.join('\n') : '';
@@ -37,6 +50,9 @@ export default function Settings() {
   const [companiesText, setCompaniesText] = useState('');
   const [companiesDirty, setCompaniesDirty] = useState(false);
 
+  const [notif, setNotif] = useState<Notif>(NOTIF_DEFAULTS);
+  const [notifDirty, setNotifDirty] = useState(false);
+
   useEffect(() => {
     if (data) {
       setDeadline(String(data.job_deadline_hours ?? 12)); setDeadlineDirty(false);
@@ -44,6 +60,7 @@ export default function Settings() {
       setDomainsText(toLines(data.blacklist_domains)); setDomainsDirty(false);
       setTitlesText(toLines(data.blacklist_titles)); setTitlesDirty(false);
       setCompaniesText(toLines(data.blacklist_companies)); setCompaniesDirty(false);
+      setNotif({ ...NOTIF_DEFAULTS, ...(data.notifications || {}) }); setNotifDirty(false);
     }
   }, [data]);
 
@@ -57,6 +74,7 @@ export default function Settings() {
       if (what === 'Domains') setDomainsDirty(false);
       if (what === 'Titles') setTitlesDirty(false);
       if (what === 'Companies') setCompaniesDirty(false);
+      if (what === 'Notifications') setNotifDirty(false);
       toast(`${what} saved`, 'success');
     },
     onError: (e: any) => toast(e?.response?.data?.detail || 'Failed to save', 'error'),
@@ -113,6 +131,7 @@ export default function Settings() {
       <h1>Settings</h1>
       <div style={{ display: 'flex', gap: 8, marginBottom: '1rem', flexWrap: 'wrap' }}>
         {tabBtn('general', 'General')}
+        {tabBtn('notifications', 'Notifications')}
         {tabBtn('prompt', 'Prompt template')}
         {tabBtn('domains', 'Blacklist domains')}
         {tabBtn('titles', 'Blacklist titles')}
@@ -151,6 +170,79 @@ export default function Settings() {
           </div>
         </>
       )}
+
+      {subTab === 'notifications' && (() => {
+        const setN = (patch: Partial<Notif>) => { setNotif({ ...notif, ...patch }); setNotifDirty(true); };
+        const hours = Array.from({ length: 24 }, (_, h) => h);
+        const row = { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' as const };
+        return (
+          <>
+            <p className="muted">
+              Interview reminders pushed to the <strong>caller's</strong> desktop. Every time below is on the{' '}
+              <strong>caller's own timezone</strong> (from their profile) — not yours. A caller with several calls on
+              one day gets a <em>single</em> combined "today"/"tomorrow" notification, plus one reminder before each call.
+            </p>
+            <div className="card">
+              <label style={{ fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--muted)' }}>
+                Interview reminders
+              </label>
+
+              <div style={{ display: 'grid', gap: 14, marginTop: 12 }}>
+                <div style={row}>
+                  <input type="checkbox" checked={notif.lead_enabled}
+                    onChange={(e) => setN({ lead_enabled: e.target.checked })} />
+                  <strong style={{ minWidth: 120 }}>Before each call</strong>
+                  <input type="number" min={5} max={1440} value={notif.lead_minutes} disabled={!notif.lead_enabled}
+                    onChange={(e) => setN({ lead_minutes: parseInt(e.target.value, 10) || 0 })}
+                    style={{ width: 90 }} />
+                  <span className="muted">minutes before it starts — e.g. <code>30</code> for half an hour, <code>60</code> for an hour</span>
+                </div>
+
+                <div style={row}>
+                  <input type="checkbox" checked={notif.day_before_enabled}
+                    onChange={(e) => setN({ day_before_enabled: e.target.checked })} />
+                  <strong style={{ minWidth: 120 }}>Day before</strong>
+                  <select value={notif.day_before_hour} disabled={!notif.day_before_enabled}
+                    onChange={(e) => setN({ day_before_hour: parseInt(e.target.value, 10) })} style={{ width: 120 }}>
+                    {hours.map((h) => <option key={h} value={h}>{hourName(h)}</option>)}
+                  </select>
+                  <span className="muted">the evening before — "N interviews tomorrow"</span>
+                </div>
+
+                <div style={row}>
+                  <input type="checkbox" checked={notif.day_of_enabled}
+                    onChange={(e) => setN({ day_of_enabled: e.target.checked })} />
+                  <strong style={{ minWidth: 120 }}>Morning of</strong>
+                  <select value={notif.day_of_hour} disabled={!notif.day_of_enabled}
+                    onChange={(e) => setN({ day_of_hour: parseInt(e.target.value, 10) })} style={{ width: 120 }}>
+                    {hours.map((h) => <option key={h} value={h}>{hourName(h)}</option>)}
+                  </select>
+                  <span className="muted">on the interview day — "N interviews today"</span>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', gap: 8, marginTop: 16, alignItems: 'center' }}>
+                <button
+                  onClick={() => save({
+                    notifications: { ...notif, lead_minutes: Math.min(Math.max(notif.lead_minutes || 60, 5), 1440) },
+                  }, 'Notifications')}
+                  disabled={!notifDirty || saveMutation.isPending}>
+                  {saveMutation.isPending ? <span className="spinner" /> : 'Save notifications'}
+                </button>
+                <button className="secondary" disabled={!notifDirty || saveMutation.isPending}
+                  onClick={() => { setNotif({ ...NOTIF_DEFAULTS, ...(data?.notifications || {}) }); setNotifDirty(false); }}>
+                  Discard changes
+                </button>
+                {notifDirty && <span className="muted" style={{ fontSize: '0.82rem' }}>Unsaved changes</span>}
+              </div>
+              <p className="muted" style={{ fontSize: '0.8rem', marginTop: 12, marginBottom: 0 }}>
+                Changing a value re-arms the affected reminders, so an upcoming call whose new moment has already
+                passed is sent right away (never a stale "tomorrow" once it's today).
+              </p>
+            </div>
+          </>
+        );
+      })()}
 
       {subTab === 'prompt' && (
         <>

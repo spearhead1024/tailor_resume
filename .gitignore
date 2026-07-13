@@ -15,3 +15,7 @@ requirements.md
 tmp/backend/.env
 backend/.env
 data/extension/keys/
+# Web Push: the VAPID private key is a SECRET; subscriptions/state are per-deploy runtime data.
+data/vapid_private.pem
+data/push_subscriptions.json
+data/notif_state.json

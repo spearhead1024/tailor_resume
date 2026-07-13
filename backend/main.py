@@ -35,6 +35,8 @@ from routers import extension as extension_router
 from routers import guide as guide_router
 from routers import external as external_router
 from routers import interviews as interviews_router
+from routers import push as push_router
+from routers import teams as teams_router
 
 FRONTEND_DIST = PROJECT_ROOT.parent / "frontend" / "dist"
 
@@ -72,11 +74,28 @@ app.include_router(extension_router.router)
 app.include_router(guide_router.router)
 app.include_router(external_router.router)
 app.include_router(interviews_router.router)
+app.include_router(push_router.router)
+app.include_router(teams_router.router)
 
 
 @app.get("/api/health")
 def health():
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Interview reminder scheduler — fires the 7pm-day-before / 8am-day-of / 1h-before
+# Web Push reminders (per caller timezone). Runs as an in-process background thread.
+# Set PUSH_SCHEDULER=0 to disable it here (e.g. to run it as a dedicated pm2 process
+# instead when the API runs with multiple workers).
+# ---------------------------------------------------------------------------
+@app.on_event("startup")
+def _start_reminder_scheduler():
+    import threading
+    if os.environ.get("PUSH_SCHEDULER", "1") == "0":
+        return
+    from core import notify
+    threading.Thread(target=notify.scheduler_loop, kwargs={"interval_s": 60}, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
