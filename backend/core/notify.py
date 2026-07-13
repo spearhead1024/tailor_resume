@@ -8,9 +8,10 @@ Exactly three reminders per interview, in the CALLER's timezone:
 Nothing else notifies: board edits (assignment, time/content changes, chat) deliberately stay silent.
 
 A background tick (scheduler_loop → run_due_reminders) scans the board every minute and fires any
-reminder whose moment has arrived. Sends are best-effort and never raise into the loop. Reminders are
-de-duped in data/notif_state.json, keyed by row + type + scheduled-time — so each fires once, and
-changing an interview's time re-arms its reminders.
+reminder whose moment has arrived. The board is read from the DB (interview_rows). Sends are
+best-effort and never raise into the loop. Reminders are de-duped in data/notif_state.json, keyed by
+row + type + scheduled-time — so each fires once, and changing an interview's time re-arms its
+reminders.
 
 The 7pm / 8am reminders need the caller's profile timezone; without one, only the 1-hour reminder
 (which is absolute) can fire for them.
@@ -31,13 +32,18 @@ except Exception:                       # pragma: no cover
     ZoneInfo = None
 
 from core import push
+from core.storage import Storage
 
 log = logging.getLogger("notify")
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
-_GRID_FILE = DATA_DIR / "interviews.json"
 _STATE_FILE = DATA_DIR / "notif_state.json"
 _lock = threading.Lock()
+
+# The board lives in SQLite (interview_columns / interview_rows). Storage is a thin handle over the
+# DB path, so building our own here costs nothing and keeps core.notify free of an import cycle
+# back through auth.
+_storage = Storage(DATA_DIR)
 
 
 
@@ -110,10 +116,11 @@ def _fmt_time(sched_utc: datetime, tz_name: str) -> str:
 
 
 def _read_grid() -> dict:
+    """The board, straight from the DB. Read-only — the scheduler never writes to it."""
     try:
-        g = json.loads(_GRID_FILE.read_text(encoding="utf-8"))
-        return g if isinstance(g, dict) else {}
+        return _storage.get_interview_grid()
     except Exception:
+        log.exception("could not read the interviews board; skipping this reminder tick")
         return {}
 
 

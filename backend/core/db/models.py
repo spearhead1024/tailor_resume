@@ -106,6 +106,36 @@ class TeamRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
+class InterviewColumnRow(Base):
+    """A column on the Interviews board. `position` fixes the left-to-right order.
+
+    The board used to live in data/interviews.json; every cell edit rewrote the whole file under a
+    process lock, and a `git pull` overwriting that file mid-write corrupted the board. It's a real
+    table now, so a cell edit is a single-row UPDATE.
+    """
+    __tablename__ = 'interview_columns'
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    position: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    name: Mapped[str] = mapped_column(String(255), default='')
+    type: Mapped[str] = mapped_column(String(32), default='text')
+    width: Mapped[int] = mapped_column(Integer, default=160)
+    options: Mapped[list[Any]] = mapped_column(JSON, default=list)      # [{label, color}]
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class InterviewRow(Base):
+    """One interview. `cells` maps column-id -> value; `position` fixes the row order."""
+    __tablename__ = 'interview_rows'
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    position: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    cells: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
 class OpenAICallRow(Base):
     __tablename__ = 'openai_calls'
 

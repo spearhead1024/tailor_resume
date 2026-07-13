@@ -28,6 +28,8 @@ from .db import session_scope
 from .db import migration as _migration
 from .db.models import (
     GeneratedResumeRow,
+    InterviewColumnRow,
+    InterviewRow,
     JobRow,
     OpenAICallRow,
     ProfileRow,
@@ -1827,3 +1829,118 @@ class Storage:
         with session_scope(self.db_path) as session:
             rows = session.scalars(select(OpenAICallRow).order_by(OpenAICallRow.recorded_at)).all()
             return [_normalize_openai_call(dict(row.data or {})) for row in rows]
+
+    # ── Interviews board ────────────────────────────────────────────────────
+    # Was a single JSON document rewritten in full on every keystroke. Now each cell edit is a
+    # one-row UPDATE inside a transaction, so concurrent edits can't clobber each other.
+
+    def get_interview_columns(self) -> list[dict]:
+        with session_scope(self.db_path) as session:
+            rows = session.scalars(
+                select(InterviewColumnRow).order_by(InterviewColumnRow.position)).all()
+            return [{'id': c.id, 'name': c.name, 'type': c.type, 'width': c.width,
+                     'options': list(c.options or [])} for c in rows]
+
+    def get_interview_rows(self) -> list[dict]:
+        with session_scope(self.db_path) as session:
+            rows = session.scalars(select(InterviewRow).order_by(InterviewRow.position)).all()
+            return [{'id': r.id, 'cells': dict(r.cells or {})} for r in rows]
+
+    def get_interview_grid(self) -> dict:
+        return {'columns': self.get_interview_columns(), 'rows': self.get_interview_rows()}
+
+    def get_interview_row(self, row_id: str) -> dict | None:
+        with session_scope(self.db_path) as session:
+            r = session.get(InterviewRow, str(row_id or ''))
+            return {'id': r.id, 'cells': dict(r.cells or {})} if r else None
+
+    def seed_interview_grid(self, columns: list[dict], rows: list[dict]) -> None:
+        """Bulk-load a whole board (one-time import from the legacy JSON, or the default board)."""
+        with session_scope(self.db_path) as session:
+            session.query(InterviewColumnRow).delete()
+            session.query(InterviewRow).delete()
+            for i, c in enumerate(columns):
+                session.add(InterviewColumnRow(
+                    id=c['id'], position=i, name=c.get('name', ''), type=c.get('type', 'text'),
+                    width=int(c.get('width') or 160), options=c.get('options') or []))
+            for i, r in enumerate(rows):
+                session.add(InterviewRow(id=r['id'], position=i, cells=dict(r.get('cells') or {})))
+
+    def replace_interview_columns(self, columns: list[dict]) -> None:
+        """Replace the schema; cells whose column no longer exists are dropped."""
+        valid = {c['id'] for c in columns}
+        with session_scope(self.db_path) as session:
+            session.query(InterviewColumnRow).delete()
+            for i, c in enumerate(columns):
+                session.add(InterviewColumnRow(
+                    id=c['id'], position=i, name=c.get('name', ''), type=c.get('type', 'text'),
+                    width=int(c.get('width') or 160), options=c.get('options') or []))
+            for r in session.scalars(select(InterviewRow)).all():
+                cells = dict(r.cells or {})
+                pruned = {k: v for k, v in cells.items() if k in valid}
+                if pruned != cells:
+                    r.cells = pruned
+
+    def append_interview_columns(self, specs: list[dict]) -> bool:
+        """Append any of `specs` whose column id is missing. True if the schema changed."""
+        with session_scope(self.db_path) as session:
+            existing = session.scalars(select(InterviewColumnRow)).all()
+            have = {c.id for c in existing}
+            pos = max((c.position for c in existing), default=-1)
+            changed = False
+            for spec in specs:
+                if spec['id'] in have:
+                    continue
+                pos += 1
+                session.add(InterviewColumnRow(
+                    id=spec['id'], position=pos, name=spec.get('name', ''), type=spec.get('type', 'text'),
+                    width=int(spec.get('width') or 160), options=spec.get('options') or []))
+                changed = True
+            return changed
+
+    def insert_interview_row(self, row_id: str, cells: dict, at: int | None = None) -> dict:
+        with session_scope(self.db_path) as session:
+            existing = session.scalars(select(InterviewRow).order_by(InterviewRow.position)).all()
+            n = len(existing)
+            pos = at if isinstance(at, int) and 0 <= at <= n else n
+            new = InterviewRow(id=row_id, position=pos, cells=dict(cells or {}))
+            session.add(new)
+            session.flush()
+            for i, r in enumerate(existing[:pos] + [new] + existing[pos:]):
+                r.position = i          # keep positions dense so `at` (undo/redo) stays exact
+            return {'id': row_id, 'cells': dict(cells or {})}
+
+    def patch_interview_row(self, row_id: str, patch: dict) -> dict | None:
+        """Merge `patch` into one row's cells — a single transaction, so two people editing
+        different cells of the same row never overwrite each other."""
+        with session_scope(self.db_path) as session:
+            r = session.get(InterviewRow, str(row_id or ''))
+            if r is None:
+                return None
+            cells = dict(r.cells or {})
+            cells.update(patch)
+            r.cells = cells             # reassign: SQLAlchemy won't see an in-place dict mutation
+            return {'id': r.id, 'cells': cells}
+
+    def mutate_interview_cell(self, row_id: str, col_id: str, fn) -> dict | None:
+        """Atomic read-modify-write of ONE cell. The chat thread uses this so concurrent posts
+        append rather than clobber (fn receives the stored value, returns the new one)."""
+        with session_scope(self.db_path) as session:
+            r = session.get(InterviewRow, str(row_id or ''))
+            if r is None:
+                return None
+            cells = dict(r.cells or {})
+            cells[col_id] = fn(cells.get(col_id))
+            r.cells = cells
+            return {'id': r.id, 'cells': cells}
+
+    def delete_interview_row(self, row_id: str) -> bool:
+        with session_scope(self.db_path) as session:
+            r = session.get(InterviewRow, str(row_id or ''))
+            if r is None:
+                return False
+            session.delete(r)
+            session.flush()
+            for i, rr in enumerate(session.scalars(select(InterviewRow).order_by(InterviewRow.position)).all()):
+                rr.position = i
+            return True

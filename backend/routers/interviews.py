@@ -1,15 +1,17 @@
 """Interviews — a Notion/Coda-style editable grid for the caller dashboard.
 
-Stored as a single JSON document (data/interviews.json): a list of typed
-columns plus a list of rows (each row = column-id -> value). Gated to admin +
-caller. Granular endpoints (schema / add-row / patch-row / delete-row) so
-concurrent cell edits don't clobber each other; every read-modify-write is
-done under a process lock.
+Stored in the DB: `interview_columns` (the typed schema) + `interview_rows` (each row = column-id ->
+value). Gated to admin / caller / manager. Granular endpoints (schema / add-row / patch-row /
+delete-row / chat) map to targeted SQL, so a cell edit is a single-row UPDATE inside a transaction
+and concurrent edits can't clobber each other.
+
+This used to be one JSON document (data/interviews.json) rewritten in full on every keystroke under a
+process lock. That made every write O(board), and a `git pull` overwriting the file mid-write
+corrupted the board. The legacy file is imported once on first use and then left alone.
 """
 from __future__ import annotations
 
 import json
-import os
 import re
 import threading
 import uuid
@@ -235,23 +237,55 @@ _REQUIRED_COLS = [
 ]
 
 
-def _ensure_columns(grid: dict) -> bool:
-    """Append any required column that's missing. Returns True if the grid changed."""
-    have = {c.get("id") for c in grid.get("columns", [])}
-    changed = False
-    for spec in _REQUIRED_COLS:
-        if spec["id"] not in have:
-            grid.setdefault("columns", []).append(_normalize_column(spec))
-            changed = True
-    return changed
+# ── persistence: the board lives in the DB (interview_columns / interview_rows) ──────────────
+# It used to be data/interviews.json — every keystroke rewrote the whole file under a process lock,
+# and a `git pull` overwriting that file mid-write corrupted the board. Now a cell edit is a
+# single-row UPDATE inside a transaction.
+_bootstrapped = False
 
 
-def _migrate_sched(grid: dict) -> bool:
-    """One-time: convert legacy wall-clock Scheduled_at values to UTC, interpreting each in the
-    timezone of the row's Creater (who typed it). Rows whose Creater has no time zone are left as-is."""
+def _read_legacy_json() -> dict | None:
+    """The old data/interviews.json, if it's still around — imported once, then left alone."""
+    if not _GRID_FILE.exists():
+        return None
+    try:
+        raw = _GRID_FILE.read_text(encoding="utf-8")
+        try:
+            grid = json.loads(raw)
+        except Exception:                       # tolerate trailing garbage
+            grid, _ = json.JSONDecoder().raw_decode(raw.lstrip())
+        if not isinstance(grid, dict) or not grid.get("columns"):
+            return None
+        return {
+            "columns": [_normalize_column(c) for c in grid.get("columns") or [] if isinstance(c, dict)],
+            "rows": [r for r in grid.get("rows") or [] if isinstance(r, dict) and r.get("id")],
+        }
+    except Exception:
+        return None
+
+
+def _bootstrap() -> None:
+    """Seed the DB board on first use (import the legacy JSON if present, else the default board),
+    then keep the schema current and finish the Scheduled_at → UTC migration. Idempotent."""
+    global _bootstrapped
+    if _bootstrapped:
+        return
+    with _lock:
+        if _bootstrapped:
+            return
+        if not storage.get_interview_columns():          # empty DB board → seed it
+            grid = _read_legacy_json() or _default_grid()
+            storage.seed_interview_grid(grid["columns"], grid["rows"])
+        storage.append_interview_columns(_REQUIRED_COLS)  # add newly-required columns
+        _migrate_sched_db()                               # legacy wall-clock Scheduled_at → UTC
+        _bootstrapped = True
+
+
+def _migrate_sched_db() -> None:
+    """Convert any legacy wall-clock Scheduled_at to a UTC instant, interpreting each in the
+    timezone of the row's Creater (who typed it). Rows whose Creater has no zone are left alone."""
     tzmap = None
-    changed = False
-    for row in grid.get("rows", []):
+    for row in storage.get_interview_rows():
         cells = row.get("cells") or {}
         v = cells.get("c_sched")
         s = str(v or "").strip()
@@ -264,50 +298,17 @@ def _migrate_sched(grid: dict) -> bool:
             continue
         new = _sched_to_utc(v, tz)
         if new != v:
-            cells["c_sched"] = new
-            changed = True
-    return changed
+            storage.patch_interview_row(row["id"], {"c_sched": new})
 
 
-# ── file I/O (callers must hold _lock) ──────────────────────────────────────
-def _read_unlocked() -> dict:
-    if not _GRID_FILE.exists():
-        grid = _default_grid()
-        _write_unlocked(grid)
-        return grid
-    raw = _GRID_FILE.read_text(encoding="utf-8")
-    try:
-        grid = json.loads(raw)
-    except Exception:
-        # tolerate a truncated / trailing-garbage file: recover the leading valid object
-        try:
-            grid, _ = json.JSONDecoder().raw_decode(raw.lstrip())
-        except Exception:
-            grid = _default_grid()
-    if not isinstance(grid, dict):
-        grid = _default_grid()
-    grid["columns"] = [_normalize_column(c) for c in (grid.get("columns") or []) if isinstance(c, dict)]
-    grid.setdefault("rows", [])
-    changed = _ensure_columns(grid)     # add newly-required columns
-    changed = _migrate_sched(grid) or changed   # convert legacy wall-clock Scheduled_at → UTC
-    if changed:
-        _write_unlocked(grid)
-    return grid
-
-
-def _write_unlocked(grid: dict) -> None:
-    """Atomic write: serialise to a temp file, then rename over the target. Prevents partial or
-    interleaved writes from corrupting the grid (which previously wiped the table)."""
-    _GRID_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _GRID_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(grid, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, _GRID_FILE)
+def _load_grid() -> dict:
+    _bootstrap()
+    return storage.get_interview_grid()
 
 
 @router.get("")
 def get_grid(user: dict = Depends(_access)):
-    with _lock:
-        grid = _read_unlocked()
+    grid = _load_grid()
     # Admins see every interview; a caller sees only their own rows; a manager sees their whole team's
     # (including calls handed to the team that have no Caller assigned yet).
     if not user.get("is_admin"):
@@ -374,40 +375,27 @@ def put_schema(body: dict, user: dict = Depends(_access)):
             col["id"] = _new_id("c")
         seen.add(col["id"])
         cols.append(col)
-    with _lock:
-        grid = _read_unlocked()
-        valid = {c["id"] for c in cols}
-        for row in grid["rows"]:
-            cells = row.get("cells", {}) or {}
-            row["cells"] = {k: v for k, v in cells.items() if k in valid}
-        grid["columns"] = cols
-        _write_unlocked(grid)
-        return grid
+    _bootstrap()
+    storage.replace_interview_columns(cols)      # prunes cells of removed columns
+    return storage.get_interview_grid()
 
 
 @router.post("/rows")
 def add_row(body: dict | None = None, user: dict = Depends(_access)):
     if not user.get("is_admin"):     # only admins add rows (callers are read-only; appliers use the Schedule flow)
         raise HTTPException(status_code=403, detail="Only admins can add rows.")
-    with _lock:
-        grid = _read_unlocked()
-        valid = {c["id"] for c in grid["columns"]}
-        body2 = body or {}
-        cells = {k: v for k, v in (body2.get("cells", {}) or {}).items() if k in valid}
-        if "c_sched" in cells:           # store Scheduled_at as a UTC instant (idempotent)
-            cells["c_sched"] = _sched_to_utc(cells["c_sched"], str(user.get("timezone", "")).strip())
-        # an explicit id + position lets the client re-insert a row (undo of a delete / redo of an add)
-        rid = str(body2.get("id") or "").strip()
-        if not rid or any(r.get("id") == rid for r in grid["rows"]):
-            rid = _new_id("r")
-        row = {"id": rid, "cells": cells}
-        at = body2.get("at")
-        if isinstance(at, int) and 0 <= at <= len(grid["rows"]):
-            grid["rows"].insert(at, row)
-        else:
-            grid["rows"].append(row)
-        _write_unlocked(grid)
-        return row
+    grid = _load_grid()
+    valid = {c["id"] for c in grid["columns"]}
+    body2 = body or {}
+    cells = {k: v for k, v in (body2.get("cells", {}) or {}).items() if k in valid}
+    if "c_sched" in cells:           # store Scheduled_at as a UTC instant (idempotent)
+        cells["c_sched"] = _sched_to_utc(cells["c_sched"], str(user.get("timezone", "")).strip())
+    # an explicit id + position lets the client re-insert a row (undo of a delete / redo of an add)
+    rid = str(body2.get("id") or "").strip()
+    if not rid or any(r["id"] == rid for r in grid["rows"]):
+        rid = _new_id("r")
+    at = body2.get("at")
+    return storage.insert_interview_row(rid, cells, at if isinstance(at, int) else None)
 
 
 def _check_workflow(before: dict, patch: dict) -> None:
@@ -433,45 +421,42 @@ def _check_workflow(before: dict, patch: dict) -> None:
 
 @router.patch("/rows/{row_id}")
 def patch_row(row_id: str, body: dict, user: dict = Depends(_access)):
-    with _lock:
-        grid = _read_unlocked()
-        valid = {c["id"] for c in grid["columns"]}
-        patch = {k: v for k, v in ((body or {}).get("cells", {}) or {}).items() if k in valid}
-        if not user.get("is_admin"):     # callers: Approved/Status/Feedback. Managers: + Caller.
-            patch = {k: v for k, v in patch.items() if k in _editable_cols(user)}
-            # A manager may hand a call to another caller — but only one of their own team's. Reject
-            # rather than drop it, so a bad re-assign is never silently ignored (it would also make
-            # the row vanish from their board).
-            if "c_caller" in patch:
-                target = str(patch["c_caller"] or "").strip().lower()
-                if target and target not in team_caller_names(team_id_of(user)):
-                    raise HTTPException(status_code=403, detail="You can only assign callers on your own team.")
-        if "c_sched" in patch:           # store Scheduled_at as a UTC instant (idempotent)
-            patch["c_sched"] = _sched_to_utc(patch["c_sched"], str(user.get("timezone", "")).strip())
-        for row in grid["rows"]:
-            if row.get("id") == row_id:
-                if not _owns_row(user, row):
-                    raise HTTPException(status_code=404, detail="Row not found")
-                if not patch:            # nothing this user is allowed to change → no-op
-                    return row
-                _check_workflow(row.get("cells") or {}, patch)
-                row.setdefault("cells", {}).update(patch)
-                _write_unlocked(grid)
-                return row
-    raise HTTPException(status_code=404, detail="Row not found")
+    _bootstrap()
+    valid = {c["id"] for c in storage.get_interview_columns()}
+    patch = {k: v for k, v in ((body or {}).get("cells", {}) or {}).items() if k in valid}
+    if not user.get("is_admin"):     # callers: Approved/Status/Feedback. Managers: + Caller.
+        patch = {k: v for k, v in patch.items() if k in _editable_cols(user)}
+        # A manager may hand a call to another caller — but only one of their own team's. Reject
+        # rather than drop it, so a bad re-assign is never silently ignored (it would also make
+        # the row vanish from their board).
+        if "c_caller" in patch:
+            target = str(patch["c_caller"] or "").strip().lower()
+            if target and target not in team_caller_names(team_id_of(user)):
+                raise HTTPException(status_code=403, detail="You can only assign callers on your own team.")
+    if "c_sched" in patch:           # store Scheduled_at as a UTC instant (idempotent)
+        patch["c_sched"] = _sched_to_utc(patch["c_sched"], str(user.get("timezone", "")).strip())
+
+    row = storage.get_interview_row(row_id)
+    if row is None or not _owns_row(user, row):
+        raise HTTPException(status_code=404, detail="Row not found")
+    if not patch:                    # nothing this user is allowed to change → no-op
+        return row
+    _check_workflow(row.get("cells") or {}, patch)
+    updated = storage.patch_interview_row(row_id, patch)   # one-row UPDATE, in a transaction
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Row not found")
+    return updated
 
 
 @router.delete("/rows/{row_id}")
 def delete_row(row_id: str, user: dict = Depends(_access)):
     if not user.get("is_admin"):         # only admins delete rows
         raise HTTPException(status_code=403, detail="Only admins can delete rows.")
-    with _lock:
-        grid = _read_unlocked()
-        target = next((r for r in grid["rows"] if r.get("id") == row_id), None)
-        if target is None or not _owns_row(user, target):
-            raise HTTPException(status_code=404, detail="Row not found")
-        grid["rows"] = [r for r in grid["rows"] if r.get("id") != row_id]
-        _write_unlocked(grid)
+    _bootstrap()
+    row = storage.get_interview_row(row_id)
+    if row is None or not _owns_row(user, row):
+        raise HTTPException(status_code=404, detail="Row not found")
+    storage.delete_interview_row(row_id)
     return {"ok": True}
 
 
@@ -494,30 +479,47 @@ def _parse_chat(value) -> list:
     return [{"id": "legacy", "author": "", "avatar": "", "at": "", "text": s}]
 
 
-def _find_owned_row(grid: dict, row_id: str, user: dict) -> dict:
-    row = next((r for r in grid["rows"] if r.get("id") == row_id), None)
+def _owned_row_or_404(row_id: str, user: dict) -> dict:
+    _bootstrap()
+    row = storage.get_interview_row(row_id)
     if row is None or not _owns_row(user, row):
         raise HTTPException(status_code=404, detail="Row not found")
     return row
 
 
+def _append_msg(row_id: str, user: dict, msg: dict) -> list:
+    """Append one message to the thread. The read-modify-write happens inside a single transaction
+    on that one cell, so two people posting at the same time can't clobber each other."""
+    out: list = []
+
+    def _mutate(cur):
+        msgs = _parse_chat(cur)
+        msgs = [m for m in msgs if m.get("id") != "legacy" or m.get("text")]   # keep the legacy note in-thread
+        msgs.append(msg)
+        out.extend(msgs)
+        return json.dumps(msgs, ensure_ascii=False)
+
+    if storage.mutate_interview_cell(row_id, _CHAT_COL, _mutate) is None:
+        raise HTTPException(status_code=404, detail="Row not found")
+    return out
+
+
 @router.get("/rows/{row_id}/chat")
 def get_chat(row_id: str, user: dict = Depends(_access)):
-    with _lock:
-        grid = _read_unlocked()
-        row = _find_owned_row(grid, row_id, user)
+    row = _owned_row_or_404(row_id, user)
     return {"messages": _parse_chat((row.get("cells") or {}).get(_CHAT_COL, ""))}
 
 
 @router.post("/rows/{row_id}/chat")
 def append_chat(row_id: str, body: dict, user: dict = Depends(_access)):
-    """Append one message to the thread (atomic under the lock, so concurrent posts don't clobber
-    each other). Both admins and callers may post — that's the Chat & Feedback column."""
+    """Append one message to the thread. Both admins and callers may post — that's the
+    Chat & Feedback column. The append is a transactional read-modify-write of that one cell."""
     text = str((body or {}).get("text", "")).strip()
     if not text:
         raise HTTPException(status_code=400, detail="Empty message")
     if len(text) > 20000:
         raise HTTPException(status_code=400, detail="Message too long")
+    _owned_row_or_404(row_id, user)
     msg = {
         "id": _new_id("m"),
         "author": (user.get("full_name") or user.get("username") or "").strip(),
@@ -525,34 +527,31 @@ def append_chat(row_id: str, body: dict, user: dict = Depends(_access)):
         "at": datetime.now(timezone.utc).isoformat(),
         "text": text,
     }
-    with _lock:
-        grid = _read_unlocked()
-        row = _find_owned_row(grid, row_id, user)
-        msgs = _parse_chat((row.get("cells") or {}).get(_CHAT_COL, ""))
-        msgs = [m for m in msgs if m.get("id") != "legacy" or m.get("text")]   # keep legacy note in-thread
-        msgs.append(msg)
-        row.setdefault("cells", {})[_CHAT_COL] = json.dumps(msgs, ensure_ascii=False)
-        _write_unlocked(grid)
-    return {"messages": msgs}
+    return {"messages": _append_msg(row_id, user, msg)}
 
 
 @router.delete("/rows/{row_id}/chat/{msg_id}")
 def delete_chat(row_id: str, msg_id: str, user: dict = Depends(_access)):
     """Delete a message — your own, or any if you're an admin."""
     author = (user.get("full_name") or user.get("username") or "").strip()
-    with _lock:
-        grid = _read_unlocked()
-        row = _find_owned_row(grid, row_id, user)
-        msgs = _parse_chat((row.get("cells") or {}).get(_CHAT_COL, ""))
-        target = next((m for m in msgs if m.get("id") == msg_id), None)
-        if target is None:
-            raise HTTPException(status_code=404, detail="Message not found")
-        if not user.get("is_admin") and str(target.get("author", "")).strip() != author:
-            raise HTTPException(status_code=403, detail="You can only delete your own messages")
-        msgs = [m for m in msgs if m.get("id") != msg_id]
-        row.setdefault("cells", {})[_CHAT_COL] = json.dumps(msgs, ensure_ascii=False)
-        _write_unlocked(grid)
-    return {"messages": msgs}
+    row = _owned_row_or_404(row_id, user)
+    msgs = _parse_chat((row.get("cells") or {}).get(_CHAT_COL, ""))
+    target = next((m for m in msgs if m.get("id") == msg_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Message not found")
+    if not user.get("is_admin") and str(target.get("author", "")).strip() != author:
+        raise HTTPException(status_code=403, detail="You can only delete your own messages")
+
+    out: list = []
+
+    def _mutate(cur):
+        kept = [m for m in _parse_chat(cur) if m.get("id") != msg_id]
+        out.extend(kept)
+        return json.dumps(kept, ensure_ascii=False)
+
+    if storage.mutate_interview_cell(row_id, _CHAT_COL, _mutate) is None:
+        raise HTTPException(status_code=404, detail="Row not found")
+    return {"messages": out}
 
 
 # ── Chat image attachments (screenshots) ──────────────────────────────────────
@@ -568,6 +567,7 @@ async def append_chat_image(row_id: str, file: UploadFile = File(...), text: str
     content = await file.read()
     if len(content) > 8 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Image too large (max 8 MB)")
+    _owned_row_or_404(row_id, user)
     _CHAT_IMG_DIR.mkdir(parents=True, exist_ok=True)
     name = f"{_new_id('img')}{_IMG_EXT[file.content_type]}"
     (_CHAT_IMG_DIR / name).write_bytes(content)
@@ -579,14 +579,7 @@ async def append_chat_image(row_id: str, file: UploadFile = File(...), text: str
         "text": str(text or "").strip(),
         "image": f"/api/interviews/chat-image/{name}",
     }
-    with _lock:
-        grid = _read_unlocked()
-        row = _find_owned_row(grid, row_id, user)
-        msgs = _parse_chat((row.get("cells") or {}).get(_CHAT_COL, ""))
-        msgs.append(msg)
-        row.setdefault("cells", {})[_CHAT_COL] = json.dumps(msgs, ensure_ascii=False)
-        _write_unlocked(grid)
-    return {"messages": msgs}
+    return {"messages": _append_msg(row_id, user, msg)}
 
 
 @router.get("/chat-image/{name}")
