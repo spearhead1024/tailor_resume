@@ -17,7 +17,11 @@ module.exports = {
       name: 'tailorresume-v2',
       cwd: '/var/@TailorResume/backend',
       script: '.venv/bin/python',
-      args: '-m uvicorn main:app --host 0.0.0.0 --port 8503 --workers 2',
+      // 1 worker only: the live-board WebSocket hub (core/hub.py) keeps its connection registry
+      // in process memory with no cross-process fan-out. With >1 worker, a broadcast triggered on
+      // one worker never reaches a socket held by another -- roughly half of connected clients
+      // silently stop seeing live updates.
+      args: '-m uvicorn main:app --host 0.0.0.0 --port 8503 --workers 1',
       interpreter: 'none',
       env: {
         PYTHONUNBUFFERED: '1',
