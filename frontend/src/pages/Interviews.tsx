@@ -2,6 +2,11 @@ import { type CSSProperties, type MouseEvent as ReactMouseEvent, useEffect, useL
 import { createPortal } from 'react-dom';
 import { api } from '../api/client';
 import { useToast } from '../lib/toast';
+import { BoardLive, liveClient, subscribeLive, subscribeLiveState, type LiveMsg, type LockInfo } from '../lib/board-live';
+import { addDays } from '../lib/availability';
+import { dateKeyIn, thisWeek } from '../lib/board-dates';
+import CalendarView, { type CalPerson } from '../lib/CalendarView';
+import { insertRowAt, removeRow, upsertRow } from '../lib/board-merge';
 import { disablePush, enablePush, initPushSound, notifPermission, pushSupported, sendTestPush, syncPushIfGranted } from '../lib/push';
 import { useAuth } from '../lib/auth';
 
@@ -32,6 +37,24 @@ const COL_RANK_CALLER: Record<string, number> = {
 function orderColumns(g: Grid): Grid {
   const rank = (id: string) => (id in L.COL_RANK ? L.COL_RANK[id] : 100);   // unranked (hidden/custom) → after, stable
   return { ...g, columns: [...(g.columns || [])].sort((a, b) => rank(a.id) - rank(b.id)) };
+}
+
+/** Fold one live message into a board. Pure, so the exact same logic can be applied as messages
+ *  arrive AND replayed over a freshly-fetched snapshot (see loadGrid) — a re-read of the board must
+ *  not lose an update that landed while the read was in flight. */
+function applyLive(g: Grid, m: LiveMsg): Grid {
+  switch (m.type) {
+    case 'row':
+      return { ...g, rows: upsertRow(g.rows, m.row as unknown as Row) };
+    case 'row_delete':
+      return { ...g, rows: removeRow(g.rows, m.row_id) };
+    case 'schema':
+      // Two admins editing columns used to clobber each other (the schema is saved whole).
+      // Taking the server's winning list immediately means the other tab can't save a stale one.
+      return orderColumns({ ...g, columns: m.columns as Col[] });
+    default:
+      return g;
+  }
 }
 
 const TYPES: { value: string; label: string }[] = [
@@ -129,21 +152,21 @@ const COL_RANK_MANAGER: Record<string, number> = {
 const MANAGER_LAYOUT: Layout = { MERGED: MERGED_CALLER, STACK_HIDDEN: STACK_HIDDEN_MANAGER, COL_RANK: COL_RANK_MANAGER };
 let L: Layout = ADMIN_LAYOUT;
 const isMerged = (colId: string): boolean => colId in L.MERGED;
-// Creater fills on CLICK (current user) once the row's Index is set; Created_at is auto-stamped (see commitCell).
-const AUTO_NOW_COLS = new Set<string>();                 // (none: Created_at is auto-stamped, not click-filled)
-const AUTO_ME_COLS = new Set<string>(['c_creater']);    // click an empty cell → stamp current user
-const rowIndexSet = (row: Row): boolean => { const v = row.cells?.c_index; return v != null && v !== ''; };
+// How long you must stay in a cell before it is claimed as yours. This is the exact width of the
+// lost-write window, so it wants to be small — but claiming instantly would lock every cell you merely
+// tab or click across, and each claim is a socket round-trip.
+const LOCK_CLAIM_MS = 700;
+// Creater is stamped by the server when the row is created (see add_row) — the board never writes it
+// on a click. It used to: a single left-click on an empty Creater cell wrote your name. But a
+// left-click is also how you SELECT a cell, so merely clicking across the board signed you as the
+// author of somebody else's row — and quietly redirected that row's 90-minute creator heads-up to you.
+
 // A caller is read-only on the board except these columns — Approved, Status, and the
 // Chat & Feedback thread (c_feedback); admins may edit everything. Backend enforces this too.
 const CALLER_EDITABLE = new Set<string>(['c_approved', 'c_status', 'c_feedback']);
 // A team manager may additionally hand a call to another caller — but only one on their own team
 // (the backend rejects anyone else, and their Caller dropdown only lists the team).
 const MANAGER_EDITABLE = new Set<string>([...CALLER_EDITABLE, 'c_caller']);
-function nowLocal(): string {
-  const d = new Date();
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
-}
 
 type SelRect = { r1: number; c1: number; r2: number; c2: number };
 type SubState = 'none' | 'fill' | 'anchor';
@@ -849,10 +872,12 @@ function CellEditor({ col, value, editing, seed, avatar, tz, onCommit, onDone, o
 /** One merged cell rendered from a list of sub-fields laid out in two visual rows (the top row may
     be split into left|right). Each sub-field is individually selectable + editable; the grid owns
     selection (subState) and editing (editSub). */
-function StackedCell({ fields, row, subState, editSub, editSeed, meName, avatarByName, tz, onSelect, onEdit, onDone, onOpenModal, commit }: {
+function StackedCell({ fields, row, subState, editSub, editSeed, meName, avatarByName, tz, lockOf, onSelect, onEdit, onDone, onOpenModal, commit }: {
   fields: { col: Col; sub: number; row: 0 | 1; width?: number }[];
   row: Row; subState: SubState[]; editSub: number | null; editSeed?: string;
   meName?: string; avatarByName?: Record<string, string>; tz?: string;
+  /** Who (if anyone) is currently editing this cell — someone else, not you. */
+  lockOf?: (colId: string) => string | null;
   onSelect: (sub: number, openType: boolean, shift: boolean) => void;
   onEdit: (sub: number) => void;
   onDone: (dir?: Dir) => void;
@@ -882,18 +907,20 @@ function StackedCell({ fields, row, subState, editSub, editSeed, meName, avatarB
     const h: Record<string, any> = {
       onMouseDown: (e: ReactMouseEvent) => { if (e.button !== 0) return; e.stopPropagation(); onSelect(sub, false, e.shiftKey); },  // body click = select (Shift = extend)
     };
-    // click an empty Created_at / Creater cell (once the row's Index is set) to stamp now / current user
-    if (!isSelect && AUTO_NOW_COLS.has(col.id) && empty && rowIndexSet(row)) h.onClick = (e: ReactMouseEvent) => { e.stopPropagation(); commit(col.id, nowLocal()); };
-    else if (AUTO_ME_COLS.has(col.id) && empty && !!meName && rowIndexSet(row)) h.onClick = (e: ReactMouseEvent) => { e.stopPropagation(); commit(col.id, meName); };
-    else h.onDoubleClick = (e: ReactMouseEvent) => { e.stopPropagation(); onEdit(sub); };   // double-click edits / opens
+    h.onDoubleClick = (e: ReactMouseEvent) => { e.stopPropagation(); onEdit(sub); };   // double-click edits / opens
     const st = subState[sub];
     const selStyle: CSSProperties = st === 'anchor' ? { boxShadow: `inset 0 0 0 2px ${SEL}` } : st === 'fill' ? { background: '#15212e' } : {};
+    // Somebody else is in this cell right now. Show who, and make it inert — this is what stops two
+    // people typing into the same cell and one of them silently losing their work.
+    const heldBy = lockOf?.(col.id) || null;
     return (
-      <div key={f.sub} className={'iv-subcell' + (sub !== 0 ? ' iv-sub' : '')} style={{ flex: f.width ? `0 0 ${f.width}px` : 1, minWidth: 0, ...selStyle }} {...h}>
+      <div key={f.sub} className={'iv-subcell' + (sub !== 0 ? ' iv-sub' : '') + (heldBy ? ' iv-locked' : '')}
+        style={{ flex: f.width ? `0 0 ${f.width}px` : 1, minWidth: 0, position: 'relative', ...selStyle }} {...h}>
         <CellEditor col={col} value={value} editing={editSub === sub} seed={editSub === sub ? editSeed : undefined} tz={tz}
           avatar={col.type === 'person' ? avatarByName?.[String(value ?? '')] : undefined}
           onCommit={(v) => commit(col.id, v)} onDone={onDone}
           onOpen={col.type === 'button' ? () => onOpenModal?.(col) : (isSelect ? () => onEdit(sub) : undefined)} />
+        {heldBy && <span className="iv-lock-tag" title={`${heldBy} is editing this cell`}>✎ {heldBy}</span>}
       </div>
     );
   };
@@ -1112,10 +1139,49 @@ export default function Interviews() {
   const [profiles, setProfiles] = useState<{ id: string; name: string; label: string }[]>([]);            // Profiles tab / DB (Account Profile dropdown)
   const [teams, setTeams] = useState<{ id: string; name: string }[]>([]);                                 // caller teams (Team dropdown)
   const [loading, setLoading] = useState(true);
-  const [flt, setFlt] = useState<Record<string, string>>({});      // filter bar: 'q' → search text; dateFrom/dateTo → Scheduled_at range
+  // Default view: THIS WEEK's calls (plus every unscheduled row — see `matched`). A board that opens
+  // on all history is mostly noise; the week you're working in is what you actually came to see.
+  // It's a normal filter, so the date pickers show it and Clear drops it to show everything.
+  const [flt, setFlt] = useState<Record<string, string>>(() => {
+    const w = thisWeek(me?.timezone || undefined);
+    return { dateFrom: w.from, dateTo: w.to };
+  });
   const [colFlt, setColFlt] = useState<Record<string, string[]>>({});  // per-column multi-select (checkable) filters
+  // Rows added in this session. A brand-new row is empty, so it matches no filter and would vanish
+  // the instant it was created — you'd click Add and see nothing. It used to be worse: adding WIPED
+  // your filters. Exempt the new row from the filters instead, so your filter survives and the row
+  // you just asked for is there to type into. It re-joins the normal rules on the next load.
+  const [justAdded, setJustAdded] = useState<Set<string>>(() => new Set());
   const [limit, setLimit] = useState(50);                          // show the recent N schedules (0 = all)
+  const [liveUp, setLiveUp] = useState(true);                      // socket connected? (shown in the toolbar)
+  // Table or calendar — the SAME rows, the same socket, the same filters, drawn two ways. Remembered,
+  // because whichever one you work in is the one you want back tomorrow.
+  const [view, setView] = useState<'table' | 'calendar'>(
+    () => (localStorage.getItem('iv.view') === 'calendar' ? 'calendar' : 'table'));
+  useEffect(() => { localStorage.setItem('iv.view', view); }, [view]);
+  // A board read is in flight, and these live messages arrived while it was — replayed onto the
+  // response so the snapshot can't roll them back. See loadGrid / the socket effect.
+  const loadingRef = useRef(false);
+  const pendingRef = useRef<LiveMsg[]>([]);
+  const everUpRef = useRef(false);
   const gridRef = useRef<Grid | null>(null);
+
+  /** Read the board. Safe to call at any time — including on a reconnect, when this tab may have
+   *  missed changes entirely. Anything the socket delivers while the request is in flight is buffered
+   *  and re-applied on top of the response, so a slow read can never undo a change that beat it home. */
+  const loadGrid = async () => {
+    loadingRef.current = true;
+    pendingRef.current = [];
+    try {
+      const fresh = orderColumns(await api.get<Grid>('/api/interviews'));
+      setGrid(pendingRef.current.reduce(applyLive, fresh));
+    } catch {
+      toastRef.current('Failed to load interviews', 'error');
+    } finally {
+      loadingRef.current = false;
+      pendingRef.current = [];
+    }
+  };
   // gridRef is set during render to the FILTERED grid (see below) so keyboard + clipboard operate on visible rows.
 
   // ── cell selection (Coda/Sheets-style): click = select one cell, double-click = edit, drag = range,
@@ -1127,6 +1193,8 @@ export default function Interviews() {
   const [modal, setModal] = useState<{ rowId: string; colId: string; title: string; subtitle: string; value: string; readOnly: boolean; kind: 'text' | 'chat' } | null>(null);  // JD editor / Chat thread
   const [confirmDel, setConfirmDel] = useState<string | null>(null);   // rowId pending delete-confirmation
   const [flashRow, setFlashRow] = useState<string | null>(null);       // row just re-sorted by a Scheduled_at edit → scroll to + flash it
+  const [locks, setLocks] = useState<Record<string, LockInfo>>({});    // "rowId|colId" → who is editing it
+  const liveRef = useRef<BoardLive | null>(null);
   // The "next upcoming call" highlight is derived from Date.now() at render time. Tick every minute
   // so that when the next call passes, the yellow moves on to the following one by itself — no
   // manual refresh needed.
@@ -1148,6 +1216,78 @@ export default function Interviews() {
   const fillRef = useRef<(dir: 'down' | 'right') => void>(() => {});
   const anchorTdRef = useRef<HTMLTableCellElement | null>(null);
   useEffect(() => { anchorTdRef.current?.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }, [sel]);  // keep the active cell in view
+
+  // ── live board ────────────────────────────────────────────────────────────
+  // Subscribes to the ONE shared socket (see board-live). Every change anyone makes lands here, so
+  // no board is ever working from a stale copy it will later save over the top of someone else's work.
+  //
+  // Note there is deliberately NO 'notify' case: the notification bell owns those, and it is mounted
+  // on every page. Handling them here as well meant the same message was toasted twice.
+  useEffect(() => {
+    const key = (r: string, c: string) => `${r}|${c}`;
+    const off = subscribeLive((m) => {
+      switch (m.type) {
+        case 'locks':
+          setLocks(Object.fromEntries(m.locks.map((l) => [key(l.row_id, l.col_id), l])));
+          break;
+        case 'lock':
+          setLocks((s) => ({ ...s, [key(m.row_id, m.col_id)]: m }));
+          break;
+        case 'unlock':
+          setLocks((s) => { const n = { ...s }; delete n[key(m.row_id, m.col_id)]; return n; });
+          break;
+        case 'lock_denied':
+          toastRef.current(`${m.label} is editing that cell right now`, 'error');
+          break;
+        case 'row':
+        case 'row_delete':
+        case 'schema':
+          // A board read may be in flight right now. Its response is a snapshot of the board as it
+          // was when the server handled it, so applying it later would roll BACK anything that
+          // happened in between — a row someone added a moment ago would simply disappear. Park the
+          // message and let loadGrid replay it on top of the snapshot instead of dropping it.
+          if (loadingRef.current) { pendingRef.current.push(m); break; }
+          setGrid((g) => (g ? applyLive(g, m) : g));
+          break;
+      }
+    });
+    liveRef.current = liveClient();
+    return () => { off(); };
+  }, []);
+
+  // Re-read the board on every (re)connect.
+  //
+  // The socket has no replay: while it is down, every row/delete/schema change made by anyone else is
+  // missed outright and the server never resends it. Without this, a tab that briefly lost the socket
+  // — a flaky network, or simply a backend restart, which drops every socket at once — stays silently
+  // stale for as long as it is open, missing rows other people can plainly see, until a manual reload.
+  // Reconnecting is exactly the moment we know we may have missed something, so we resync there.
+  useEffect(() => subscribeLiveState((up) => {
+    setLiveUp(up);
+    if (up && everUpRef.current) void loadGrid();   // skip the first connect: the mount load covers it
+    if (up) everUpRef.current = true;
+  }), []);
+
+  // Claim the cell you're editing — but only after a beat, so tabbing/clicking through the board
+  // doesn't lock every cell you pass over. Once claimed, everyone else sees "✎ <you>" on it and the
+  // server refuses their write.
+  //
+  // The delay is the whole race: for that long, two people can both still be typing into the cell and
+  // the second save wins. Short enough to shut that window fast, long enough not to lock cells you're
+  // only passing through.
+  useEffect(() => {
+    const live = liveRef.current;
+    if (!live) return;
+    if (!editing) { live.endEdit(); return; }
+    const g = gridRef.current;
+    const vis = g ? g.columns.filter((c) => !STACK_HIDDEN.has(c.id)) : [];
+    const col = vis[editing.c];
+    const row = g?.rows[editing.r];
+    const colId = col ? (fieldIdsOf(col)[editing.s] ?? col.id) : '';
+    if (!row || !colId) return;
+    const t = window.setTimeout(() => live.startEdit(row.id, colId), LOCK_CLAIM_MS);
+    return () => { window.clearTimeout(t); live.endEdit(); };
+  }, [editing]);
   // A Scheduled_at edit re-sorts the board, so the edited row jumps to its new chronological spot.
   // Scroll it back into view + let the flash highlight (see .iv-row--flash) run, then clear the marker.
   useEffect(() => {
@@ -1349,7 +1489,7 @@ export default function Interviews() {
   }, []);
 
   useEffect(() => {
-    api.get<Grid>('/api/interviews').then((g) => setGrid(orderColumns(g))).catch(() => toast('Failed to load interviews', 'error')).finally(() => setLoading(false));
+    void loadGrid().finally(() => setLoading(false));   // buffers + replays anything the socket delivers mid-read
     api.get<{ people: { label: string; roles?: string[]; team_id?: string; avatar_url?: string }[] }>('/api/interviews/people').then((r) => setPeople(r.people || [])).catch(() => {});
     api.get<{ profiles: { id: string; name: string; label: string }[] }>('/api/interviews/profiles').then((r) => setProfiles(r.profiles || [])).catch(() => {});
     // Teams feed the Team dropdown. The API already scopes this: an admin gets every team, a manager
@@ -1378,10 +1518,23 @@ export default function Interviews() {
     const byRow: Record<string, Record<string, any>> = {};
     for (const ch of list) (byRow[ch.rowId] = byRow[ch.rowId] || {})[ch.colId] = ch.value;
     setGrid((g) => (g ? { ...g, rows: g.rows.map((r) => (byRow[r.id] ? { ...r, cells: { ...r.cells, ...byRow[r.id] } } : r)) } : g));
-    Object.keys(byRow).forEach((rowId) => api.patch(`/api/interviews/rows/${rowId}`, { cells: byRow[rowId] }).catch(() => toastRef.current('Failed to save', 'error')));
+    Object.keys(byRow).forEach((rowId) => api.patch(`/api/interviews/rows/${rowId}`, { cells: byRow[rowId] })
+      .catch((err: any) => {
+        // The write was REFUSED — someone else holds a lock on that cell (409), the workflow rules say
+        // no (400), the row is gone (404). We already applied it locally, so without this the board goes
+        // on showing a value the server never accepted: on the calendar, a call sitting at a time it was
+        // never moved to. Say what happened, then re-read the truth rather than inventing a rollback.
+        // axios puts FastAPI's `detail` at response.data.detail — the 409 there names WHO holds the cell.
+        const detail = err?.response?.data?.detail;
+        toastRef.current(typeof detail === 'string' && detail ? detail : 'Failed to save', 'error');
+        void loadGrid();   // re-read rather than guess: the server is the only thing that knows the truth
+      }));
   };
   const recordCells = (list: CellChange[]) => {          // the public cell-commit: writes + records an undo step
-    const g = gridRef.current;
+    // Look the row up in the FULL set, not gridRef (which holds only the rows the TABLE is showing).
+    // The calendar legitimately displays calls the table has filtered out, and filtering them here made
+    // a drag on one of them vanish: no request, no error, no change — it just snapped back.
+    const g = grid ? { ...grid } : gridRef.current;
     const real = list.filter((ch) => g?.rows.some((r) => r.id === ch.rowId));
     if (!g || !real.length) return;
     const inverse = real.map((ch) => { const row = g.rows.find((r) => r.id === ch.rowId); return { rowId: ch.rowId, colId: ch.colId, value: row?.cells?.[ch.colId] ?? '' }; });
@@ -1391,11 +1544,11 @@ export default function Interviews() {
     redoStack.current = [];
   };
   const insertRowOp = (row: Row, at: number) => {        // re-insert a row (undo of delete / redo of add)
-    setGrid((g) => { if (!g) return g; const rows = [...g.rows]; rows.splice(Math.max(0, Math.min(at, rows.length)), 0, row); return { ...g, rows }; });
+    setGrid((g) => (g ? { ...g, rows: insertRowAt(g.rows, row, at) } : g));   // idempotent: the socket may restore it too
     api.post('/api/interviews/rows', { id: row.id, at, cells: row.cells }).catch(() => toastRef.current('Failed to restore row', 'error'));
   };
   const removeRowOp = (rowId: string) => {               // delete a row (undo of add / redo of delete)
-    setGrid((g) => (g ? { ...g, rows: g.rows.filter((r) => r.id !== rowId) } : g));
+    setGrid((g) => (g ? { ...g, rows: removeRow(g.rows, rowId) } : g));
     api.delete(`/api/interviews/rows/${rowId}`).catch(() => toastRef.current('Failed to remove row', 'error'));
   };
   const undo = () => {
@@ -1432,7 +1585,13 @@ export default function Interviews() {
       .map((s) => s.trim().toLowerCase()).filter(Boolean);
     return mineNames.includes(c);
   };
+  /** Somebody ELSE is editing this cell right now (their name), or null. */
+  const lockedBy = (rowId: string, colId: string): string | null => {
+    const l = locks[`${rowId}|${colId}`];
+    return l && l.user_id !== me?.id ? l.label : null;
+  };
   const canEditCell = (row: Row | null | undefined, colId: string) => {
+    if (row && lockedBy(row.id, colId)) return false;   // held by someone else — don't let me overwrite them
     if (!canEditCol(colId) || !ownsRow(row)) return false;
     // Workflow: no outcome before the call is even agreed. Status stays locked until Approved is
     // 'Confirmed' (which itself needs a Caller). The server rejects it either way.
@@ -1440,8 +1599,12 @@ export default function Interviews() {
     return true;
   };
   const commitCell = (rowId: string, colId: string, value: any) => {
-    // read-only column, or someone else's call (a team caller can see team-mates' rows) → ignore
-    if (!canEditCell(gridRef.current?.rows.find((r) => r.id === rowId), colId)) return;
+    // read-only column, or someone else's call (a team caller can see team-mates' rows) → ignore.
+    // Fall back to the FULL row set: gridRef holds only the table's visible rows, and the calendar can
+    // legitimately show a call the table has filtered out — dragging it must still save, not silently
+    // do nothing. Permission never depended on visibility anyway.
+    const target = gridRef.current?.rows.find((r) => r.id === rowId) ?? grid?.rows.find((r) => r.id === rowId);
+    if (!canEditCell(target, colId)) return;
 
     // The Caller dropdown is a tree of teams + people, so a pick from it can mean either thing:
     //   a TEAM   → hand the whole call to that team (set Team, leave Caller empty for the manager)
@@ -1472,22 +1635,32 @@ export default function Interviews() {
     // to + flashes it, making the change (and where the row went) obvious instead of looking unchanged.
     if (colId === 'c_sched') setFlashRow(rowId);
   };
-  const addRow = async () => {
+  /** `extra` lets the calendar book a slot: same row creation, but pre-filled with the time clicked.
+   *  Returns the created row so the caller can act on it — the calendar opens its detail popup, so a
+   *  dragged-out slot is immediately fillable (company, position, caller) instead of a blank box. */
+  const addRow = async (extra?: Record<string, any>): Promise<Row | undefined> => {
     try {
       const rows = grid?.rows ?? [];   // full rows (not the filtered view) so Index numbering is correct
       const at = rows.length;
       // auto-fill the next Index (max existing + 1) and Created_at (now → shown on Index hover)
       const maxIdx = rows.reduce((m, r) => { const n = parseInt(String(r.cells?.c_index ?? ''), 10); return Number.isFinite(n) ? Math.max(m, n) : m; }, 0);
-      const row = await api.post<Row>('/api/interviews/rows', { cells: { c_index: String(maxIdx + 1), c_created: new Date().toISOString() } });
-      setGrid((g) => (g ? { ...g, rows: [...g.rows, row] } : g));
+      const row = await api.post<Row>('/api/interviews/rows', { cells: { c_index: String(maxIdx + 1), c_created: new Date().toISOString(), ...extra } });
+      // upsert, NOT append: the server already broadcast this row to every admin — including us — and
+      // that socket message usually beats this response home. Appending blindly added it a second time,
+      // which is why adding one row produced two on the author's board and one on everybody else's.
+      setGrid((g) => (g ? { ...g, rows: upsertRow(g.rows, row) } : g));
+      // Keep it visible without touching your filters (an empty row matches none of them).
+      setJustAdded((s) => new Set(s).add(row.id));
       undoStack.current.push({ k: 'addRow', row, at }); redoStack.current = [];
+      return row;
     } catch { toast('Failed to add row', 'error'); }
+    return undefined;
   };
   const deleteRow = async (rowId: string) => {
     const rows = grid?.rows ?? [];   // full rows for a correct undo re-insert position
     const at = rows.findIndex((r) => r.id === rowId);
     const row = at >= 0 ? rows[at] : null;
-    setGrid((gg) => (gg ? { ...gg, rows: gg.rows.filter((r) => r.id !== rowId) } : gg));
+    setGrid((gg) => (gg ? { ...gg, rows: removeRow(gg.rows, rowId) } : gg));
     setSel(null); setEditing(null);
     try { await api.delete(`/api/interviews/rows/${rowId}`); if (row) { undoStack.current.push({ k: 'delRow', row, at }); redoStack.current = []; } } catch { toast('Failed to delete row', 'error'); }
   };
@@ -1573,9 +1746,15 @@ export default function Interviews() {
   };
   const accountOpts: Opt[] = profiles.map((p, i) => ({ label: p.label, color: PALETTE[i % PALETTE.length] }));   // Account Profile options ← Profiles DB
   const teamOpts: Opt[] = teams.map((t, i) => ({ label: t.name, color: PALETTE[i % PALETTE.length] }));          // Team options ← teams table
+  // Creater is a real person, so offer the real people. Free text let it drift to names that belong to
+  // nobody ("Spearhead1024"), and a Creater that resolves to no user silently receives none of the
+  // notifications addressed to the person who booked the call. (The table renders `person` cells with
+  // PersonCell, which ignores options — so this only turns it into a picker where it's a form field.)
+  const creatorOpts: Opt[] = people.map((p, i) => ({ label: p.label, color: PALETTE[i % PALETTE.length] }));
   const cols = grid.columns.map((c) => {
     let cc = c;
     if (c.id === 'c_caller') cc = { ...cc, options: callerOpts };
+    else if (c.id === 'c_creater') cc = { ...cc, options: creatorOpts };
     else if (c.id === 'c_account') cc = { ...cc, options: accountOpts };
     else if (c.id === 'c_team') cc = { ...cc, options: teamOpts };
     if (DISPLAY_NAME[c.id]) cc = { ...cc, name: DISPLAY_NAME[c.id] };   // display rename → propagates to header, button, modal title
@@ -1611,19 +1790,43 @@ export default function Interviews() {
   const dTo = flt.dateTo || '';
   const activeFilterCols = FILTER_COLS.filter((cid) => (colFlt[cid] || []).length > 0);
   const hasFilters = !!fltQ || activeFilterCols.length > 0 || !!dFrom || !!dTo;
-  const matched = !hasFilters ? grid.rows : grid.rows.filter((row) => {
+  // Deliberately split in two. The DATE range and everything else are separate concerns, because the
+  // calendar pages through weeks itself: it needs the rows that pass the search and column filters but
+  // NOT the date filter, or stepping to next week would fight the filter bar and render an empty grid.
+  const passOther = (row: Row): boolean => {
+    if (justAdded.has(row.id)) return true;              // a row you just created is always visible
     for (const cid of activeFilterCols) if (!colFlt[cid].includes(String(row.cells?.[cid] ?? ''))) return false;
-    if (dFrom || dTo) {                                  // Scheduled_at date range (YYYY-MM-DD compare)
-      const sd = String(row.cells?.c_sched ?? '').slice(0, 10);
-      if (dFrom && (!sd || sd < dFrom)) return false;
-      if (dTo && (!sd || sd > dTo)) return false;
-    }
     if (fltQ) {
-      const hay = Object.values(row.cells || {}).map((v) => String(v ?? '')).join('  ').toLowerCase();
+      const hay = Object.values(row.cells || {}).map((v) => String(v ?? '')).join('  ').toLowerCase();
       if (!hay.includes(fltQ)) return false;
     }
     return true;
-  });
+  };
+  const passDate = (row: Row): boolean => {
+    if (justAdded.has(row.id)) return true;
+    if (!dFrom && !dTo) return true;
+    // A row with no Scheduled_at is not OUTSIDE the date range - it is not on the calendar at all.
+    // Hiding unbooked calls behind a date filter would strand them where nobody ever looks, so they
+    // always show. And the comparison is on the viewer's LOCAL date (dateKeyIn), not the stored UTC
+    // one: 08:00 Monday in GMT+9 is 23:00 SUNDAY in UTC, and would otherwise fall out of "this week".
+    const sd = dateKeyIn(String(row.cells?.c_sched ?? ''), userTz);
+    if (!sd) return true;
+    if (dFrom && sd < dFrom) return false;
+    if (dTo && sd > dTo) return false;
+    return true;
+  };
+  // Rows for the CALENDAR: the date range is left to its own week navigation.
+  const calRows = grid.rows.filter(passOther);
+  const matched = !hasFilters ? grid.rows : calRows.filter(passDate);
+  // The week the calendar shows. It IS the date filter, so the two views always agree on the period:
+  // page the calendar to next week, switch to Table, and you are looking at the same seven days.
+  // Snapped back to Monday because in table view you can pick any From date you like.
+  const calWeek = (() => {
+    const base = dFrom || thisWeek(userTz).from;
+    const t = new Date(`${base}T00:00:00Z`);
+    if (isNaN(t.getTime())) return thisWeek(userTz).from;
+    return addDays(base, -((t.getUTCDay() + 6) % 7));       // Mon=0
+  })();
   // Always sorted by Scheduled_at (earliest first). Changing a row's Scheduled_at re-renders → re-sorts,
   // so the row moves to its correct place. Unscheduled rows (incl. newly-added) stay at the bottom, visible.
   const schedMs = (r: Row) => { const s = String(r.cells?.c_sched ?? '').trim(); if (!s) return NaN; const t = new Date(s).getTime(); return isNaN(t) ? NaN : t; };
@@ -1716,7 +1919,27 @@ export default function Interviews() {
     <div className="iv-full">
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
         <h1 style={{ margin: 0 }}>Interviews</h1>
-        <span className="muted" style={{ fontSize: '0.85rem' }}>{viewRows.length < grid.rows.length ? `${viewRows.length} of ${grid.rows.length}` : `${grid.rows.length} row${grid.rows.length === 1 ? '' : 's'}`}</span>
+        {/* Same rows, same socket, same filters — drawn as a grid or on a time axis. */}
+        <div className="iv-viewtog" role="tablist" aria-label="View">
+          <button role="tab" aria-selected={view === 'table'} className={view === 'table' ? 'on' : ''}
+            onClick={() => setView('table')}>▦ Table</button>
+          <button role="tab" aria-selected={view === 'calendar'} className={view === 'calendar' ? 'on' : ''}
+            onClick={() => setView('calendar')}>🗓 Calendar</button>
+        </div>
+        {/* Count what the view you're LOOKING AT is drawing from. The table's count includes the date
+            range; the calendar's does not (it pages weeks itself), so reusing the table's number here
+            read as a lie — "1 of 8" beside a calendar showing nothing. */}
+        <span className="muted" style={{ fontSize: '0.85rem' }}>
+          {(() => {
+            const shown = view === 'table' ? viewRows.length : calRows.length;
+            return shown < grid.rows.length
+              ? `${shown} of ${grid.rows.length}`
+              : `${grid.rows.length} row${grid.rows.length === 1 ? '' : 's'}`;
+          })()}
+        </span>
+        {/* Offline = you are no longer seeing other people's changes. Say so, rather than showing a
+            board that looks current but silently isn't. It resyncs by itself on reconnect. */}
+        {!liveUp && <span className="iv-offline" title="Reconnecting — the board will resync automatically">● Offline</span>}
         <span style={{ flex: 1 }} />
         <NotifBell />
       </div>
@@ -1731,18 +1954,56 @@ export default function Interviews() {
               selected={colFlt[cid] || []} onChange={(next) => setColFlt((f) => ({ ...f, [cid]: next }))} />
           );
         })}
-        <span className="muted iv-flt-lbl">From</span>
-        <input type="date" className="iv-flt-date" title="Scheduled from" value={flt.dateFrom || ''} onChange={(e) => setFlt((f) => ({ ...f, dateFrom: e.target.value }))} />
-        <span className="muted iv-flt-lbl">To</span>
-        <input type="date" className="iv-flt-date" title="Scheduled to" value={flt.dateTo || ''} onChange={(e) => setFlt((f) => ({ ...f, dateTo: e.target.value }))} />
+        {/* In calendar view the date range and the "recent N" cap are the CALENDAR's job — it pages
+            through weeks and must show every call in the week it is on. Leaving these here would let
+            the filter bar silently empty a week you had just navigated to. The search and column
+            filters still apply to both views. */}
+        {view === 'table' && <>
+          <span className="muted iv-flt-lbl">From</span>
+          <input type="date" className="iv-flt-date" title="Scheduled from" value={flt.dateFrom || ''} onChange={(e) => setFlt((f) => ({ ...f, dateFrom: e.target.value }))} />
+          <span className="muted iv-flt-lbl">To</span>
+          <input type="date" className="iv-flt-date" title="Scheduled to" value={flt.dateTo || ''} onChange={(e) => setFlt((f) => ({ ...f, dateTo: e.target.value }))} />
+          {/* The board opens on this week. Clear drops the range to show ALL history, so there has to be
+              a one-click way back — otherwise the default view is unreachable once you leave it. */}
+          <button className="ghost iv-flt-week" title="Show this week's calls (the default view)"
+            onClick={() => { const w = thisWeek(userTz); setFlt((f) => ({ ...f, dateFrom: w.from, dateTo: w.to })); }}>This week</button>
+        </>}
         {hasFilters && <button className="secondary iv-flt-clear" onClick={() => { setFlt({}); setColFlt({}); }}>Clear</button>}
-        <span className="iv-flt-recent">
-          <span className="muted">Recent</span>
-          <input type="number" min={0} className="iv-flt-limit" title="How many recent schedules to show (0 = all)" placeholder="All"
-            value={limit || ''} onChange={(e) => { const n = parseInt(e.target.value, 10); setLimit(Number.isFinite(n) && n > 0 ? n : 0); }} />
-        </span>
+        {view === 'table' && (
+          <span className="iv-flt-recent">
+            <span className="muted">Recent</span>
+            <input type="number" min={0} className="iv-flt-limit" title="How many recent schedules to show (0 = all)" placeholder="All"
+              value={limit || ''} onChange={(e) => { const n = parseInt(e.target.value, 10); setLimit(Number.isFinite(n) && n > 0 ? n : 0); }} />
+          </span>
+        )}
       </div>
 
+      {/* Drag on the grid to book a call, drag a call to move it, drag its bottom edge to resize.
+          All three write the SAME cells the table edits (Scheduled_at / Duration), so they broadcast
+          live, notify the caller, respect the per-cell locks and undo with Ctrl+Z like any other edit.
+          Duration is a TEXT column — it stores '90', not 90. */}
+      {view === 'calendar' && (
+        <CalendarView
+          rows={calRows}
+          weekFrom={calWeek}
+          onWeekChange={(mon) => setFlt((f) => ({ ...f, dateFrom: mon, dateTo: addDays(mon, 6) }))}
+          userTz={userTz || Intl.DateTimeFormat().resolvedOptions().timeZone}
+          people={people as CalPerson[]}
+          canSchedule={isAdmin}
+          columns={cols}
+          canEdit={(rid, cid) => canEditCell(grid.rows.find((r) => r.id === rid), cid)}
+          onPatch={commitCell}
+          onDelete={isAdmin ? (rid) => { void deleteRow(rid); } : undefined}
+          onOpenRow={(rid) => { setView('table'); setFlashRow(rid); }}
+          onCreateAt={isAdmin
+            ? async (iso, mins) => (await addRow({ c_sched: iso, c_min: String(mins) }))?.id
+            : undefined}
+          onReschedule={isAdmin ? (rid, iso) => commitCell(rid, 'c_sched', iso) : undefined}
+          onResizeRow={isAdmin ? (rid, mins) => commitCell(rid, 'c_min', String(mins)) : undefined}
+        />
+      )}
+
+      {view === 'table' && (
       <div className="iv-wrap">
         <table className="iv-grid" style={{ width: '100%' }}>
           <colgroup>
@@ -1801,6 +2062,7 @@ export default function Interviews() {
                     return (
                       <td key={col.id} ref={isAnchorCell ? anchorTdRef : undefined} style={{ padding: 0, ...(ce.length ? { boxShadow: ce.join(', ') } : {}) }} onMouseEnter={() => extendTo(ri, c)}>
                         <StackedCell fields={fields} row={row} meName={meName} avatarByName={avatarByName} tz={userTz}
+                          lockOf={(colId) => lockedBy(row.id, colId)}
                           subState={stackState(ri, c, col.id)}
                           editSub={editing && editing.r === ri && editing.c === c ? editing.s : null}
                           editSeed={editing && editing.r === ri && editing.c === c ? editing.seed : undefined}
@@ -1818,7 +2080,6 @@ export default function Interviews() {
                   if (ce.length) tdStyle.boxShadow = [ss.style.boxShadow, ...ce].filter(Boolean).join(', ');
                   const isEditing = !!editing && editing.r === ri && editing.c === c && editing.s === 0;
                   const cval = row.cells?.[col.id];
-                  const autoMe = AUTO_ME_COLS.has(col.id) && (cval === '' || cval == null) && !!meName && rowIndexSet(row);
                   // Hovering the Index reveals this row's Created_at (now a hidden, hover-only field).
                   const created = col.id === 'c_index' ? String(row.cells?.c_created ?? '').trim() : '';
                   if (created) tdStyle.position = 'relative';
@@ -1826,7 +2087,6 @@ export default function Interviews() {
                     <td key={col.id} ref={isAnchorCell ? anchorTdRef : undefined} className={ss.className} style={tdStyle}
                         onMouseDown={(e) => selectCell(e, ri, c, 0, false)}
                         onMouseEnter={() => extendTo(ri, c)}
-                        onClick={autoMe ? () => commitCell(row.id, col.id, meName) : undefined}
                         onDoubleClick={() => editCell(ri, c, 0)}>
                       <CellEditor col={col} value={cval} editing={isEditing} seed={isEditing ? editing?.seed : undefined} tz={userTz}
                         avatar={col.type === 'person' ? avatarByName[String(cval ?? '')] : undefined}
@@ -1838,8 +2098,9 @@ export default function Interviews() {
                 })}
               </tr>
             ))}
-            {isAdmin && !hasFilters && (
-              <tr className="iv-addrow" onClick={addRow} title="Add a row">
+            {isAdmin && (
+              <tr className="iv-addrow" onClick={() => addRow()}   /* not {addRow} — that would spread the MouseEvent into the new row's cells */
+                  title={hasFilters ? 'Add a row (clears the filters, or the new empty row would be filtered out)' : 'Add a row'}>
                 <td className="iv-gutter" style={{ cursor: 'pointer', color: '#9B9B9B' }}>+</td>
                 <td colSpan={ncols} style={{ cursor: 'pointer' }} />
               </tr>
@@ -1847,6 +2108,7 @@ export default function Interviews() {
           </tbody>
         </table>
       </div>
+      )}
 
       {modal && (modal.kind === 'chat'
         ? <ChatModal title={modal.title} subtitle={modal.subtitle} value={modal.value} me={me} readOnly={modal.readOnly} rowId={modal.rowId}

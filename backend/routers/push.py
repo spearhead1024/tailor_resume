@@ -38,6 +38,36 @@ def status(user: dict = Depends(get_current_user)):
     return {"subscribed": push.has_subscription(user["id"])}
 
 
+@router.post("/snooze")
+def snooze(body: dict = Body(...)):
+    """Re-fire an alarm in N minutes — the Snooze button on an interview reminder.
+
+    Deliberately NOT behind the normal auth dependency: this is called from the service worker, which
+    has no access to the app's JWT and may run with no tab open at all. It authenticates instead with
+    the single-purpose ticket the server itself put inside that alarm, so it can only ever re-send
+    that same reminder to that same person.
+    """
+    import jwt
+
+    from auth import JWT_ALGORITHM, JWT_SECRET
+    from core import notify
+
+    token = str((body or {}).get("token", ""))
+    minutes = (body or {}).get("minutes", 5)
+    try:
+        data = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired snooze ticket")
+
+    user_id = str(data.get("sub", ""))
+    payload = data.get("snz")
+    if not user_id or not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Malformed snooze ticket")
+
+    notify.snooze_add(user_id, payload, minutes)
+    return {"ok": True, "minutes": min(max(int(minutes or 5), 1), 120)}
+
+
 @router.post("/test")
 def test(user: dict = Depends(get_current_user)):
     """Send a test notification to the caller's own devices (used by the Enable-notifications UI)."""
@@ -46,5 +76,6 @@ def test(user: dict = Depends(get_current_user)):
         "body": "You'll get interview reminders here.",
         "tag": "tailorresume-test",
         "url": "/interviews",
+        "alarm": True,        # rings, so you can actually hear what a real reminder will sound like
     })
     return {"ok": True, "sent": sent}

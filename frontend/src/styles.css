@@ -79,6 +79,7 @@ p  { line-height: 1.65; }
 .topnav .nav-links a:hover { color: var(--text-soft); background: var(--panel-2); text-decoration: none; }
 .topnav .nav-links a.active { background: var(--panel-3); color: var(--text); }
 .topnav .spacer { flex: 0; }
+.topnav .user-info { margin-left: 0.9rem; }   /* breathing room next to the notification bell */
 .topnav .user-info { font-size: 0.82rem; text-align: right; color: var(--muted); white-space: nowrap; }
 .topnav .user-info > div:first-child { color: var(--text-soft); font-weight: 500; margin-bottom: 1px; }
 
@@ -597,9 +598,9 @@ tbody tr:hover td { background: var(--panel-2); color: var(--text); }
 .iv-row--next:hover td:not(.iv-gutter) { background: #484020; }
 /* A call whose time has already gone: greyed out — still readable, clearly finished. The text is
    dimmed as well as the background, so a past row reads as inactive at a glance. */
-.iv-row--past td { background: #2b2b2e; color: #8b8b90; }
-.iv-row--past:hover td:not(.iv-gutter) { background: #33333a; }
-.iv-row--past .iv-disp, .iv-row--past .iv-cell { opacity: 0.72; }
+.iv-row--past td { background: #232428; color: #74767e; }
+.iv-row--past:hover td:not(.iv-gutter) { background: #2b2c31; }
+.iv-row--past .iv-disp, .iv-row--past .iv-cell { opacity: 0.62; }
 /* Flash a row that just re-sorted after a Scheduled_at edit, so its jump to a new position is
    obvious. A fading overlay (pseudo-element) is used so it doesn't fight the cell background or
    the selection box-shadow. */
@@ -823,4 +824,201 @@ body.iv-col-resizing { cursor: col-resize !important; user-select: none !importa
 
   /* buttons wrap instead of overflowing their card */
   .card button { max-width: 100%; }
+}
+
+/* A cell somebody else is editing right now. Tinted + tagged with their name, so you can see it is
+   taken BEFORE you type into it — the server also refuses the write, but nobody should get that far. */
+.iv-subcell.iv-locked { background: rgba(245,158,11,0.10); box-shadow: inset 0 0 0 1px rgba(245,158,11,0.45); }
+.iv-lock-tag {
+  position: absolute; top: -7px; right: 2px; z-index: 5;
+  display: inline-flex; align-items: center; gap: 3px;
+  max-width: calc(100% - 6px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 0 5px; border-radius: 999px;
+  font-size: 9.5px; line-height: 14px; font-weight: 600;
+  color: #1c1400; background: #f59e0b; box-shadow: 0 1px 3px rgba(0,0,0,0.45);
+  pointer-events: none;
+}
+
+/* Board socket is down — changes from other people are not arriving. Resyncs itself on reconnect. */
+.iv-offline {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: 999px;
+  padding: 2px 9px;
+  white-space: nowrap;
+}
+
+/* "This week" — snaps the date range back to the board's default view. */
+.iv-flt-week {
+  font-size: 0.78rem;
+  padding: 5px 10px;
+  white-space: nowrap;
+}
+
+/* ── Table | Calendar toggle ───────────────────────────────────────────────── */
+.iv-viewtog { display: inline-flex; gap: 2px; padding: 2px; border-radius: 8px;
+  background: #0f1420; border: 1px solid #243049; }
+.iv-viewtog button { background: transparent; border: 0; color: #94a3b8; cursor: pointer;
+  font-size: 0.8rem; font-weight: 600; padding: 5px 11px; border-radius: 6px; white-space: nowrap; }
+.iv-viewtog button:hover { color: #e2e8f0; }
+.iv-viewtog button.on { background: #1e293b; color: #f1f5f9; box-shadow: inset 0 0 0 1px #334155; }
+
+/* ── Calendar: 2/3 grid, 1/3 caller + availability rail ────────────────────── */
+.cal-wrap { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; align-items: start; min-height: 0; }
+.cal-main { background: #0d1119; border: 1px solid #1e293b; border-radius: 12px; overflow: hidden; min-width: 0; }
+
+.cal-head { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-bottom: 1px solid #1e293b; flex-wrap: wrap; }
+.cal-nav { display: inline-flex; gap: 4px; align-items: center; }
+.cal-nav button { padding: 4px 10px; font-size: 0.9rem; line-height: 1.2; }
+.cal-today { font-size: 0.78rem !important; padding: 5px 12px !important; }
+.cal-month { margin: 0; font-size: 1rem; font-weight: 600; color: #e2e8f0; }
+.cal-tz { margin-left: auto; font-size: 0.75rem; }
+
+/* day headers: one gutter column + 7 days, EXACTLY matching .cal-grid below */
+.cal-days { display: grid; grid-template-columns: 56px repeat(7, 1fr); border-bottom: 1px solid #1e293b; }
+.cal-gutter-head { border-right: 1px solid #1e293b; }
+.cal-dayhead { text-align: center; padding: 6px 2px 8px; border-right: 1px solid #161f30; }
+.cal-dayhead:last-child { border-right: 0; }
+.cal-dow { display: block; font-size: 0.68rem; text-transform: uppercase; letter-spacing: .06em; color: #64748b; }
+.cal-dnum { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px;
+  margin-top: 3px; border-radius: 50%; font-size: 0.95rem; color: #cbd5e1; }
+.cal-dayhead--today .cal-dow { color: #60a5fa; }
+.cal-dayhead--today .cal-dnum { background: #2563eb; color: #fff; font-weight: 600; }
+
+.cal-body { max-height: 62vh; overflow-y: auto; overflow-x: hidden; }
+.cal-grid { display: grid; grid-template-columns: 56px repeat(7, 1fr); position: relative; }
+
+.cal-gutter { position: relative; border-right: 1px solid #1e293b; }
+.cal-hour-lbl { position: absolute; right: 6px; transform: translateY(-50%); font-size: 0.68rem;
+  color: #64748b; font-variant-numeric: tabular-nums; }
+
+.cal-col { position: relative; border-right: 1px solid #161f30; overflow: hidden; }
+.cal-col:last-child { border-right: 0; }
+.cal-col--bookable { cursor: copy; }
+.cal-hline { position: absolute; left: 0; right: 0; height: 0; border-top: 1px solid #161f30; }
+
+/* the selected caller's working hours, painted behind the calls */
+.cal-avail { position: absolute; left: 0; right: 0; background: rgba(34, 197, 94, 0.10);
+  border-top: 1px solid rgba(34, 197, 94, 0.25); border-bottom: 1px solid rgba(34, 197, 94, 0.25);
+  pointer-events: none; }
+
+.cal-now { position: absolute; left: 0; right: 0; height: 0; border-top: 2px solid #ef4444; z-index: 3; pointer-events: none; }
+.cal-now-dot { position: absolute; left: -4px; top: -5px; width: 8px; height: 8px; border-radius: 50%; background: #ef4444; }
+
+.cal-ev { position: absolute; z-index: 2; display: flex; flex-direction: column; gap: 1px;
+  padding: 2px 5px; border: 0; border-radius: 5px; text-align: left; cursor: pointer;
+  overflow: hidden; font-size: 0.72rem; line-height: 1.25; }
+.cal-ev:hover { filter: brightness(1.25); }
+.cal-ev--sel { outline: 2px solid #60a5fa; outline-offset: -1px; }
+.cal-ev--dim { opacity: 0.28; }              /* another caller, while one is selected */
+.cal-ev--past { opacity: 0.55; }
+.cal-ev-t { font-weight: 700; font-variant-numeric: tabular-nums; }
+.cal-ev-n { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cal-ev-c { opacity: 0.75; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.68rem; }
+.cal-ev-c--none { font-style: italic; }
+.cal-warn { color: #fbbf24; }
+
+/* ── the 1/3 rail ──────────────────────────────────────────────────────────── */
+.cal-side { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.cal-side-sec { background: #0d1119; border: 1px solid #1e293b; border-radius: 12px; padding: 12px; }
+.cal-side-h { margin: 0 0 8px; font-size: 0.72rem; text-transform: uppercase; letter-spacing: .07em; color: #64748b; }
+.cal-search { margin-bottom: 8px; font-size: 0.82rem; padding: 6px 9px; }
+.cal-empty { font-size: 0.78rem; margin: 4px 0 0; }
+
+.cal-people { display: flex; flex-direction: column; gap: 2px; max-height: 210px; overflow-y: auto; }
+.cal-person { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px;
+  background: transparent; border: 0; border-radius: 7px; color: #cbd5e1; cursor: pointer;
+  font-size: 0.83rem; text-align: left; }
+.cal-person:hover { background: #151d2c; }
+.cal-person--on { background: #1e293b; color: #f1f5f9; box-shadow: inset 0 0 0 1px #334155; }
+.cal-swatch { width: 10px; height: 10px; border-radius: 3px; flex: 0 0 auto; }
+.cal-person-n { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cal-person-n2 { font-size: 0.7rem; color: #64748b; background: #0f1725; border-radius: 999px; padding: 1px 7px; }
+
+.cal-av-tz { font-size: 0.74rem; color: #94a3b8; line-height: 1.45; margin-bottom: 8px; }
+.cal-av-warn { color: #fbbf24; }
+.cal-av-list { list-style: none; margin: 0; padding: 0; }
+.cal-av-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px solid #151d2c; font-size: 0.79rem; }
+.cal-av-row:last-child { border-bottom: 0; }
+.cal-av-row--off { opacity: 0.45; }
+.cal-av-d { width: 34px; color: #64748b; font-weight: 600; }
+.cal-av-h { flex: 1; color: #cbd5e1; font-variant-numeric: tabular-nums; }
+.cal-av-own { font-size: 0.7rem; color: #64748b; font-variant-numeric: tabular-nums; }
+.cal-av-off { font-size: 0.74rem; color: #94a3b8; margin: 8px 0 0; }
+
+.cal-unsched { display: flex; flex-direction: column; gap: 3px; margin-top: 6px; }
+.cal-unsched-i { text-align: left; background: #111827; border: 1px solid #1e293b; border-radius: 6px;
+  color: #cbd5e1; font-size: 0.76rem; padding: 5px 8px; cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cal-unsched-i:hover { background: #172033; }
+
+/* Narrow: the rail drops BELOW the calendar rather than squeezing it to nothing. */
+@media (max-width: 1100px) {
+  .cal-wrap { grid-template-columns: 1fr; }
+  .cal-people { max-height: 160px; }
+  .cal-body { max-height: 55vh; }
+}
+@media (max-width: 640px) {
+  .cal-days, .cal-grid { grid-template-columns: 40px repeat(7, minmax(0, 1fr)); }
+  .cal-ev-c { display: none; }
+  .cal-tz { display: none; }
+}
+
+/* ── calendar drag: draw / move / resize ───────────────────────────────────── */
+/* While a drag is live the pointer is outside the element it started in, so kill text selection
+   globally — otherwise sweeping across the grid highlights the hour labels instead. */
+body.cal-dragging { user-select: none; cursor: grabbing; }
+body.cal-dragging .cal-ev { cursor: grabbing; }
+
+.cal-ev--draggable { cursor: grab; }
+
+/* The bottom edge you grab to change a call's length. It sits INSIDE the event: hanging it below
+   (bottom: -2px) put the hit area over the top of the call underneath, so grabbing one call's grip
+   could land on its neighbour. */
+.cal-ev-grip { position: absolute; left: 0; right: 0; bottom: 0; height: 6px;
+  cursor: ns-resize; border-radius: 0 0 5px 5px; }
+.cal-ev-grip:hover { background: rgba(255, 255, 255, 0.28); }
+
+/* The live preview: what you're drawing, or where the call you're holding will land. */
+.cal-draft { position: absolute; left: 2px; right: 2px; z-index: 4; pointer-events: none;
+  display: flex; flex-direction: column; gap: 1px; justify-content: center;
+  padding: 2px 6px; border-radius: 5px; overflow: hidden;
+  background: rgba(37, 99, 235, 0.38); border: 1px solid #60a5fa; border-left: 3px solid #60a5fa;
+  color: #eff6ff; font-size: 0.72rem; line-height: 1.2;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45); }
+.cal-draft-t { font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cal-draft-d { opacity: 0.8; font-size: 0.66rem; white-space: nowrap; }
+
+/* ── calendar: double-click an event → detail popup (edit / delete) ─────────── */
+.cal-modal-bg { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center;
+  background: rgba(2, 6, 14, 0.66); backdrop-filter: blur(2px); padding: 20px; }
+.cal-modal { width: min(560px, 100%); max-height: 88vh; display: flex; flex-direction: column;
+  background: #0f1420; border: 1px solid #263349; border-radius: 14px; overflow: hidden;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.6); }
+
+.cal-modal-h { display: flex; align-items: center; gap: 10px; padding: 13px 16px; border-bottom: 1px solid #1e293b; }
+.cal-modal-h h3 { margin: 0; font-size: 1rem; color: #f1f5f9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cal-modal-x { margin-left: auto; padding: 2px 9px !important; font-size: 0.95rem; line-height: 1.3; }
+
+.cal-modal-b { padding: 14px 16px; overflow-y: auto;
+  display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+
+.cal-fld { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.cal-fld-l { font-size: 0.7rem; text-transform: uppercase; letter-spacing: .05em; color: #64748b; }
+.cal-fld input, .cal-fld select { width: 100%; font-size: 0.85rem; padding: 6px 8px; }
+/* Read-only for THIS user (a caller may not move a call) — shown, not hidden: knowing the value and
+   knowing you can't change it are different facts, and hiding the field only communicates the second. */
+.cal-fld--ro input, .cal-fld--ro select { opacity: 0.55; cursor: not-allowed; }
+.cal-fld--ro .cal-fld-l::after { content: ' · read-only'; color: #475569; text-transform: none; letter-spacing: 0; }
+
+.cal-modal-f { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-top: 1px solid #1e293b; background: #0c111b; }
+.cal-del { background: #7f1d1d; border: 1px solid #b91c1c; color: #fecaca; font-weight: 600;
+  border-radius: 8px; padding: 7px 14px; cursor: pointer; font-size: 0.83rem; }
+.cal-del:hover { background: #991b1b; }
+
+@media (max-width: 560px) {
+  .cal-modal-b { grid-template-columns: 1fr; }
 }

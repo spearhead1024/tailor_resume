@@ -37,6 +37,8 @@ from routers import external as external_router
 from routers import interviews as interviews_router
 from routers import push as push_router
 from routers import teams as teams_router
+from routers import live as live_router
+from routers import notifications as notifications_router
 
 FRONTEND_DIST = PROJECT_ROOT.parent / "frontend" / "dist"
 
@@ -76,6 +78,8 @@ app.include_router(external_router.router)
 app.include_router(interviews_router.router)
 app.include_router(push_router.router)
 app.include_router(teams_router.router)
+app.include_router(live_router.router)   # /api/interviews/live (WebSocket)
+app.include_router(notifications_router.router)
 
 
 @app.get("/api/health")

@@ -327,14 +327,14 @@
       "cells": {
         "c_index": "4",
         "c_created": "2026-07-05T14:04",
-        "c_sched": "2026-07-14T20:30:00.000Z",
-        "c_min": "90",
+        "c_sched": "2026-07-16T23:15:00.000Z",
+        "c_min": "75",
         "c_link": "meet.google.com/taq-mfnr-ssu",
         "c_title": "Senior Software Engineer",
         "c_skill": "Python, AI, ML",
         "c_company": "Assistwell",
-        "c_salary": "10k-12k / month",
-        "c_type": "Intro 1(Recruiter)",
+        "c_salary": "10k-15k / month",
+        "c_type": "Tech Call(2)",
         "c_client": "Robert James (HR manager)",
         "c_caller": "test_caller4",
         "c_approved": "Confirmed",
@@ -352,7 +352,7 @@
       "cells": {
         "c_index": "5",
         "c_created": "2026-07-12T13:29:09.955Z",
-        "c_sched": "2026-07-13T15:11:00.000Z",
+        "c_sched": "2026-07-17T19:45:00.000Z",
         "c_min": "90",
         "c_link": "meet.google.com/taq-mfnr-ssu",
         "c_type": "Tech Call(1)",
@@ -375,7 +375,65 @@
       "cells": {
         "c_index": "6",
         "c_created": "2026-07-12T14:23:23.028Z",
-        "c_creater": ""
+        "c_creater": "Omar_clone",
+        "c_sched": "2026-07-14T23:11:00.000Z",
+        "c_link": "meet.google.com/taq-mfnr-ssu",
+        "c_type": "Tech Call(2)",
+        "c_client": "uyfiyuiy",
+        "c_salary": "yuiuyiuy",
+        "c_company": "yuiyu"
+      }
+    },
+    {
+      "id": "r_4751d9433b",
+      "cells": {
+        "c_index": "7",
+        "c_created": "2026-07-13T23:34:02.686Z",
+        "c_creater": "superadmin"
+      }
+    },
+    {
+      "id": "r_571f9c28d4",
+      "cells": {
+        "c_index": "8",
+        "c_created": "2026-07-13T23:38:41.391Z",
+        "c_creater": "superadmin",
+        "c_sched": "2026-07-15T11:00:00.000Z",
+        "c_approved": "Confirmed",
+        "c_team": "Hamna team",
+        "c_caller": "test_caller4",
+        "c_account": "Matthew Orozco(US)",
+        "c_link": "meet.google.com/taq-mfnr-ssu",
+        "c_status": "Not Done"
+      }
+    },
+    {
+      "id": "r_29fa45991b",
+      "cells": {
+        "c_index": "9",
+        "c_created": "2026-07-14T09:49:21.417Z",
+        "c_sched": "2026-07-15T10:00:00.000Z",
+        "c_creater": "superadmin",
+        "c_min": "45"
+      }
+    },
+    {
+      "id": "r_98e0f3d2c7",
+      "cells": {
+        "c_index": "10",
+        "c_created": "2026-07-14T09:49:23.442Z",
+        "c_sched": "2026-07-15T12:00:00.000Z",
+        "c_creater": "superadmin"
+      }
+    },
+    {
+      "id": "r_7601d2665c",
+      "cells": {
+        "c_index": "11",
+        "c_created": "2026-07-14T10:07:17.336Z",
+        "c_sched": "2026-07-15T11:15:00.000Z",
+        "c_min": "15",
+        "c_creater": "superadmin"
       }
     }
   ]

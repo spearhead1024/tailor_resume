@@ -30,13 +30,93 @@ try:
 except Exception:                       # pragma: no cover
     ZoneInfo = None
 
-from core import push
+from core import inbox, push
+from core.hub import hub
 
 log = logging.getLogger("notify")
+
+
+def _snooze_token(user_id: str, payload: dict) -> str:
+    """A short-lived, self-contained ticket that lets the SNOOZE button work with no tab open.
+
+    A service worker has no access to the app's JWT, so it cannot authenticate a normal API call.
+    The alarm therefore carries its own signed ticket: the server minted it, so it can trust it back.
+    Signed with the app secret and expiring in 12h, it only ever means "re-send THIS reminder to THIS
+    person"."""
+    import jwt as _jwt
+    from auth import JWT_ALGORITHM, JWT_SECRET
+    clean = {k: v for k, v in payload.items() if k != "snooze_token"}   # never nest the ticket in itself
+    return _jwt.encode(
+        {"sub": user_id, "snz": clean,
+         "exp": int((datetime.now(timezone.utc) + timedelta(hours=12)).timestamp())},
+        JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _deliver(user_id: str, payload: dict, row_id: str = "") -> None:
+    """One reminder → three places: the OS push, the in-app inbox (so it can't be missed), and the
+    live socket (so an open tab's bell updates without a refresh). Filed as 'reminder', kept apart
+    from board-change chatter so an imminent interview never gets buried under edit noise."""
+    if payload.get("alarm"):
+        payload = {**payload, "snooze_token": _snooze_token(user_id, payload)}
+    push.send_push(user_id, payload)
+    title, body = str(payload.get("title", "")), str(payload.get("body", ""))
+    inbox.add([user_id], "reminder", title, body, row_id=row_id)
+    hub.broadcast_soon({"type": "notify", "kind": "reminder", "title": title, "body": body,
+                        "row_id": row_id}, {user_id})
+
+
+# ── snooze queue ─────────────────────────────────────────────────────────────
+def _read_snooze() -> list[dict]:
+    try:
+        d = json.loads(_SNOOZE_FILE.read_text(encoding="utf-8"))
+        return d if isinstance(d, list) else []
+    except Exception:
+        return []
+
+
+def _write_snooze(items: list[dict]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = _SNOOZE_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, _SNOOZE_FILE)
+
+
+def snooze_add(user_id: str, payload: dict, minutes: int = 5) -> None:
+    """Re-send this alarm in `minutes`. Persisted, so a server restart doesn't lose it."""
+    minutes = min(max(int(minutes or 5), 1), 120)
+    due = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    with _lock:
+        items = _read_snooze()
+        items.append({"at": due.isoformat(), "user_id": str(user_id), "payload": payload})
+        _write_snooze(items[-500:])
+
+
+def run_due_snoozes() -> int:
+    """Fire any snoozed alarm whose time has come. Called on each scheduler tick."""
+    now = datetime.now(timezone.utc)
+    with _lock:
+        items = _read_snooze()
+    due, keep = [], []
+    for it in items:
+        try:
+            when = datetime.fromisoformat(str(it.get("at", "")).replace("Z", "+00:00"))
+        except Exception:
+            continue                     # unparseable → drop it rather than retry forever
+        (due if when <= now else keep).append(it)
+    for it in due:
+        try:
+            push.send_push(it["user_id"], it["payload"])
+        except Exception:
+            log.exception("snoozed alarm failed")
+    if due:
+        with _lock:
+            _write_snooze(keep)
+    return len(due)
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 _GRID_FILE = DATA_DIR / "interviews.json"
 _STATE_FILE = DATA_DIR / "notif_state.json"
+_SNOOZE_FILE = DATA_DIR / "notif_snooze.json"   # alarms the user hit "Snooze" on, to re-fire later
 _lock = threading.Lock()
 
 # How late a "N minutes before" reminder (caller lead / creator ping) may still fire.
@@ -179,7 +259,7 @@ def _digest_payload(rtype: str, calls: list[dict], tz_name: str) -> dict:
         "title": f"{n} interview{'' if n == 1 else 's'} {when}",
         "body": "\n".join(_call_line(c, tz_name) for c in calls),
         "tag": f"{rtype}-{calls[0]['user']['id']}",
-        "url": "/interviews", "requireInteraction": True,
+        "url": "/interviews", "alarm": True,
     }
 
 
@@ -277,12 +357,12 @@ def run_due_reminders() -> int:
             key = f"{c['row_id']}|lead{lead_min}m|{c['sched_raw']}"
             if claim_at_moment(key, c["sched"] - timedelta(minutes=lead_min), c["sched"]):
                 try:
-                    push.send_push(c["user"]["id"], {
+                    _deliver(c["user"]["id"], {
                         "title": f"Interview in {_remaining_label(c['sched'], now)}",
                         "body": _call_line(c, c["tz"]),
                         "tag": f"lead-{c['row_id']}",
-                        "url": "/interviews", "requireInteraction": True,
-                    })
+                        "url": "/interviews", "alarm": True,
+                    }, c["row_id"])
                     fired += 1
                 except Exception:
                     log.exception("lead push failed (row %s)", c["row_id"])
@@ -305,12 +385,12 @@ def run_due_reminders() -> int:
                     body = _call_line(c, ctz)
                     if c.get("caller"):
                         body += f" · caller: {c['caller']}"
-                    push.send_push(creater["id"], {
+                    _deliver(creater["id"], {
                         "title": f"Interview you booked — in {_remaining_label(c['sched'], now)}",
                         "body": body,
                         "tag": f"creator-{c['row_id']}",
-                        "url": "/interviews", "requireInteraction": True,
-                    })
+                        "url": "/interviews", "alarm": True,
+                    }, c["row_id"])
                     fired += 1
                 except Exception:
                     log.exception("creator push failed (row %s)", c["row_id"])
@@ -351,7 +431,7 @@ def run_due_reminders() -> int:
             key = f"{uid}|{day.isoformat()}|{rtype}"      # one digest per caller per day per type
             if claim(key, target, deadline):
                 try:
-                    push.send_push(uid, _digest_payload(rtype, group, tz_name))
+                    _deliver(uid, _digest_payload(rtype, group, tz_name))
                     fired += 1
                 except Exception:
                     log.exception("%s digest push failed (user %s, %s)", rtype, uid, day)
@@ -372,4 +452,8 @@ def scheduler_loop(interval_s: int = 60) -> None:
             run_due_reminders()
         except Exception:
             log.exception("reminder tick failed")
+        try:
+            run_due_snoozes()      # re-fire alarms the user hit "Snooze" on
+        except Exception:
+            log.exception("snooze tick failed")
         time.sleep(interval_s)
