@@ -26,6 +26,8 @@ except Exception:                       # pragma: no cover
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from auth import is_manager, require_role, storage, team_caller_names, team_id_of
+from core import live as live_notify
+from core.hub import hub
 
 router = APIRouter(prefix="/api/interviews", tags=["interviews"])
 
@@ -162,6 +164,42 @@ def _writability(user: dict):
 def _owns_row(user: dict, row: dict) -> bool:
     """Used by every WRITE path (patch_row, chat). Reads use _visibility, which is wider."""
     return _writability(user)(row)
+
+
+def _avail_scope(user: dict):
+    """WHOSE working hours may this user read? Mirrors _visibility, the READ scope for rows.
+
+    admin   → everyone.
+    manager → their own team.
+    caller  → themselves, plus their team if they are on one.
+
+    This has to be its own predicate and not just "whoever /people returns": /people deliberately
+    returns EVERY user to a caller (it feeds the Creater avatars, which need a name for anyone who
+    ever booked a call). Hanging availability off that list would have handed every caller the working
+    hours and — worse — the days off of every colleague in the company. When they can work is roster
+    information their team needs; when they are on holiday is not the whole org's business.
+    """
+    if user.get("is_admin"):
+        return lambda u: True
+
+    tid = team_id_of(user)
+    ids = _caller_ids(user)
+
+    def ok(u: dict) -> bool:
+        keys = {s for s in (str(u.get("username", "")).strip().lower(),
+                            str(u.get("full_name", "")).strip().lower()) if s}
+        if keys & ids:
+            return True                                   # always yourself
+        # An ungrouped caller has tid == "" — which must NOT match every other ungrouped user.
+        return bool(tid) and str(u.get("team_id", "")).strip() == tid
+
+    return ok
+
+
+def _schedulable(u: dict) -> bool:
+    """Someone you could actually book a call with — so their availability is worth sending."""
+    roles = {str(r).strip() for r in (u.get("roles") or [])}
+    return bool(roles & {"caller", "manager"}) and str(u.get("status", "")).strip() == "approved"
 
 
 def _normalize_column(raw: dict) -> dict:
@@ -319,13 +357,26 @@ def get_grid(user: dict = Depends(_access)):
 
 @router.get("/people")
 def list_people(user: dict = Depends(_access)):
-    """All users — feeds the Caller dropdown (filtered by role) and the Creater avatars.
+    """All users — feeds the Caller dropdown (filtered by role), the Creater avatars, and the
+    calendar's availability panel.
 
     For a manager this is narrowed to their own team, so the Caller dropdown can only ever offer
     someone they're allowed to assign (the backend rejects the rest anyway — this just stops the UI
-    from presenting a choice that would be refused)."""
+    from presenting a choice that would be refused).
+
+    Availability rides along for the calendar, but ONLY for people this user is allowed to see the
+    roster of (_avail_scope: your team, or everyone if you're an admin) and only for approved callers
+    and managers. It is not attached to the whole list: this endpoint intentionally returns every user
+    to a caller — the Creater avatars need a name for anyone who ever booked a call — and hanging
+    working hours and days off off that would leak the entire company's roster to every caller.
+
+    `timezone` is load-bearing, not decoration: the hours are wall-clock times in the CALLER's own
+    zone, so a calendar cannot place them without it (09:00 in Los Angeles is a different row on the
+    grid from 09:00 in Seoul, and can even land on a different day).
+    """
     team_only = is_manager(user)
     tid = team_id_of(user)
+    may_see_roster = _avail_scope(user)
     out = []
     for u in storage.get_users():
         un = str(u.get("username", "")).strip()
@@ -334,12 +385,17 @@ def list_people(user: dict = Depends(_access)):
             continue
         if team_only and str(u.get("team_id", "")).strip() != tid:
             continue
-        out.append({
+        person = {
             "username": un, "full_name": fn, "label": fn or un,
             "roles": u.get("roles") or [],
             "team_id": str(u.get("team_id", "")).strip(),   # groups the Caller dropdown by team
             "avatar_url": str(u.get("avatar_url", "")).strip(),
-        })
+        }
+        if _schedulable(u) and may_see_roster(u):
+            person["timezone"] = str(u.get("timezone", "")).strip()
+            person["availability"] = u.get("availability") or {}
+            person["days_off"] = u.get("days_off") or []
+        out.append(person)
     return {"people": out}
 
 
@@ -377,7 +433,12 @@ def put_schema(body: dict, user: dict = Depends(_access)):
         cols.append(col)
     _bootstrap()
     storage.replace_interview_columns(cols)      # prunes cells of removed columns
-    return storage.get_interview_grid()
+    grid = storage.get_interview_grid()
+    # The schema is replaced wholesale, so two admins editing columns at once would each save their
+    # own list and clobber the other's new column. Push the winning schema to every open board at
+    # once, so the loser sees the truth immediately instead of holding a stale copy to save later.
+    hub.broadcast_soon({"type": "schema", "columns": grid["columns"]})
+    return grid
 
 
 @router.post("/rows")
@@ -390,12 +451,22 @@ def add_row(body: dict | None = None, user: dict = Depends(_access)):
     cells = {k: v for k, v in (body2.get("cells", {}) or {}).items() if k in valid}
     if "c_sched" in cells:           # store Scheduled_at as a UTC instant (idempotent)
         cells["c_sched"] = _sched_to_utc(cells["c_sched"], str(user.get("timezone", "")).strip())
+    # The Creator is whoever added the row. Stamp it here, once, so it is always true and never
+    # depends on anyone clicking the cell — the board used to fill it on a plain left-click, which
+    # meant simply selecting your way across an empty Creater cell silently signed you as author
+    # (and made you the person the 90-minute heads-up went to). An explicit value is respected, so
+    # re-inserting a row (undo of a delete) keeps its original creator.
+    if "c_creater" in valid and not str(cells.get("c_creater", "") or "").strip():
+        cells["c_creater"] = str(user.get("full_name") or user.get("username") or "").strip()
     # an explicit id + position lets the client re-insert a row (undo of a delete / redo of an add)
     rid = str(body2.get("id") or "").strip()
     if not rid or any(r["id"] == rid for r in grid["rows"]):
         rid = _new_id("r")
     at = body2.get("at")
-    return storage.insert_interview_row(rid, cells, at if isinstance(at, int) else None)
+    row = storage.insert_interview_row(rid, cells, at if isinstance(at, int) else None)
+    hub.broadcast_soon({"type": "row", "row": row}, live_notify.row_audience(cells))
+    live_notify.on_row_changed(rid, {}, cells, user)      # a row created already naming a caller/team
+    return row
 
 
 def _check_workflow(before: dict, patch: dict) -> None:
@@ -435,16 +506,32 @@ def patch_row(row_id: str, body: dict, user: dict = Depends(_access)):
                 raise HTTPException(status_code=403, detail="You can only assign callers on your own team.")
     if "c_sched" in patch:           # store Scheduled_at as a UTC instant (idempotent)
         patch["c_sched"] = _sched_to_utc(patch["c_sched"], str(user.get("timezone", "")).strip())
+    # Somebody else is actively editing one of these cells — refuse rather than silently overwrite
+    # their work. This is the fix for the lost-write bug: two people typing into the same cell
+    # used to end with whoever saved last, and the other person's content simply vanished.
+    for cid in patch:
+        held = hub.held_by_other(row_id, cid, str(user.get("id", "")))
+        if held:
+            raise HTTPException(status_code=409,
+                                detail=f"{held.label} is editing this cell right now — try again in a moment.")
 
     row = storage.get_interview_row(row_id)
     if row is None or not _owns_row(user, row):
         raise HTTPException(status_code=404, detail="Row not found")
     if not patch:                    # nothing this user is allowed to change → no-op
         return row
-    _check_workflow(row.get("cells") or {}, patch)
+    before = dict(row.get("cells") or {})
+    _check_workflow(before, patch)
     updated = storage.patch_interview_row(row_id, patch)   # one-row UPDATE, in a transaction
     if updated is None:
         raise HTTPException(status_code=404, detail="Row not found")
+
+    # Push the new row to every board that may see it, and tell whoever the change affects. Both are
+    # fire-and-forget — a socket must never fail an interview edit.
+    after = dict(updated.get("cells") or {})
+    hub.broadcast_soon({"type": "row", "row": {"id": row_id, "cells": after}},
+                       live_notify.row_audience(after) | live_notify.row_audience(before))
+    live_notify.on_row_changed(row_id, before, after, user)
     return updated
 
 
@@ -457,6 +544,8 @@ def delete_row(row_id: str, user: dict = Depends(_access)):
     if row is None or not _owns_row(user, row):
         raise HTTPException(status_code=404, detail="Row not found")
     storage.delete_interview_row(row_id)
+    hub.broadcast_soon({"type": "row_delete", "row_id": row_id},
+                       live_notify.row_audience(row.get("cells") or {}))
     return {"ok": True}
 
 

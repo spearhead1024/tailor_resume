@@ -46,7 +46,20 @@ def _vapid() -> Vapid01:
         v = Vapid01()
         v.generate_keys()
         v.save_key(str(_VAPID_PEM))
-        log.info("Generated a new VAPID keypair at %s", _VAPID_PEM)
+        # Losing this file is not a fresh start — it invalidates every subscription ever made, and
+        # the only symptom is that notifications quietly stop arriving. Say so loudly, and say how
+        # many devices were just orphaned, so it is caught here rather than days later.
+        orphaned = sum(len(v) for v in _read().values())
+        if orphaned:
+            log.warning(
+                "Generated a NEW VAPID keypair at %s — the previous key is gone, so the %d existing "
+                "push subscription(s) can no longer receive notifications. Each device must "
+                "re-subscribe (the app does this automatically on next load). Persist this file "
+                "across deploys, or set PUSH_VAPID_PRIVATE_KEY_FILE, to prevent this.",
+                _VAPID_PEM, orphaned,
+            )
+        else:
+            log.info("Generated the VAPID keypair at %s — keep this file; losing it breaks push.", _VAPID_PEM)
         return v
 
 
@@ -109,8 +122,16 @@ def has_subscription(user_id: str) -> bool:
 
 
 def _prune(user_id: str, endpoint: str) -> None:
-    """Drop a subscription the push service reported gone (404/410)."""
+    """Drop a subscription that can never receive another push."""
     remove_subscription(user_id, endpoint)
+
+
+# Statuses that mean "this subscription is permanently undeliverable — forget it".
+#   404 / 410  the browser expired or revoked it.
+#   403        it was created with a DIFFERENT VAPID key than the one we now sign with, so the push
+#              service refuses it. Keeping it would fail silently forever; dropping it lets the
+#              client notice it is unsubscribed and build a fresh one against the current key.
+_DEAD_STATUSES = (403, 404, 410)
 
 
 def send_push(user_id: str, payload: dict) -> int:
@@ -135,9 +156,9 @@ def send_push(user_id: str, payload: dict) -> int:
             sent += 1
         except WebPushException as exc:
             status = getattr(getattr(exc, "response", None), "status_code", None)
-            if status in (404, 410):
+            if status in _DEAD_STATUSES:
                 _prune(user_id, sub.get("endpoint", ""))
-                log.info("Pruned expired push subscription for %s", user_id)
+                log.info("Pruned dead push subscription for %s (HTTP %s)", user_id, status)
             else:
                 log.warning("Push to %s failed (%s): %s", user_id, status, exc)
         except Exception:

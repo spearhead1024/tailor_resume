@@ -7,8 +7,14 @@
    going until the notification is acknowledged, we ask the open page(s) to ring, and tell them to
    stop as soon as the notification is clicked or dismissed. */
 
+// Bump this to force every browser onto a new worker. The byte change is what the browser diffs.
+const SW_VERSION = '3-native-style';
+
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
+self.addEventListener('message', (e) => {
+  if (e.data && e.data.type === 'version') e.source && e.source.postMessage({ type: 'sw-version', version: SW_VERSION });
+});
 
 async function tellPages(msg) {
   const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
@@ -21,17 +27,33 @@ self.addEventListener('push', (event) => {
   catch (_) { data = { body: event.data ? event.data.text() : '' }; }
 
   const title = data.title || 'TailorResume';
+  // ONLY a scheduled interview reminder rings like an alarm clock: the 90-min creator heads-up, the
+  // 60-min caller lead, and the 7pm / 8am digests (they set `alarm`). Anything else — a board edit,
+  // an assignment, a status change — must NOT hijack the speakers; it shows and goes quiet.
+  const isAlarm = !!data.alarm;
+  // A NATIVE Windows notification — the same thing the system's own apps produce.
+  //
+  // Chrome only hands a notification to the Windows Action Center if it can render it there. The
+  // moment you ask for something Windows toasts cannot do, Chrome silently draws its OWN styled
+  // popup instead — which no longer looks like a system notification. The three that trigger that
+  // fallback, and are therefore all absent here:
+  //     actions            — buttons on the toast
+  //     image              — a large inline picture
+  //     requireInteraction — pinning it on screen indefinitely
+  // Keeping the payload to what Windows natively supports is the whole trick.
+  //
+  // An alarm is still distinguished — it RINGS until acknowledged (see below) and, being a real
+  // system notification, it persists in the Action Center rather than vanishing for good.
   const options = {
     body: data.body || '',
     tag: data.tag || undefined,               // same tag replaces an earlier toast instead of stacking
     renotify: !!data.tag,                     // ...but a replacement must still re-alert, not land silently
     silent: false,                            // never suppress the OS notification sound
-    requireInteraction: !!data.requireInteraction,   // keep the toast up until it's acknowledged
     data: { url: data.url || '/interviews' },
   };
   event.waitUntil((async () => {
     await self.registration.showNotification(title, options);
-    await tellPages({ type: 'notification-sound', action: 'start' });   // ring until acknowledged
+    if (isAlarm) await tellPages({ type: 'notification-sound', action: 'start' });   // ring until acknowledged
   })());
 });
 

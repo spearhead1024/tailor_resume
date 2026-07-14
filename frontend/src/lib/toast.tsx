@@ -22,7 +22,8 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   const push: ToastCtx = useCallback((message, kind = 'success') => {
     const id = _nextId++;
     setToasts((prev) => [...prev, { id, message, kind }]);
-    const t = window.setTimeout(() => dismiss(id), 1800);
+    // 1.8s was too short to actually read a notification ("X assigned you Y"). Click to dismiss early.
+    const t = window.setTimeout(() => dismiss(id), 5000);
     timers.current.set(id, t);
   }, [dismiss]);
 
@@ -42,27 +43,40 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
         gap: 8,
         pointerEvents: 'none',
       }}>
-        {toasts.map((t) => (
-          <div key={t.id}
-            onClick={() => dismiss(t.id)}
-            style={{
-              pointerEvents: 'auto',
-              cursor: 'pointer',
-              background: t.kind === 'success' ? 'var(--success-bg)' : t.kind === 'error' ? 'var(--danger-bg)' : 'var(--accent-glow)',
-              border: `1px solid ${t.kind === 'success' ? 'var(--success)' : t.kind === 'error' ? 'var(--danger)' : 'var(--accent)'}`,
-              color: t.kind === 'success' ? '#6ee7b7' : t.kind === 'error' ? '#fca5a5' : '#93c5fd',
-              borderRadius: 999,
-              padding: '0.5rem 1.1rem',
-              fontSize: '0.88rem',
-              fontWeight: 500,
-              boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
-              animation: 'toastIn 0.2s ease-out',
-            }}>
-            {t.kind === 'success' && '✓ '}
-            {t.kind === 'error' && '✗ '}
-            {t.message}
-          </div>
-        ))}
+        {toasts.map((t) => {
+          const accent = t.kind === 'success' ? 'var(--success)' : t.kind === 'error' ? 'var(--danger)' : 'var(--accent)';
+          return (
+            <div key={t.id}
+              onClick={() => dismiss(t.id)}
+              style={{
+                pointerEvents: 'auto',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 9,
+                // OPAQUE. The old toast used a 12%-alpha tint, so whatever was behind it bled
+                // through and the text became unreadable over a busy board. A solid panel with a
+                // coloured accent bar keeps the kind obvious without sacrificing legibility.
+                background: '#141a2b',
+                border: '1px solid rgba(255,255,255,0.10)',
+                borderLeft: `4px solid ${accent}`,
+                color: 'var(--text)',
+                borderRadius: 10,
+                padding: '0.6rem 1rem',
+                maxWidth: 'min(520px, 92vw)',
+                fontSize: '0.88rem',
+                fontWeight: 500,
+                lineHeight: 1.45,
+                boxShadow: '0 8px 28px rgba(0,0,0,0.55)',
+                animation: 'toastIn 0.2s ease-out',
+              }}>
+              <span style={{ color: accent, fontWeight: 700, flex: '0 0 auto' }}>
+                {t.kind === 'success' ? '✓' : t.kind === 'error' ? '✗' : 'ℹ'}
+              </span>
+              <span style={{ minWidth: 0 }}>{t.message}</span>
+            </div>
+          );
+        })}
       </div>
     </ToastContext.Provider>
   );

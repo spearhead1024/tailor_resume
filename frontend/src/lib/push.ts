@@ -15,6 +15,40 @@ function urlBase64ToBuffer(base64: string): ArrayBuffer {
   return buf;
 }
 
+/** The applicationServerKey a subscription was created with, as base64url — so we can tell whether
+   it still matches the key the server signs with. */
+function subscriptionKey(sub: PushSubscription): string {
+  const raw = sub.options?.applicationServerKey;
+  if (!raw) return '';
+  const bytes = new Uint8Array(raw as ArrayBuffer);
+  let s = '';
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/** Get a subscription that is valid for the server's CURRENT VAPID key, rebuilding it if not.
+ *
+ * A push subscription is permanently bound to the applicationServerKey it was created with. If the
+ * server's VAPID keypair is ever replaced, every existing subscription becomes undeliverable — the
+ * push service answers 403 ("credentials do not correspond") and the notification silently never
+ * arrives. Re-uploading the same subscription (which is what we used to do) can never fix that, so
+ * push would stay dead forever. Detect the mismatch and build a fresh subscription instead.
+ */
+async function currentSubscription(reg: ServiceWorkerRegistration, key: string): Promise<PushSubscription> {
+  let sub = await reg.pushManager.getSubscription();
+  if (sub && subscriptionKey(sub) !== key) {
+    try { await sub.unsubscribe(); } catch { /* it's dead either way */ }
+    sub = null;
+  }
+  if (!sub) {
+    sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToBuffer(key),
+    });
+  }
+  return sub;
+}
+
 export function pushSupported(): boolean {
   return typeof navigator !== 'undefined'
     && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
@@ -26,7 +60,13 @@ export function notifPermission(): NotificationPermission | 'unsupported' {
 }
 
 async function registerSW(): Promise<ServiceWorkerRegistration> {
-  const reg = await navigator.serviceWorker.register('/sw.js');
+  // `updateViaCache: 'none'` — never let the HTTP cache serve a stale sw.js. Without it a browser can
+  // keep running an OLD worker for up to 24 hours, which is why a change to how notifications are
+  // built could appear to have no effect at all: the old worker was still the one drawing them.
+  // The explicit update() then forces a fresh fetch on every load; the worker calls skipWaiting() +
+  // clients.claim(), so a new version takes over immediately rather than waiting for every tab to close.
+  const reg = await navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' });
+  try { await reg.update(); } catch { /* offline — keep the worker we have */ }
   await navigator.serviceWorker.ready;
   return reg;
 }
@@ -43,28 +83,21 @@ export async function enablePush(): Promise<{ ok: boolean; reason?: string }> {
   }
   const reg = await registerSW();
   const { key } = await api.get<{ key: string }>('/api/push/vapid-public-key');
-  let sub = await reg.pushManager.getSubscription();
-  if (!sub) {
-    sub = await reg.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: urlBase64ToBuffer(key),
-    });
-  }
+  const sub = await currentSubscription(reg, key);
   await api.post('/api/push/subscribe', { subscription: sub.toJSON() });
   return { ok: true };
 }
 
 /** Keep the backend in sync on load: if permission is already granted, silently (re)register the
-   current subscription so a returning caller stays subscribed without clicking anything. */
+   current subscription so a returning caller stays subscribed without clicking anything — and
+   rebuild it first if the server's VAPID key no longer matches, which is what makes a key change
+   heal itself on the next page load instead of killing push permanently. */
 export async function syncPushIfGranted(): Promise<void> {
   try {
     if (!pushSupported() || Notification.permission !== 'granted') return;
     const reg = await registerSW();
-    let sub = await reg.pushManager.getSubscription();
-    if (!sub) {
-      const { key } = await api.get<{ key: string }>('/api/push/vapid-public-key');
-      sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToBuffer(key) });
-    }
+    const { key } = await api.get<{ key: string }>('/api/push/vapid-public-key');
+    const sub = await currentSubscription(reg, key);
     await api.post('/api/push/subscribe', { subscription: sub.toJSON() });
   } catch { /* best-effort */ }
 }

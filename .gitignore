@@ -35,3 +35,5 @@ data/profile_resumes/
 data/logs/
 data/notif_state.json*
 data/_dbrecovery/
+data/notifications.json*
+data/notif_snooze.json*
