@@ -747,6 +747,7 @@ function ChatModal({ title, subtitle, value, me, readOnly, rowId, onSync, onClos
   const meName = (me?.full_name || me?.username || '').trim();
   const isAdmin = !!me?.is_admin;
 
+
   useEffect(() => { if (!readOnly) taRef.current?.focus(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {   // fetch the freshest thread on open (another user may have posted since the board loaded)
     api.get<{ messages: ChatMsg[] }>(`/api/interviews/rows/${rowId}/chat`)
@@ -1166,6 +1167,16 @@ export default function Interviews() {
   const everUpRef = useRef(false);
   const gridRef = useRef<Grid | null>(null);
 
+  /** Re-read the roster: everyone's hours, time zone, meetings and days off.
+   *  The board caches this, so it has to be refreshed whenever somebody edits their Availability page —
+   *  otherwise the calendar goes on shading a week that is no longer true. */
+  const loadPeople = async () => {
+    try {
+      const r = await api.get<{ people: any[] }>('/api/interviews/people');
+      setPeople(r.people || []);
+    } catch { /* best-effort; the next reconnect will try again */ }
+  };
+
   /** Read the board. Safe to call at any time — including on a reconnect, when this tab may have
    *  missed changes entirely. Anything the socket delivers while the request is in flight is buffered
    *  and re-applied on top of the response, so a slow read can never undo a change that beat it home. */
@@ -1239,6 +1250,12 @@ export default function Interviews() {
         case 'lock_denied':
           toastRef.current(`${m.label} is editing that cell right now`, 'error');
           break;
+        case 'roster':
+          // Somebody's working hours / zone / meetings / days off changed. Re-read the roster rather
+          // than trying to patch it in place: the payload deliberately carries no roster DATA, because
+          // who is allowed to see whose hours is the server's decision, not this tab's.
+          void loadPeople();
+          break;
         case 'row':
         case 'row_delete':
         case 'schema':
@@ -1264,7 +1281,7 @@ export default function Interviews() {
   // Reconnecting is exactly the moment we know we may have missed something, so we resync there.
   useEffect(() => subscribeLiveState((up) => {
     setLiveUp(up);
-    if (up && everUpRef.current) void loadGrid();   // skip the first connect: the mount load covers it
+    if (up && everUpRef.current) { void loadGrid(); void loadPeople(); }   // skip the first connect: the mount load covers it
     if (up) everUpRef.current = true;
   }), []);
 
@@ -1490,7 +1507,7 @@ export default function Interviews() {
 
   useEffect(() => {
     void loadGrid().finally(() => setLoading(false));   // buffers + replays anything the socket delivers mid-read
-    api.get<{ people: { label: string; roles?: string[]; team_id?: string; avatar_url?: string }[] }>('/api/interviews/people').then((r) => setPeople(r.people || [])).catch(() => {});
+    void loadPeople();
     api.get<{ profiles: { id: string; name: string; label: string }[] }>('/api/interviews/profiles').then((r) => setProfiles(r.profiles || [])).catch(() => {});
     // Teams feed the Team dropdown. The API already scopes this: an admin gets every team, a manager
     // only their own — so a manager can never hand a call to another team.
@@ -1593,9 +1610,10 @@ export default function Interviews() {
   const canEditCell = (row: Row | null | undefined, colId: string) => {
     if (row && lockedBy(row.id, colId)) return false;   // held by someone else — don't let me overwrite them
     if (!canEditCol(colId) || !ownsRow(row)) return false;
-    // Workflow: no outcome before the call is even agreed. Status stays locked until Approved is
-    // 'Confirmed' (which itself needs a Caller). The server rejects it either way.
-    if (colId === 'c_status' && String(row?.cells?.c_approved ?? '').trim() !== 'Confirmed') return false;
+    // Status is NOT gated on Approved any more. Requiring 'Confirmed' first meant a call that fell
+    // through before anyone confirmed it could never be marked Cancelled or On hold — the outcome was
+    // locked behind an agreement that never happened. (Confirming still needs a Caller; that rule stays,
+    // and the server enforces it.)
     return true;
   };
   const commitCell = (rowId: string, colId: string, value: any) => {
@@ -1764,6 +1782,24 @@ export default function Interviews() {
   people.forEach((p) => { if (p.avatar_url && p.label) avatarByName[p.label] = p.avatar_url; });
   const meName = me ? (me.full_name || me.username) : '';
   const isAdmin = !!me?.is_admin;   // only admins may edit columns / select-option lists
+
+  // Who the CALENDAR's side rail may offer.
+  //
+  //   admin   → everyone, and every team.
+  //   manager → their team, and their team — rostering it is their job.
+  //   caller  → THEMSELVES. Nobody else, team-mate or not.
+  //
+  // A caller still SEES the team's calls on the grid (that is the team's schedule, and it is theirs to
+  // read) — they just have no business browsing a colleague's roster. /people returns every user (the
+  // Creater avatars need a name for anyone who ever booked a call), so without this the rail listed the
+  // whole company to whoever opened it.
+  const myTeamId = String(me?.team_id || '').trim();
+  const calPeople = isAdmin
+    ? people
+    : isTeamManager
+      ? people.filter((p) => String(p.team_id || '').trim() === myTeamId)
+      : people.filter((p) => p.label === meName);
+  const calTeams = isAdmin ? teams : isTeamManager ? teams.filter((t) => t.id === myTeamId) : [];
   const userTz = me?.timezone || undefined;   // display/enter Scheduled_at in the current user's zone
   const nowMs = Date.now();                   // refreshed by the 1-minute tick, so the highlight follows the clock
   const colById = Object.fromEntries(cols.map((c) => [c.id, c] as const));
@@ -1816,7 +1852,19 @@ export default function Interviews() {
     return true;
   };
   // Rows for the CALENDAR: the date range is left to its own week navigation.
-  const calRows = grid.rows.filter(passOther);
+  //
+  // A caller's calendar shows only what is still AHEAD of them. A call that has already happened is not
+  // work they can do anything about; it is history, and it belongs in the table (where it is greyed, and
+  // still there). Admins and managers keep the full picture — they are the ones who have to look back.
+  // Unscheduled calls are not "past" (they have not happened, they simply have no time yet), so they stay.
+  // Scheduled_at -> an absolute instant, or NaN if the call has no time yet.
+  const schedMs = (r: Row) => { const s = String(r.cells?.c_sched ?? '').trim(); if (!s) return NaN; const t = new Date(s).getTime(); return isNaN(t) ? NaN : t; };
+  const upcomingOnly = !isAdmin && !isTeamManager;
+  const calRows = grid.rows.filter(passOther).filter((r) => {
+    if (!upcomingOnly) return true;
+    const ms = schedMs(r);
+    return isNaN(ms) || ms >= nowMs;
+  });
   const matched = !hasFilters ? grid.rows : calRows.filter(passDate);
   // The week the calendar shows. It IS the date filter, so the two views always agree on the period:
   // page the calendar to next week, switch to Table, and you are looking at the same seven days.
@@ -1829,7 +1877,6 @@ export default function Interviews() {
   })();
   // Always sorted by Scheduled_at (earliest first). Changing a row's Scheduled_at re-renders → re-sorts,
   // so the row moves to its correct place. Unscheduled rows (incl. newly-added) stay at the bottom, visible.
-  const schedMs = (r: Row) => { const s = String(r.cells?.c_sched ?? '').trim(); if (!s) return NaN; const t = new Date(s).getTime(); return isNaN(t) ? NaN : t; };
   const withMs = matched.map((r) => ({ r, ms: schedMs(r) }));
   const scheduled = withMs.filter((x) => !isNaN(x.ms)).sort((a, b) => a.ms - b.ms).map((x) => x.r);
   const unscheduled = withMs.filter((x) => isNaN(x.ms)).map((x) => x.r);
@@ -1988,8 +2035,19 @@ export default function Interviews() {
           weekFrom={calWeek}
           onWeekChange={(mon) => setFlt((f) => ({ ...f, dateFrom: mon, dateTo: addDays(mon, 6) }))}
           userTz={userTz || Intl.DateTimeFormat().resolvedOptions().timeZone}
-          people={people as CalPerson[]}
+          people={calPeople as CalPerson[]}
+          teams={calTeams}
           canSchedule={isAdmin}
+          canSearch={isAdmin}
+          showPicker={isAdmin || isTeamManager}
+          meLabel={meName}
+          /* The same per-cell locks the table uses. Dragging a call on the calendar is an edit to
+             Scheduled_at, so it must claim that cell — otherwise two admins can drag the same call at
+             once and neither sees the other doing it. The server already refuses the loser (409); this
+             is what makes it VISIBLE before they waste the effort. */
+          lockOf={(rid, cid) => lockedBy(rid, cid)}
+          onClaim={(rid, cid) => liveRef.current?.startEdit(rid, cid)}
+          onRelease={() => liveRef.current?.endEdit()}
           columns={cols}
           canEdit={(rid, cid) => canEditCell(grid.rows.find((r) => r.id === rid), cid)}
           onPatch={commitCell}

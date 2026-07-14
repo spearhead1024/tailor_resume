@@ -14,6 +14,9 @@ export type User = {
   is_admin: boolean; // derived: 'admin' in roles
   team_id?: string;  // caller: the team they're in; manager: the team they run
   availability?: Record<string, { on: boolean; start: string; end: string }>;  // mon..sat working window
+  // Meetings they have on their working days (standup, team sync, 1:1). Each sits INSIDE the working
+  // window — at their desk, but not free to take a call — so the board cuts them out of the free time.
+  daily_meetings?: { on: boolean; title: string; start: string; end: string; days: string[] }[];
   days_off?: string[];                                                          // YYYY-MM-DD they can't work
   status: string;
   assigned_profile_ids?: string[];

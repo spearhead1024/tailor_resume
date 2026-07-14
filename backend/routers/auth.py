@@ -86,7 +86,10 @@ _PROFILE_FIELDS = ("full_name", "email", "country", "telegram", "whatsapp", "dis
 _PROFILE_TEXTAREAS = ("emergency_contacts",)
 # Structured — a dict / list, so they must NOT be stringified on the way through. Storage validates
 # and clamps them (bad times → the 09:00–18:00 default; bad dates → dropped).
-_PROFILE_STRUCTS = ("availability", "days_off")
+_PROFILE_STRUCTS = ("availability", "daily_meetings", "days_off")
+# Changing any of these changes what OTHER people's calendars draw for you, so they have to be told.
+# full_name is in here because the board identifies a Caller by that name.
+_ROSTER_FIELDS = {"timezone", "availability", "availability_set", "daily_meetings", "days_off", "full_name"}
 
 try:                                              # validate timezone against the IANA database when available
     from zoneinfo import available_timezones
@@ -102,12 +105,25 @@ def update_me(body: dict = Body(...), user: dict = Depends(get_current_user)):
     patch: dict = {k: str(body.get(k, "")).strip() for k in _PROFILE_FIELDS if k in body}
     patch.update({k: str(body.get(k, "")) for k in _PROFILE_TEXTAREAS if k in body})
     patch.update({k: body[k] for k in _PROFILE_STRUCTS if k in body})
+    # Saving the availability form is the ONLY moment we can tell a real schedule from the default one
+    # the normalizer invents for everybody. Record it here, or the board can never distinguish "works
+    # 09:00–18:00" from "has never opened this page".
+    if "availability" in body:
+        patch["availability_set"] = True
     if patch.get("email") and not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", patch["email"]):
         raise HTTPException(status_code=400, detail="Invalid email")
     if patch.get("timezone") and _VALID_TZS and patch["timezone"] not in _VALID_TZS:
         raise HTTPException(status_code=400, detail="Invalid time zone")
     storage.update_user(user["id"], patch)
     updated = storage.get_user_by_id(user["id"]) or {}
+
+    # The board caches /people (everyone's hours, zone, meetings, days off) and used to fetch it ONCE on
+    # mount. So a caller could switch a day off and every open calendar would carry on shading it as free
+    # until somebody happened to reload. Tell the boards that show this person to re-read it.
+    if _ROSTER_FIELDS & set(patch):
+        from core.live import on_roster_changed
+        on_roster_changed(updated)
+
     return {k: v for k, v in updated.items() if k not in ("password_hash", "password_salt")}
 
 

@@ -11,8 +11,9 @@
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  addDays, availabilityBands, availableAt, dateKeyAt, dayKeyOf, instantAt, minutesOfDay, startOfDay, wallClockIn,
-  type Availability, type Band,
+  addDays, availableAt, dateKeyAt, dayKeyOf, freeBands, instantAt, meetingBands, mergeBands,
+  minutesOfDay, startOfDay, wallClockIn,
+  type Availability, type Band, type DailyMeeting, type MeetingBand,
 } from './availability';
 
 export type CalOpt = { label: string; color?: string; kind?: 'team' | 'member'; group?: string };
@@ -22,6 +23,11 @@ export type CalPerson = {
   label: string; username: string; full_name: string;
   roles?: string[]; team_id?: string; avatar_url?: string;
   timezone?: string; availability?: Availability; days_off?: string[];
+  daily_meetings?: DailyMeeting[];   // standups / syncs they have on their working days — not free then
+  /** They have actually filled in their availability AND set a timezone. Without both, their hours are
+   *  a fiction (the server invents a default week for everyone), so the calendar shows nothing at all
+   *  rather than shading a schedule nobody agreed to. */
+  availability_set?: boolean;
 };
 
 type Props = {
@@ -30,7 +36,17 @@ type Props = {
   onWeekChange: (mondayKey: string) => void;
   userTz: string;                       // the zone the grid is drawn in
   people: CalPerson[];
+  teams: { id: string; name: string }[];   // a call can be handed to a TEAM, not just a person
   canSchedule: boolean;                 // may this user set Scheduled_at? (admins) → drag to book / move / resize
+  /** Only an admin gets the caller search. Everyone else's rail is a short, fixed list — their team, or
+   *  just themselves — so a "find a caller" box would only invite them to go looking for people who are
+   *  not there, and are not theirs to look for. */
+  canSearch: boolean;
+  /** The caller PICKER is an assigning tool — choosing who takes a call, and comparing people's hours.
+   *  Only an admin or a manager does that. A caller has nobody to pick: they get their own availability
+   *  shaded automatically and their own upcoming calls, which is all the rail is for them. */
+  showPicker: boolean;
+  meLabel: string;                      // who is looking — used to shade THEIR hours when there is no picker
   columns: CalCol[];                    // the board's real columns (labels, types, select options)
   canEdit: (rowId: string, colId: string) => boolean;   // per-cell write permission, same rules as the table
   onOpenRow: (rowId: string) => void;
@@ -41,7 +57,18 @@ type Props = {
   onCreateAt?: (isoInstant: string, minutes: number) => Promise<string | undefined> | void;
   onReschedule?: (rowId: string, isoInstant: string) => void;
   onResizeRow?: (rowId: string, minutes: number) => void;
+
+  /* Per-cell soft locks — the same ones the table uses.
+     Moving a call on the calendar IS an edit to Scheduled_at. Without claiming that cell, two admins
+     could drag the same call at the same time and neither would see the other doing it; the loser's
+     work would only be refused at the very end (the server 409s). Claiming makes it visible up front. */
+  lockOf: (rowId: string, colId: string) => string | null;   // who else holds it, or null
+  onClaim: (rowId: string, colId: string) => void;
+  onRelease: () => void;
 };
+
+/** The cell a gesture actually edits — so the lock we claim is the one the server checks. */
+const DRAG_COL = { move: 'c_sched', resize: 'c_min' } as const;
 
 /* Everything about a call, in the popup, in this order.
    Left out on purpose: JD, Feedback and Resume are `button` columns that open their own modals in the
@@ -90,6 +117,24 @@ function colourFor(name: string) {
   return PALETTE[h % PALETTE.length];
 }
 
+/** Who is this call with?
+ *
+ * A call can be handed to a TEAM with nobody picked yet — that is a real assignment, waiting on the
+ * manager to choose someone. The board stores it in c_team with c_caller left empty. The table already
+ * falls back to showing the Team when there is no person; the calendar did not, so a call assigned to a
+ * team rendered as "Unassigned" and it looked as though the assignment had not saved. */
+function assignmentOf(row: CalRow, find?: (who: string) => CalPerson | undefined):
+    { caller: string; team: string; assignee: string; isTeam: boolean } {
+  const raw = String(row.cells?.c_caller ?? '').trim();
+  const team = String(row.cells?.c_team ?? '').trim();
+  // The Caller cell may hold a USERNAME or a FULL NAME - the backend accepts either (see _caller_ids
+  // and _resolve). Resolve to the person and use their display label as the one canonical key, or the
+  // rail's counts and highlight silently miss every row that happens to store the other identity.
+  const person = raw && find ? find(raw) : undefined;
+  const caller = person ? person.label : raw;
+  return { caller, team, assignee: caller || team, isTeam: !caller && !!team };
+}
+
 const pad = (n: number) => String(n).padStart(2, '0');
 const hhmm = (min: number) => `${pad(Math.floor(min / 60) % 24)}:${pad(Math.round(min) % 60)}`;
 
@@ -113,7 +158,11 @@ type Ev = {
   endMin: number;      // clipped to midnight — for DRAWING only
   durMin: number;      // the call's REAL length. A resize must start from this, or grabbing the grip
                        // of a call that runs past midnight would silently truncate it to the clip.
-  caller: string; title: string;
+  caller: string;      // the PERSON, if one is named
+  team: string;        // the TEAM it was handed to (a call can go to a team with nobody picked yet)
+  assignee: string;    // who it is actually with: the person, else the team
+  isTeam: boolean;     // handed to a team, nobody picked yet — the manager still has to choose
+  title: string;
   lane: number; lanes: number;
 };
 
@@ -145,8 +194,9 @@ function packLanes(evs: Ev[]): void {
 }
 
 export default function CalendarView(props: Props) {
-  const { rows, weekFrom, onWeekChange, userTz, people, canSchedule, columns, canEdit,
-          onOpenRow, onPatch, onDelete, onCreateAt, onReschedule, onResizeRow } = props;
+  const { rows, weekFrom, onWeekChange, userTz, people, teams, canSchedule, canSearch, showPicker, meLabel,
+          columns, canEdit, onOpenRow, onPatch, onDelete, onCreateAt, onReschedule, onResizeRow,
+          lockOf, onClaim, onRelease } = props;
   const [detailId, setDetailId] = useState<string>('');
   // Re-read the row from `rows` every render, so a live edit by somebody else updates the open popup
   // instead of leaving you staring at a stale copy you are about to save over.
@@ -174,16 +224,54 @@ export default function CalendarView(props: Props) {
   const days = useMemo(() => Array.from({ length: 7 }, (_, i) => addDays(weekFrom, i)), [weekFrom]);
   const todayKey = dateKeyAt(nowTs, userTz);
 
-  // Only people you could actually book. The backend only sends availability for these anyway.
-  const callers = useMemo(() => people
+  // Only people you could actually book, and only those who have SET UP their availability + timezone.
+  // Someone who has never opened the Account page has nothing to shade — listing them just invites you
+  // to click a name and be shown an invented week (or an empty one that reads as "never works").
+  const configured = (p: CalPerson) => !!p.availability_set && !!p.availability && !!p.timezone;
+  const bookable = useMemo(() => people
     .filter((p) => (p.roles || []).some((r) => r === 'caller' || r === 'manager'))
     .sort((a, b) => a.label.localeCompare(b.label)), [people]);
+  const callers = useMemo(() => bookable.filter(configured), [bookable]);
   const byLabel = useMemo(() => {
     const m: Record<string, CalPerson> = {};
-    for (const p of callers) { m[p.label] = p; if (p.username) m[p.username] = p; }
+    for (const p of bookable) { m[p.label] = p; if (p.username) m[p.username] = p; }
     return m;
-  }, [callers]);
-  const sel = selCaller ? byLabel[selCaller] : undefined;
+  }, [bookable]);
+  // With no picker, the "selection" is simply YOU — your hours are shaded and nothing is filtered out.
+  const shadeKey = showPicker ? selCaller : meLabel;
+  const sel = shadeKey ? byLabel[shadeKey] : undefined;                   // a PERSON, if one is picked
+  const selTeam = showPicker && selCaller ? teams.find((t) => t.name === selCaller) : undefined;   // ...or a TEAM
+  const teamMembers = (tid: string) => people.filter((x) => String(x.team_id || '').trim() === tid);
+
+  // Folded teams. Remembered, so the rail looks the same when you come back to it.
+  const [folded, setFolded] = useState<Set<string>>(() => {
+    try { return new Set(JSON.parse(localStorage.getItem('iv.cal.folded') || '[]')); }
+    catch { return new Set(); }
+  });
+  useEffect(() => { localStorage.setItem('iv.cal.folded', JSON.stringify([...folded])); }, [folded]);
+  const toggleFold = (id: string) => setFolded((f) => {
+    const n = new Set(f);
+    if (n.has(id)) n.delete(id); else n.add(id);
+    return n;
+  });
+
+  const whoOf = (r: CalRow) => assignmentOf(r, (w) => byLabel[w]).assignee;
+  const countPerson = (label: string) => rows.filter((r) => whoOf(r) === label).length;
+  /** A team's calls are the ones handed to the TEAM plus the ones any of its members hold — that is
+   *  the team's schedule, which is what the number next to a team should mean. */
+  const teamLabels = (tid: string) => new Set(teamMembers(tid).map((m) => m.label));
+  const countTeam = (t: { id: string; name: string }) => {
+    const mine = teamLabels(t.id);
+    return rows.filter((r) => { const a = whoOf(r); return a === t.name || mine.has(a); }).length;
+  };
+  /** Selecting a TEAM highlights everything the team is on, not only the calls with no caller picked —
+   *  otherwise the number beside it and the calls it lights up would disagree. */
+  const selMembers = selTeam ? teamLabels(selTeam.id) : null;
+  const inSelection = (assignee: string): boolean => {
+    if (!showPicker || !selCaller) return true;      // nothing was picked -> nothing is dimmed
+    if (selTeam) return assignee === selTeam.name || !!selMembers?.has(assignee);
+    return assignee === selCaller;
+  };
 
   // ── events for the visible week ────────────────────────────────────────────
   const weekStart = startOfDay(weekFrom, userTz);
@@ -211,25 +299,44 @@ export default function CalendarView(props: Props) {
         startMin,
         endMin: Math.min(DAY_MIN, startMin + dur),     // a call running past midnight is clipped, not wrapped
         durMin: dur,
-        caller: String(row.cells?.c_caller ?? '').trim(),
+        ...assignmentOf(row, (who) => byLabel[who]),
         title: String(row.cells?.c_company || row.cells?.c_title || row.cells?.c_index || 'Interview').trim(),
         lane: 0, lanes: 1,
       });
     }
     Object.values(byDay).forEach(packLanes);
     return { byDay, unscheduled, offWeek };
-  }, [rows, days, weekStart, weekEnd, userTz]);
+  }, [rows, days, weekStart, weekEnd, userTz, byLabel]);   // byLabel: people load async — re-resolve when they arrive
 
   // ── the selected caller's working hours, projected onto each column ─────────
-  const bands: Record<string, Band[]> = useMemo(() => {
-    const out: Record<string, Band[]> = {};
-    if (!sel) return out;
-    // No timezone on the caller means we cannot know what "09:00" means to them. Assume the viewer's
-    // zone rather than silently drawing the band in the wrong place — and the panel says so out loud.
-    const ctz = sel.timezone || userTz;
-    for (const d of days) out[d] = availabilityBands(d, userTz, sel.availability, ctz, sel.days_off || []);
-    return out;
-  }, [sel, days, userTz]);
+  // What the grid shades is FREE time, not "at work": the daily meeting is cut out of it, because
+  // being at their desk and being able to take a call are different things. The meeting itself is
+  // drawn on top, so you can see WHY the gap is there rather than just finding a hole.
+  const { bands, meetings } = useMemo(() => {
+    const bands: Record<string, Band[]> = {};
+    const meetings: Record<string, MeetingBand[]> = {};
+
+    // A TEAM: shade when AT LEAST ONE member is free — "could anybody here take this call?". A union,
+    // not an intersection: you only need one of them. Their standups are personal, so none are drawn.
+    if (selTeam) {
+      const mem = teamMembers(selTeam.id).filter(configured);
+      for (const d of days) {
+        bands[d] = mergeBands(mem.flatMap((m) =>
+          freeBands(d, userTz, m.availability, m.daily_meetings, m.timezone || userTz, m.days_off || [])));
+        meetings[d] = [];
+      }
+      return { bands, meetings };
+    }
+
+    if (!sel || !configured(sel)) return { bands, meetings };
+    const ctz = sel.timezone!;
+    const dms = sel.daily_meetings;
+    for (const d of days) {
+      bands[d] = freeBands(d, userTz, sel.availability, dms, ctz, sel.days_off || []);
+      meetings[d] = meetingBands(d, userTz, sel.availability, dms, ctz, sel.days_off || []);
+    }
+    return { bands, meetings };
+  }, [sel, selTeam, people, days, userTz]);
 
   const monthLabel = useMemo(() => {
     const a = new Date(`${weekFrom}T00:00:00Z`);
@@ -250,6 +357,36 @@ export default function CalendarView(props: Props) {
   const shownCallers = q
     ? callers.filter((c) => c.label.toLowerCase().includes(q.trim().toLowerCase()))
     : callers;
+  const shownTeams = q
+    ? teams.filter((t) => t.name.toLowerCase().includes(q.trim().toLowerCase()))
+    : teams;
+
+  // The rail's two halves: callers who belong to nobody, and each team with its own people under it.
+  // A team-mate must NOT also appear in the individual list — that is the flat-list confusion this
+  // replaces, where Ayesha (no team) sat between two members of somebody else's team.
+  const solo = shownCallers.filter((p) => !String(p.team_id || '').trim());
+  const grouped = shownTeams
+    .map((team) => ({ team, members: shownCallers.filter((p) => String(p.team_id || '').trim() === team.id) }))
+    // when SEARCHING, keep a team whose name matched even if none of its members did
+    .filter(({ team, members }) => members.length > 0 || !q || team.name.toLowerCase().includes(q.trim().toLowerCase()));
+
+  /** One person in the rail. `nested` = they sit under their team. */
+  const personRow = (p: CalPerson, nested: boolean) => {
+    const c = colourFor(p.label);
+    const n = countPerson(p.label);
+    return (
+      <button key={p.username || p.label} type="button"
+        className={'cal-person' + (nested ? ' cal-person--nested' : '')
+                   + (selCaller === p.label ? ' cal-person--on' : '')}
+        title={`Shade only ${p.label}'s hours`}
+        onClick={() => setSelCaller(selCaller === p.label ? '' : p.label)}>
+        <span className="cal-swatch" style={{ background: c.bd }} />
+        <span className="cal-person-n">{p.label}</span>
+        {p.timezone && <span className="cal-person-tz">{tzShort(p.timezone) || p.timezone}</span>}
+        {n > 0 && <span className="cal-person-n2">{n}</span>}
+      </button>
+    );
+  };
 
   /* ── dragging ────────────────────────────────────────────────────────────────
      Press and drag on empty grid to draw a call of whatever length you sweep out; drag a call to move
@@ -298,7 +435,15 @@ export default function CalendarView(props: Props) {
     return { day, min: Math.max(0, Math.min(DAY_MIN, ((clientY - r.top) / HOUR_PX) * 60)), inside };
   };
 
-  const cancelDrag = () => { put(null); downAt.current = null; document.body.classList.remove('cal-dragging'); };
+  // EVERY way a drag can end goes through here — mouseup, Escape, right-click, losing focus. So this is
+  // the one place the cell has to be handed back. Release anywhere else and a path that skipped it would
+  // leave the call locked to you on everyone else's board until the lock aged out.
+  const cancelDrag = () => {
+    put(null);
+    downAt.current = null;
+    document.body.classList.remove('cal-dragging');
+    onRelease();
+  };
 
   const dragging = !!drag;
   useEffect(() => {
@@ -408,8 +553,10 @@ export default function CalendarView(props: Props) {
 
   const startMove = (ev: Ev, day: string, e: React.MouseEvent) => {
     if (!canSchedule || !onReschedule || e.button !== 0) return;
+    if (lockOf(ev.id, DRAG_COL.move)) return;          // somebody else is already moving this call
     const s = slotAt(e.clientX, e.clientY);
     if (!s) return;
+    onClaim(ev.id, DRAG_COL.move);                     // tell every other board, before the first pixel
     e.preventDefault(); e.stopPropagation();    // do not also begin drawing a new call underneath
     begin({ kind: 'move', id: ev.id, day, startMin: ev.startMin, endMin: ev.endMin,
             grabMin: s.min - ev.startMin, moved: false }, e);
@@ -417,7 +564,9 @@ export default function CalendarView(props: Props) {
 
   const startResize = (ev: Ev, day: string, e: React.MouseEvent) => {
     if (!canSchedule || !onResizeRow || e.button !== 0) return;
+    if (lockOf(ev.id, DRAG_COL.resize)) return;
     e.preventDefault(); e.stopPropagation();
+    onClaim(ev.id, DRAG_COL.resize);
     // Seed from the TRUE length, not the midnight-clipped one, so merely grabbing the grip of a call
     // that runs past midnight cannot shorten it.
     begin({ kind: 'resize', id: ev.id, day, startMin: ev.startMin,
@@ -477,7 +626,16 @@ export default function CalendarView(props: Props) {
                   {(bands[d] || []).map((b, i) => (
                     <div key={i} className="cal-avail"
                          style={{ top: (b.startMin / 60) * HOUR_PX, height: ((b.endMin - b.startMin) / 60) * HOUR_PX }}
-                         title={`${sel?.label} is available ${hhmm(b.startMin)}–${hhmm(b.endMin)} your time`} />
+                         title={`${sel?.label} is free ${hhmm(b.startMin)}–${hhmm(b.endMin)} your time`} />
+                  ))}
+
+                  {/* Their standup / daily sync. They ARE at work — they just cannot take a call. */}
+                  {(meetings[d] || []).map((b, i) => (
+                    <div key={`m${i}`} className="cal-meeting"
+                         style={{ top: (b.startMin / 60) * HOUR_PX, height: ((b.endMin - b.startMin) / 60) * HOUR_PX }}
+                         title={`${sel?.label}: ${b.title} ${hhmm(b.startMin)}–${hhmm(b.endMin)} your time`}>
+                      <span className="cal-meeting-l">{b.title}</span>
+                    </div>
                   ))}
 
                   {/* the red "now" line */}
@@ -491,13 +649,19 @@ export default function CalendarView(props: Props) {
                     // While this call is being dragged, the ghost below shows where it will land — so
                     // hide the real one rather than leaving a copy behind at the old time.
                     const beingDragged = drag && drag.kind !== 'create' && drag.id === ev.id;
-                    const c = colourFor(ev.caller);
-                    const dimmed = !!selCaller && ev.caller !== selCaller;
+                    // Somebody ELSE has this call open — moving it, resizing it, or editing it in the
+                    // popup. Say who, and make it inert: the server would refuse our write anyway (409),
+                    // so refusing it here saves the effort and, more importantly, makes it VISIBLE that
+                    // the call is in motion instead of silently jumping under our cursor.
+                    const heldBy = lockOf(ev.id, DRAG_COL.move) || lockOf(ev.id, DRAG_COL.resize)
+                                || lockOf(ev.id, 'c_company') || lockOf(ev.id, 'c_caller');
+                    const c = colourFor(ev.assignee);
+                    const dimmed = showPicker && !!selCaller && !inSelection(ev.assignee);
                     const past = ev.ts < nowTs;
                     // A call booked outside the caller's hours is a real scheduling mistake — flag it.
                     const p = byLabel[ev.caller];
                     const outside = !!ev.caller && !!p?.availability
-                      && !availableAt(ev.ts, p.availability, p.timezone || userTz, p.days_off || []);
+                      && !availableAt(ev.ts, p.availability, p.timezone || userTz, p.days_off || [], p.daily_meetings);
                     const w = 100 / ev.lanes;
                     const style: CSSProperties = {
                       top: (ev.startMin / 60) * HOUR_PX,
@@ -510,11 +674,13 @@ export default function CalendarView(props: Props) {
                     return (
                       <button key={ev.id} type="button"
                         className={'cal-ev' + (dimmed ? ' cal-ev--dim' : '') + (past ? ' cal-ev--past' : '')
-                                   + (selRow === ev.id ? ' cal-ev--sel' : '') + (canSchedule ? ' cal-ev--draggable' : '')}
+                                   + (selRow === ev.id ? ' cal-ev--sel' : '')
+                                   + (heldBy ? ' cal-ev--held' : canSchedule ? ' cal-ev--draggable' : '')}
                         style={style}
                         title={`${hhmm(ev.startMin)}–${hhmm(ev.endMin)} · ${ev.title}${ev.caller ? ` · ${ev.caller}` : ' · unassigned'}`
                                + (outside ? '\n⚠ outside this caller\'s working hours' : '')
-                               + (canSchedule ? '\nDrag to move · drag the bottom edge to resize · double-click to open' : '')}
+                               + (heldBy ? `\n✎ ${heldBy} is working on this right now — you cannot move it`
+                                         : canSchedule ? '\nDrag to move · drag the bottom edge to resize · double-click to open' : '')}
                         onMouseDown={(e) => startMove(ev, d, e)}
                         onClick={(e) => {
                           e.stopPropagation();
@@ -524,8 +690,11 @@ export default function CalendarView(props: Props) {
                         onDoubleClick={(e) => { e.stopPropagation(); setDetailId(ev.id); }}>
                         <span className="cal-ev-t">{hhmm(ev.startMin)}{outside && <span className="cal-warn" title="Outside working hours"> ⚠</span>}</span>
                         <span className="cal-ev-n">{ev.title}</span>
-                        {ev.caller ? <span className="cal-ev-c">{ev.caller}</span> : <span className="cal-ev-c cal-ev-c--none">Unassigned</span>}
-                        {canSchedule && <span className="cal-ev-grip" onMouseDown={(e) => startResize(ev, d, e)} title="Drag to change how long the call is" />}
+                        {ev.assignee
+                          ? <span className={'cal-ev-c' + (ev.isTeam ? ' cal-ev-c--team' : '')}>{ev.isTeam ? `\u{1F465} ${ev.team}` : ev.caller}</span>
+                          : <span className="cal-ev-c cal-ev-c--none">Unassigned</span>}
+                        {heldBy && <span className="cal-ev-held" title={`${heldBy} is working on this right now`}>✎ {heldBy}</span>}
+                        {canSchedule && !heldBy && <span className="cal-ev-grip" onMouseDown={(e) => startResize(ev, d, e)} title="Drag to change how long the call is" />}
                       </button>
                     );
                   })}
@@ -548,36 +717,136 @@ export default function CalendarView(props: Props) {
 
       {/* ── 1/3: pick a caller, see when they can work ──────────────────────── */}
       <aside className="cal-side">
-        <div className="cal-side-sec">
+        {showPicker && (
+        <div className="cal-side-sec cal-side-sec--callers">
           <h4 className="cal-side-h">Caller</h4>
-          <input className="cal-search" placeholder="Find a caller…" value={q} onChange={(e) => setQ(e.target.value)} />
+          {canSearch && (
+            <input className="cal-search" placeholder="Find a caller…" value={q} onChange={(e) => setQ(e.target.value)} />
+          )}
+          {/* Everyone -> the callers who belong to no team -> each team, with its members nested.
+              The same shape as the board's own Caller dropdown, so the two views read alike. */}
           <div className="cal-people">
-            <button type="button" className={'cal-person' + (!selCaller ? ' cal-person--on' : '')}
-                    onClick={() => setSelCaller('')}>
-              <span className="cal-swatch" style={{ background: UNASSIGNED.bd }} />
-              <span className="cal-person-n">Everyone</span>
-            </button>
-            {shownCallers.map((p) => {
-              const c = colourFor(p.label);
-              const n = rows.filter((r) => String(r.cells?.c_caller ?? '').trim() === p.label).length;
-              return (
-                <button key={p.username || p.label} type="button"
-                  className={'cal-person' + (selCaller === p.label ? ' cal-person--on' : '')}
-                  onClick={() => setSelCaller(selCaller === p.label ? '' : p.label)}>
-                  <span className="cal-swatch" style={{ background: c.bd }} />
-                  <span className="cal-person-n">{p.label}</span>
-                  {n > 0 && <span className="cal-person-n2">{n}</span>}
-                </button>
-              );
-            })}
-            {!shownCallers.length && <p className="muted cal-empty">No caller matches “{q}”.</p>}
+            {/* "Everyone" only makes sense when there IS everyone. On your own board it is the only
+                option there could be, so it is just noise. */}
+            {(bookable.length + teams.length) > 1 && (
+              <button type="button" className={'cal-person' + (!selCaller ? ' cal-person--on' : '')}
+                      onClick={() => setSelCaller('')}>
+                <span className="cal-swatch" style={{ background: UNASSIGNED.bd }} />
+                <span className="cal-person-n">Everyone</span>
+                {rows.length > 0 && <span className="cal-person-n2">{rows.length}</span>}
+              </button>
+            )}
           </div>
+
+          {solo.length > 0 && (
+            <>
+              <h4 className="cal-side-h cal-side-h--sub">Individual</h4>
+              <div className="cal-people">
+                {solo.map((p) => personRow(p, false))}
+              </div>
+            </>
+          )}
+
+          {grouped.length > 0 && (
+            <>
+              <h4 className="cal-side-h cal-side-h--sub">Teams</h4>
+              <div className="cal-people">
+                {grouped.map(({ team, members }) => {
+                  const c = colourFor(team.name);
+                  const n = countTeam(team);
+                  const shut = folded.has(team.id);
+                  return (
+                    <div key={team.id} className="cal-team">
+                      <div className="cal-team-hd">
+                        <button type="button" className="cal-fold" aria-expanded={!shut}
+                          title={shut ? 'Show members' : 'Hide members'}
+                          onClick={() => toggleFold(team.id)}>{shut ? '\u25b8' : '\u25be'}</button>
+                        <button type="button"
+                          className={'cal-person cal-person--team' + (selCaller === team.name ? ' cal-person--on' : '')}
+                          title={`Shade when ANY member of ${team.name} is free`}
+                          onClick={() => setSelCaller(selCaller === team.name ? '' : team.name)}>
+                          <span className="cal-swatch" style={{ background: c.bd }} />
+                          <span className="cal-person-n">👥 {team.name}</span>
+                          {n > 0 && <span className="cal-person-n2">{n}</span>}
+                        </button>
+                      </div>
+                      {!shut && members.map((m) => personRow(m, true))}
+                      {!shut && !members.length && (
+                        <p className="muted cal-empty cal-person--nested">No member here has set their availability.</p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+
+          {!shownCallers.length && !shownTeams.length && !!q && (
+            <p className="muted cal-empty">No caller or team matches “{q}”.</p>
+          )}
+          {!shownCallers.length && !q && (
+            <p className="muted cal-empty">
+              {bookable.length
+                ? 'Nobody here has set their availability and time zone yet.'
+                : 'No callers to show.'}
+            </p>
+          )}
         </div>
 
+        )}
+
         <div className="cal-side-sec">
-          <h4 className="cal-side-h">Availability</h4>
-          {!sel && <p className="muted cal-empty">Pick a caller to shade their working hours onto the week.</p>}
-          {sel && <Availability_ p={sel} viewerTz={userTz} weekFrom={weekFrom} bands={bands} />}
+          <h4 className="cal-side-h">{showPicker ? 'Availability' : 'Your availability'}</h4>
+          {!sel && !selTeam && (
+            <p className="muted cal-empty">
+              {showPicker
+                ? 'Pick a caller to shade their working hours onto the week.'
+                : 'Set your working hours on the Availability page and they will be shaded here.'}
+            </p>
+          )}
+          {/* You can see this person's CALLS but not their ROSTER — the server withheld it (a caller
+              may not read a team-mate's working hours or holidays). Say so, instead of showing an empty
+              week that reads as "they never work". */}
+          {sel && !sel.availability && (
+            <p className="muted cal-empty">
+              You can see <b>{sel.label}</b>’s calls, but not their working hours — only a manager or an
+              admin can see the team’s roster.
+            </p>
+          )}
+          {selTeam && (() => {
+            // Only members who HAVE working hours. Someone who never filled the form in has nothing to
+            // contribute to the shading and nothing to show if you clicked them, so they are not listed
+            // at all — the rail is a list of people you can schedule against, not a staff directory.
+            const ready = teamMembers(selTeam.id).filter(configured);
+            const days7 = Array.from({ length: 7 }, (_, i) => addDays(weekFrom, i));
+            const total = days7.reduce((s, d) => s + (bands[d] || []).reduce((t, b) => t + (b.endMin - b.startMin), 0), 0);
+            return (
+              <div className="cal-av">
+                {/* A UNION, not an intersection. You need ONE of them to be free, not all of them — so
+                    the shading answers "could anybody on this team take a call then?". Their standups
+                    are personal, so none are drawn: another member is still free. */}
+                <p className="cal-av-tz">
+                  {ready.length
+                    ? <>Shaded = when <b>at least one</b> of {selTeam.name}’s {ready.length}{' '}
+                        member{ready.length === 1 ? '' : 's'} is free, in <b>{tzShort(userTz) || userTz}</b>,
+                        your time. {Math.round(total / 60)}h this week.</>
+                    : <span className="cal-av-warn">Nobody on {selTeam.name} has set their availability yet.</span>}
+                </p>
+                <div className="cal-people">
+                  {ready.map((m) => (
+                    <button key={m.username || m.label} type="button" className="cal-person"
+                      title={`See only ${m.label}’s hours`}
+                      onClick={() => setSelCaller(m.label)}>
+                      <span className="cal-swatch" style={{ background: colourFor(m.label).bd }} />
+                      <span className="cal-person-n">{m.label}</span>
+                      <span className="cal-person-n2">{tzShort(m.timezone || '') || m.timezone}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+          {sel && sel.availability && <Availability_ p={sel} viewerTz={userTz} weekFrom={weekFrom} bands={bands} />}
         </div>
 
         {(unscheduled.length > 0 || offWeek > 0) && (
@@ -605,8 +874,9 @@ export default function CalendarView(props: Props) {
 
       {detailRow && (
         <EventDetail row={detailRow} columns={columns} canEdit={canEdit} userTz={userTz}
-          onPatch={onPatch} onDelete={onDelete} onClose={() => setDetailId('')}
-          onOpenRow={(rid) => { setDetailId(''); onOpenRow(rid); }} />
+          onPatch={onPatch} onDelete={onDelete} onClose={() => { onRelease(); setDetailId(''); }}
+          lockOf={lockOf} onClaim={onClaim} onRelease={onRelease}
+          onOpenRow={(rid) => { onRelease(); setDetailId(''); onOpenRow(rid); }} />
       )}
     </div>
   );
@@ -619,10 +889,14 @@ export default function CalendarView(props: Props) {
  * Fields the caller is not allowed to touch are disabled rather than hidden — seeing that the Company
  * is "Acme" and simply not being able to change it is more useful than the field vanishing.
  */
-function EventDetail({ row, columns, canEdit, userTz, onPatch, onDelete, onOpenRow, onClose }: {
+function EventDetail({ row, columns, canEdit, userTz, onPatch, onDelete, onOpenRow, onClose,
+                      lockOf, onClaim, onRelease }: {
   row: CalRow; columns: CalCol[]; canEdit: (rowId: string, colId: string) => boolean;
   userTz: string; onPatch: (rowId: string, colId: string, v: any) => void;
   onDelete?: (rowId: string) => void; onOpenRow: (rowId: string) => void; onClose: () => void;
+  lockOf: (rowId: string, colId: string) => string | null;
+  onClaim: (rowId: string, colId: string) => void;
+  onRelease: () => void;
 }) {
   const colById = useMemo(() => Object.fromEntries(columns.map((c) => [c.id, c])), [columns]);
   // Text fields commit on blur, not per keystroke — otherwise every character is a PATCH, a broadcast
@@ -648,8 +922,16 @@ function EventDetail({ row, columns, canEdit, userTz, onPatch, onDelete, onOpenR
   const field = (cid: string) => {
     const col = colById[cid];
     if (!col) return null;
-    const editable = canEdit(row.id, cid);
-    const val = valueOf(cid);
+    // Somebody else is in this exact field right now. The server would refuse our write (409) — so make
+    // it read-only and name them, rather than letting us type into something that will be thrown away.
+    const heldBy = lockOf(row.id, cid);
+    const editable = canEdit(row.id, cid) && !heldBy;
+    // The Caller cell is where a TEAM assignment lives too: handing a call to a team writes c_team and
+    // leaves c_caller empty. Without this fallback the dropdown reads blank the instant after you pick a
+    // team — which is exactly what made assigning to a team look like it had failed.
+    const val = (cid === 'c_caller' && !valueOf('c_caller'))
+      ? String(row.cells?.c_team ?? '').trim()
+      : valueOf(cid);
 
     let input: React.ReactNode;
     if (cid === 'c_sched') {
@@ -680,17 +962,21 @@ function EventDetail({ row, columns, canEdit, userTz, onPatch, onDelete, onOpenR
     } else {
       input = (
         <input type={col.type === 'url' ? 'url' : 'text'} disabled={!editable} value={val}
+          onFocus={() => onClaim(row.id, cid)}
           // A call booked by dragging arrives with a time and nothing else. Land the cursor in Company
           // Info so you can just start typing, rather than hunting for the first field.
           autoFocus={cid === 'c_company' && editable && !String(row.cells?.c_company ?? '').trim()}
           onChange={(e) => setDraft((d) => ({ ...d, [cid]: e.target.value }))}
-          onBlur={(e) => commit(cid, e.target.value)}
+          onBlur={(e) => { commit(cid, e.target.value); onRelease(); }}
           onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }} />
       );
     }
     return (
       <label key={cid} className={'cal-fld' + (editable ? '' : ' cal-fld--ro')}>
-        <span className="cal-fld-l">{col.name}{cid === 'c_sched' ? ` (${tzShort(userTz) || userTz})` : ''}</span>
+        <span className="cal-fld-l">
+          {col.name}{cid === 'c_sched' ? ` (${tzShort(userTz) || userTz})` : ''}
+          {heldBy && <span className="cal-fld-held" title={`${heldBy} is editing this right now`}>✎ {heldBy}</span>}
+        </span>
         {input}
       </label>
     );
@@ -709,10 +995,6 @@ function EventDetail({ row, columns, canEdit, userTz, onPatch, onDelete, onOpenR
         </div>
 
         <footer className="cal-modal-f">
-          <button className="secondary" onClick={() => onOpenRow(row.id)}>
-            Open in table
-          </button>
-          <span style={{ flex: 1 }} />
           {onDelete && (
             <button className="cal-del"
               onClick={() => {
@@ -723,6 +1005,10 @@ function EventDetail({ row, columns, canEdit, userTz, onPatch, onDelete, onOpenR
               Delete
             </button>
           )}
+          <span style={{ flex: 1 }} />
+          <button className="secondary" onClick={() => onOpenRow(row.id)}>
+            Open in table
+          </button>
         </footer>
       </div>
     </div>,

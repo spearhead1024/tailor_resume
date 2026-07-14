@@ -16,11 +16,24 @@ export type DayRule = { on: boolean; start: string; end: string };
 /** As stored on the user: mon…sat (there is no Sunday — a caller is never available on Sunday). */
 export type Availability = Partial<Record<DayKey, DayRule>>;
 
+/** A meeting the caller has EVERY working day — a standup, a team sync.
+ *
+ * It sits inside the working window: they are at work, they simply cannot take a call then. So it is a
+ * HOLE punched in their availability, not a change to their hours — which is why it has to be
+ * subtracted after the window is computed, and why it can split one working day into two bands.
+ * `days` empty means every day they work. Times are wall-clock in the CALLER's zone, like everything
+ * else here. */
+export type DailyMeeting = {
+  on?: boolean; title?: string; start?: string; end?: string; days?: DayKey[];
+};
+
 /** A slice of availability on ONE viewer-local day, as WALL-CLOCK minutes (09:00 → 540).
  *
  * Wall clock, NOT elapsed time since midnight — the two differ by an hour after a DST shift, and the
  * calendar's hour rows are labelled with wall-clock hours. See minutesOfDay. */
 export type Band = { startMin: number; endMin: number };
+/** A meeting band knows WHICH meeting it is, so the grid can label it. */
+export type MeetingBand = Band & { title: string };
 
 export const DAY_MINUTES = 24 * 60;
 
@@ -195,10 +208,15 @@ export function availabilityBands(
     });
   }
 
-  // Merge touching/overlapping pieces so the calendar paints one block, not a seam.
-  bands.sort((a, b) => a.startMin - b.startMin);
+  return mergeBands(bands);
+}
+
+/** Union: overlapping or touching bands collapse into one, so the calendar paints a block, not seams.
+ *  Also how a TEAM's availability is built — the times at least one member is free. */
+export function mergeBands(bands: Band[]): Band[] {
+  const sorted = [...bands].sort((a, b) => a.startMin - b.startMin);
   const merged: Band[] = [];
-  for (const b of bands) {
+  for (const b of sorted) {
     const last = merged[merged.length - 1];
     if (last && b.startMin <= last.endMin) last.endMin = Math.max(last.endMin, b.endMin);
     else merged.push({ ...b });
@@ -206,12 +224,106 @@ export function availabilityBands(
   return merged;
 }
 
-/** Is the caller available at this exact instant? Used to flag a call booked outside their hours. */
+/** Does the daily meeting apply on this day of the CALLER's own calendar? */
+function meetingRunsOn(cDate: string, av: Availability | null | undefined, dm: DailyMeeting | null | undefined,
+                       daysOff: Set<string>): boolean {
+  if (!dm?.on || daysOff.has(cDate)) return false;
+  const dk = dayKeyOf(cDate);
+  const rule = av?.[dk];
+  if (!rule || !rule.on) return false;               // no meeting on a day they don't work at all
+  const days = dm.days || [];
+  return days.length === 0 || days.includes(dk);     // empty = every working day
+}
+
+/**
+ * The caller's DAILY MEETING, on one day of the viewer's calendar.
+ *
+ * Same projection as availabilityBands — the meeting is written in the caller's wall clock, so for a
+ * viewer in another zone it lands at a different hour and can even fall on a different day.
+ */
+export function meetingBands(
+  dateKey: string,
+  viewerTz: string,
+  av: Availability | null | undefined,
+  dms: DailyMeeting[] | null | undefined,
+  callerTz: string,
+  daysOff: string[] = [],
+): MeetingBand[] {
+  const list = (dms || []).filter((m) => m?.on);
+  if (!list.length || !viewerTz || !callerTz) return [];
+
+  const dayStart = startOfDay(dateKey, viewerTz);
+  const dayEnd = startOfDay(addDays(dateKey, 1), viewerTz);
+  const off = new Set(daysOff || []);
+  const centre = dateKeyAt(dayStart, callerTz);
+  const candidates = [addDays(centre, -1), centre, addDays(centre, 1)];
+
+  const out: MeetingBand[] = [];
+  for (const dm of list) {
+    for (const cDate of candidates) {
+      if (!meetingRunsOn(cDate, av, dm, off)) continue;
+      const [sh, sm] = hhmm(dm.start || '');
+      const [eh, em] = hhmm(dm.end || '');
+      const [y, m, d] = parseKey(cDate);
+      const s = zonedToInstant(y, m, d, sh, sm, callerTz);
+      const e = zonedToInstant(y, m, d, eh, em, callerTz);
+      if (e <= s) continue;
+
+      const lo = Math.max(s, dayStart);
+      const hi = Math.min(e, dayEnd);
+      if (hi <= lo) continue;
+      out.push({
+        title: String(dm.title || '').trim() || 'Meeting',
+        startMin: minutesOfDay(lo, viewerTz),
+        endMin: hi === dayEnd ? DAY_MINUTES : minutesOfDay(hi, viewerTz),
+      });
+    }
+  }
+  // NOT merged: two meetings that touch stay two meetings, so each keeps its own label on the grid.
+  return out.sort((a, b) => a.startMin - b.startMin);
+}
+
+/** Cut `holes` out of `bands`. A meeting in the middle of the day splits one working band into two. */
+export function subtractBands(bands: Band[], holes: Band[]): Band[] {
+  if (!holes.length) return bands;
+  let cur = bands.map((b) => ({ ...b }));
+  for (const h of holes) {
+    const next: Band[] = [];
+    for (const b of cur) {
+      if (h.endMin <= b.startMin || h.startMin >= b.endMin) { next.push(b); continue; }   // no overlap
+      if (h.startMin > b.startMin) next.push({ startMin: b.startMin, endMin: h.startMin });  // piece before
+      if (h.endMin < b.endMin) next.push({ startMin: h.endMin, endMin: b.endMin });          // piece after
+      // fully covered → the band disappears
+    }
+    cur = next;
+  }
+  return cur;
+}
+
+/** The caller's FREE time on one day of the viewer's calendar: working hours minus the daily meeting.
+ *  This is what the calendar shades — being at work is not the same as being free to take a call. */
+export function freeBands(
+  dateKey: string,
+  viewerTz: string,
+  av: Availability | null | undefined,
+  dms: DailyMeeting[] | null | undefined,
+  callerTz: string,
+  daysOff: string[] = [],
+): Band[] {
+  return subtractBands(
+    availabilityBands(dateKey, viewerTz, av, callerTz, daysOff),
+    meetingBands(dateKey, viewerTz, av, dms, callerTz, daysOff),
+  );
+}
+
+/** Is the caller free to take a call at this exact instant?
+ *  Used to flag a call booked outside their hours — or on top of their daily meeting. */
 export function availableAt(
   instant: number,
   av: Availability | null | undefined,
   callerTz: string,
   daysOff: string[] = [],
+  dms: DailyMeeting[] | null | undefined = null,
 ): boolean {
   if (!av || !callerTz) return true;                 // unknown → don't cry wolf
   const key = dateKeyAt(instant, callerTz);
@@ -223,5 +335,17 @@ export function availableAt(
   const [eh, em] = hhmm(rule.end);
   const s = zonedToInstant(y, m, d, sh, sm, callerTz);
   const e = zonedToInstant(y, m, d, eh, em, callerTz);
-  return instant >= s && instant < e;
+  if (instant < s || instant >= e) return false;     // outside the working window
+
+  // At work, but in ANY ONE of their standing meetings — still not free to take a call.
+  const off = new Set(daysOff || []);
+  for (const dm of dms || []) {
+    if (!meetingRunsOn(key, av, dm, off)) continue;
+    const [mh, mm] = hhmm(dm.start || '');
+    const [nh, nm] = hhmm(dm.end || '');
+    const ms = zonedToInstant(y, m, d, mh, mm, callerTz);
+    const me = zonedToInstant(y, m, d, nh, nm, callerTz);
+    if (instant >= ms && instant < me) return false;
+  }
+  return true;
 }

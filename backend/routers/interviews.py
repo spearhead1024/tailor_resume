@@ -9,6 +9,7 @@ done under a process lock.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
@@ -44,6 +45,8 @@ def _editable_cols(user: dict) -> set:
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 _GRID_FILE = DATA_DIR / "interviews.json"
+log = logging.getLogger("interviews")
+
 _lock = threading.Lock()
 
 COLUMN_TYPES = {"text", "number", "date", "select", "checkbox", "url", "email", "phone", "person", "file", "button"}
@@ -126,10 +129,14 @@ def _team_scope(user: dict):
 def _visibility(user: dict):
     """READ scope — "may this user SEE this row?"
 
-    admin   → everything.
-    manager → their whole team (incl. calls handed to the team with no Caller yet).
-    caller  → their own calls, PLUS their team's whole schedule if they're on a team, so a team can
-              see what the rest of the team is booked for. Seeing is not editing — see _writability.
+    admin   → everything. They are the only ones with the whole picture.
+    manager → their whole team, INCLUDING calls handed to the team with nobody picked yet — that is the
+              queue they assign from, so they have to see it.
+    caller  → their own calls; and, if they are on a team, that team's schedule too, so team-mates can
+              see what the rest of the team is booked for.
+    a caller with NO team → strictly their own, and nothing else.
+
+    Seeing is not editing: a team-mate's call is read-only to them (see _writability, which is narrower).
     """
     if user.get("is_admin"):
         return lambda row: True
@@ -165,31 +172,34 @@ def _owns_row(user: dict, row: dict) -> bool:
 
 
 def _avail_scope(user: dict):
-    """WHOSE working hours may this user read? Mirrors _visibility, the READ scope for rows.
+    """WHOSE working hours (and days off, and daily meeting) may this user READ?
 
     admin   → everyone.
-    manager → their own team.
-    caller  → themselves, plus their team if they are on one.
+    manager → their own team. Rostering the team is their job; they need to know when people can work.
+    caller  → THEMSELVES ONLY.
 
-    This has to be its own predicate and not just "whoever /people returns": /people deliberately
-    returns EVERY user to a caller (it feeds the Creater avatars, which need a name for anyone who
-    ever booked a call). Hanging availability off that list would have handed every caller the working
-    hours and — worse — the days off of every colleague in the company. When they can work is roster
-    information their team needs; when they are on holiday is not the whole org's business.
+    A caller is deliberately NOT given their team-mates' hours, even though they can see the team's
+    calls. Seeing the schedule is the team's business; seeing when a colleague works, and which days
+    they are on holiday, is that colleague's. Only the person who assigns the work needs the roster.
+
+    This is its own predicate and not just "whoever /people returns": /people deliberately returns EVERY
+    user to a caller (it feeds the Creater avatars, which need a name for anyone who ever booked a call).
+    Hanging availability off that list would hand the whole company's roster to every caller.
     """
     if user.get("is_admin"):
         return lambda u: True
 
-    tid = team_id_of(user)
+    if is_manager(user):
+        tid = team_id_of(user)
+        # An ungrouped manager has tid == "" — which must NOT match every other ungrouped user.
+        return lambda u: bool(tid) and str(u.get("team_id", "")).strip() == tid
+
     ids = _caller_ids(user)
 
     def ok(u: dict) -> bool:
         keys = {s for s in (str(u.get("username", "")).strip().lower(),
                             str(u.get("full_name", "")).strip().lower()) if s}
-        if keys & ids:
-            return True                                   # always yourself
-        # An ungrouped caller has tid == "" — which must NOT match every other ungrouped user.
-        return bool(tid) and str(u.get("team_id", "")).strip() == tid
+        return bool(keys & ids)                           # yourself, and nobody else
 
     return ok
 
@@ -391,9 +401,18 @@ def list_people(user: dict = Depends(_access)):
             "avatar_url": str(u.get("avatar_url", "")).strip(),
         }
         if _schedulable(u) and may_see_roster(u):
-            person["timezone"] = str(u.get("timezone", "")).strip()
-            person["availability"] = u.get("availability") or {}
-            person["days_off"] = u.get("days_off") or []
+            # Only a roster the person actually filled in, and only if we know which clock it is on.
+            # Without BOTH, the hours are a fiction: the normalizer hands everyone a default Mon–Fri
+            # 09:00–18:00, and with no timezone we cannot say whose 09:00 that is. The board would rather
+            # show nothing than shade a week nobody agreed to.
+            tz = str(u.get("timezone", "")).strip()
+            configured = bool(u.get("availability_set")) and bool(tz)
+            person["availability_set"] = configured
+            person["timezone"] = tz
+            if configured:
+                person["availability"] = u.get("availability") or {}
+                person["daily_meetings"] = u.get("daily_meetings") or []
+                person["days_off"] = u.get("days_off") or []
         out.append(person)
     return {"people": out}
 
@@ -479,25 +498,59 @@ def add_row(body: dict | None = None, user: dict = Depends(_access)):
     return row
 
 
+def detach_team(team_name: str) -> int:
+    """A team has been deleted — strip its name off every interview that was handed to it.
+
+    Without this the Team cell keeps pointing at a team that no longer exists: the board shows a call
+    assigned to a phantom, `_team_people()` resolves it to nobody, and every notification meant for that
+    team's manager and members goes silently nowhere. Exactly the failure the orphaned Creater names
+    caused. The CALLER is left alone — if a person was picked, the call is still theirs to make; only
+    the team it was routed through is gone.
+
+    Returns the number of rows changed. Never raises: losing a team must not fail the delete.
+    """
+    name = str(team_name or "").strip()
+    if not name:
+        return 0
+    touched: list[dict] = []
+    try:
+        with _lock:
+            grid = _read_unlocked()
+            for row in grid["rows"]:
+                cells = row.get("cells") or {}
+                if str(cells.get("c_team", "")).strip().lower() == name.lower():
+                    cells["c_team"] = ""
+                    row["cells"] = cells
+                    touched.append(row)
+            if touched:
+                _write_unlocked(grid)
+    except Exception:
+        log.exception("Could not detach interviews from the deleted team %r", name)
+        return 0
+
+    for row in touched:                       # tell every open board, so nobody keeps the stale name
+        hub.broadcast_soon({"type": "row", "row": row}, live_notify.row_audience(row.get("cells") or {}))
+    return len(touched)
+
+
 def _check_workflow(before: dict, patch: dict) -> None:
-    """Interview workflow rules, enforced server-side so the UI can't be worked around:
+    """Interview workflow rules, enforced server-side so the UI can't be worked around.
 
-      1. Approved can only be 'Confirmed' once a Caller is assigned — you can't confirm a call that
-         nobody is going to make. Unassigned calls stay 'Pending'.
-      2. Status can only be set once the call is 'Confirmed' — no outcome before it's even agreed.
+    ONE rule: Approved can only be 'Confirmed' once a Caller is assigned — you cannot confirm a call
+    that nobody is going to make. Unassigned calls stay 'Pending'.
 
-    Checked against the row as it will look AFTER the patch, so setting the caller and confirming in
+    Checked against the row as it will look AFTER the patch, so assigning the caller and confirming in
     the same write is fine.
+
+    Status is deliberately NOT gated. It used to require the call to be 'Confirmed' first, which meant a
+    call that fell through before anyone confirmed it could never be marked Cancelled or On hold — the
+    outcome was locked behind an agreement that never happened. Status now stands on its own.
     """
     after = {**before, **patch}
     caller = str(after.get("c_caller", "") or "").strip()
-    approved = str(after.get("c_approved", "") or "").strip()
 
     if str(patch.get("c_approved", "") or "").strip() == "Confirmed" and not caller:
         raise HTTPException(status_code=400, detail="Assign a caller before confirming this interview.")
-
-    if str(patch.get("c_status", "") or "").strip() and approved != "Confirmed":
-        raise HTTPException(status_code=400, detail="Confirm the interview before setting its status.")
 
 
 @router.patch("/rows/{row_id}")
