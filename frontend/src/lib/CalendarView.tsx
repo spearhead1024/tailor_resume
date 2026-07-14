@@ -15,6 +15,7 @@ import {
   minutesOfDay, startOfDay, wallClockIn,
   type Availability, type Band, type DailyMeeting, type MeetingBand,
 } from './availability';
+import { effCol } from './board-cols';
 
 export type CalOpt = { label: string; color?: string; kind?: 'team' | 'member'; group?: string };
 export type CalCol = { id: string; name: string; type: string; options?: CalOpt[] };
@@ -48,6 +49,9 @@ type Props = {
   showPicker: boolean;
   meLabel: string;                      // who is looking — used to shade THEIR hours when there is no picker
   columns: CalCol[];                    // the board's real columns (labels, types, select options)
+  /** Fields this ROLE may not see at all (Creater, and Caller for a solo caller). NOT the table's
+   *  hidden-column set — that one also lists fields which are shown inside another cell. */
+  hideFields?: Set<string>;
   canEdit: (rowId: string, colId: string) => boolean;   // per-cell write permission, same rules as the table
   onOpenRow: (rowId: string) => void;
   onPatch: (rowId: string, colId: string, value: any) => void;
@@ -74,7 +78,11 @@ const DRAG_COL = { move: 'c_sched', resize: 'c_min' } as const;
    Left out on purpose: JD, Feedback and Resume are `button` columns that open their own modals in the
    table (a long thread and a file upload — the popup links across rather than being a worse version of
    them), Created_at is machine-written, and Team is not a field you set: picking a Caller from the tree
-   already places the call with their team. */
+   already places the call with their team.
+
+   Which of these a given person may SEE is not decided here — the board passes `hideFields` (Creater
+   for everyone but an admin; Caller too for a solo caller). This popup used to render the list flat,
+   so a caller could read the creator's name here even though the table hid the column. */
 const DETAIL_FIELDS = [
   'c_index', 'c_sched', 'c_min', 'c_type',
   'c_company', 'c_title', 'c_account', 'c_client',
@@ -195,7 +203,7 @@ function packLanes(evs: Ev[]): void {
 
 export default function CalendarView(props: Props) {
   const { rows, weekFrom, onWeekChange, userTz, people, teams, canSchedule, canSearch, showPicker, meLabel,
-          columns, canEdit, onOpenRow, onPatch, onDelete, onCreateAt, onReschedule, onResizeRow,
+          columns, hideFields, canEdit, onOpenRow, onPatch, onDelete, onCreateAt, onReschedule, onResizeRow,
           lockOf, onClaim, onRelease } = props;
   const [detailId, setDetailId] = useState<string>('');
   // Re-read the row from `rows` every render, so a live edit by somebody else updates the open popup
@@ -873,7 +881,7 @@ export default function CalendarView(props: Props) {
       </aside>
 
       {detailRow && (
-        <EventDetail row={detailRow} columns={columns} canEdit={canEdit} userTz={userTz}
+        <EventDetail row={detailRow} columns={columns} hideFields={hideFields} canEdit={canEdit} userTz={userTz}
           onPatch={onPatch} onDelete={onDelete} onClose={() => { onRelease(); setDetailId(''); }}
           lockOf={lockOf} onClaim={onClaim} onRelease={onRelease}
           onOpenRow={(rid) => { onRelease(); setDetailId(''); onOpenRow(rid); }} />
@@ -889,9 +897,9 @@ export default function CalendarView(props: Props) {
  * Fields the caller is not allowed to touch are disabled rather than hidden — seeing that the Company
  * is "Acme" and simply not being able to change it is more useful than the field vanishing.
  */
-function EventDetail({ row, columns, canEdit, userTz, onPatch, onDelete, onOpenRow, onClose,
+function EventDetail({ row, columns, hideFields, canEdit, userTz, onPatch, onDelete, onOpenRow, onClose,
                       lockOf, onClaim, onRelease }: {
-  row: CalRow; columns: CalCol[]; canEdit: (rowId: string, colId: string) => boolean;
+  row: CalRow; columns: CalCol[]; hideFields?: Set<string>; canEdit: (rowId: string, colId: string) => boolean;
   userTz: string; onPatch: (rowId: string, colId: string, v: any) => void;
   onDelete?: (rowId: string) => void; onOpenRow: (rowId: string) => void; onClose: () => void;
   lockOf: (rowId: string, colId: string) => string | null;
@@ -920,8 +928,10 @@ function EventDetail({ row, columns, canEdit, userTz, onPatch, onDelete, onOpenR
   const title = String(row.cells?.c_company || row.cells?.c_title || 'Interview').trim();
 
   const field = (cid: string) => {
-    const col = colById[cid];
-    if (!col) return null;
+    if (hideFields?.has(cid)) return null;          // not for this role — see hideFields
+    const raw = colById[cid];
+    if (!raw) return null;
+    const col = effCol(raw, row.cells);             // Approved can't be Confirmed with nobody assigned
     // Somebody else is in this exact field right now. The server would refuse our write (409) — so make
     // it read-only and name them, rather than letting us type into something that will be thrown away.
     const heldBy = lockOf(row.id, cid);

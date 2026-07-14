@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
 import { api } from '../api/client';
 import { useToast } from '../lib/toast';
 import { useAuth, loadCurrentUser } from '../lib/auth';
+import { BROWSER_TZ, TimezonePicker, tzDisplay } from '../lib/TimezonePicker';
 
 type ProfileForm = {
   full_name: string; email: string; country: string;
@@ -23,6 +23,7 @@ export default function Account() {
   const [form, setForm] = useState<ProfileForm>({
     full_name: '', email: '', country: '', telegram: '', whatsapp: '', discord: '', emergency_contacts: '',
   });
+  const [tz, setTz] = useState('');
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
 
@@ -37,6 +38,7 @@ export default function Account() {
       telegram: user.telegram || '', whatsapp: user.whatsapp || '', discord: user.discord || '',
       emergency_contacts: user.emergency_contacts || '',
     });
+    setTz(user.timezone || '');
   }, [user]);
 
   if (!user) return <div><span className="spinner" /> Loading…</div>;
@@ -47,7 +49,7 @@ export default function Account() {
   const save = async () => {
     setSaving(true);
     try {
-      await api.patch('/api/auth/me', form);
+      await api.patch('/api/auth/me', { ...form, timezone: tz });
       await loadCurrentUser();
       toast('Profile saved', 'success');
     } catch (e: any) {
@@ -132,11 +134,11 @@ export default function Account() {
           <div className="field"><label>Location</label><input value={form.country} onChange={(e) => set('country', e.target.value)} placeholder="e.g. Romania" /></div>
           <div className="field">
             <label>Time zone</label>
-            {/* Set on the Availability page, next to the hours it gives meaning to — a time is
-                nothing without the clock it is on, and the board needs both. */}
-            <Link to="/availability" className="link" style={{ fontSize: '0.85rem' }}>
-              {user?.timezone ? `${user.timezone} — change on Availability` : 'Set it on the Availability page'}
-            </Link>
+            <TimezonePicker value={tz} onChange={setTz} />
+            {BROWSER_TZ && tz !== BROWSER_TZ && (
+              <span className="link" style={{ fontSize: '0.78rem', display: 'inline-block', marginTop: 4, cursor: 'pointer' }}
+                onClick={() => setTz(BROWSER_TZ)}>Use my detected zone ({tzDisplay(BROWSER_TZ)})</span>
+            )}
           </div>
         </div>
         <div className="field">

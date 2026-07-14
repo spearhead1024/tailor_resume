@@ -1,15 +1,18 @@
 /* Availability — when this person can take calls.
  *
  * Its own page, not a card on the Account page: it is the roster, not the profile, and it is the only
- * thing a caller really has to keep up to date. The board will not show anybody at all until BOTH the
- * hours and the time zone are set, which is why the zone lives here rather than under Account — the
- * hours are meaningless without it.
+ * thing a caller really has to keep up to date.
+ *
+ * Time zone is NOT set here, even though the hours are meaningless without it — it lives on Account,
+ * with the rest of the identity fields, and this page only reads it (to label the hours and to warn
+ * when it's missing). One field, one home: editing it in two places invites the two from drifting.
  */
+import { Link } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import { api } from '../api/client';
 import { useToast } from '../lib/toast';
 import { useAuth, loadCurrentUser } from '../lib/auth';
-import { BROWSER_TZ, TimezonePicker, tzDisplay, gmtLabel } from '../lib/TimezonePicker';
+import { gmtLabel } from '../lib/TimezonePicker';
 
 type DayKey = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat';
 type Slot = { on: boolean; start: string; end: string };
@@ -45,7 +48,7 @@ export default function AvailabilityPage() {
   const { user } = useAuth();
   const toast = useToast();
 
-  const [tz, setTz] = useState('');
+  const tz = user?.timezone || '';        // read-only here — set on Account
   const [avail, setAvail] = useState<Availability>(DEFAULT_AVAIL);
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [daysOff, setDaysOff] = useState<string[]>([]);
@@ -54,7 +57,6 @@ export default function AvailabilityPage() {
 
   useEffect(() => {
     if (!user) return;
-    setTz(user.timezone || '');
     setAvail({ ...DEFAULT_AVAIL, ...((user.availability || {}) as Availability) });
     setMeetings(((user.daily_meetings || []) as Meeting[]).map((m) => ({ ...NEW_MEETING(), ...m })));
     setDaysOff([...(user.days_off || [])].sort());
@@ -92,7 +94,6 @@ export default function AvailabilityPage() {
     setSaving(true);
     try {
       await api.patch('/api/auth/me', {
-        timezone: tz,
         availability: avail,
         // blank titles get a sensible default server-side; drop entries the user emptied out entirely
         daily_meetings: meetings.map((m) => ({ ...m, title: m.title.trim() })),
@@ -116,25 +117,24 @@ export default function AvailabilityPage() {
         zone are set.
       </p>
 
-      {/* Time zone — first, because every time below is on THIS clock */}
+      {/* Time zone lives on Account — this is a read-only reminder, because every time below is on
+          that clock and it's easy to forget it needs setting at all. */}
       <div className="card" style={{ marginBottom: '1rem' }}>
         <h2 style={{ marginTop: 0 }}>Time zone</h2>
         <p className="muted" style={{ marginTop: 0, fontSize: '0.84rem' }}>
           Every time on this page is on <strong>your own clock</strong>. Your colleagues see them
           converted to theirs, so this has to be right.
         </p>
-        <div style={{ maxWidth: 460 }}>
-          <TimezonePicker value={tz} onChange={setTz} />
-          {BROWSER_TZ && tz !== BROWSER_TZ && (
-            <span className="link" style={{ fontSize: '0.8rem', display: 'inline-block', marginTop: 6, cursor: 'pointer' }}
-              onClick={() => setTz(BROWSER_TZ)}>Use my detected zone ({tzDisplay(BROWSER_TZ)})</span>
-          )}
-          {!tz && (
-            <p style={{ color: '#f59e0b', fontSize: '0.8rem', marginTop: 8 }}>
-              ⚠ Without a time zone your hours mean nothing, and you will not appear on the calendar.
-            </p>
-          )}
-        </div>
+        {tz ? (
+          <p style={{ margin: 0, fontSize: '0.9rem' }}>
+            <strong>{gmtLabel(tz)}</strong> — <Link to="/account" className="link">change on Account</Link>
+          </p>
+        ) : (
+          <p style={{ color: '#f59e0b', fontSize: '0.8rem', margin: 0 }}>
+            ⚠ No time zone set — your hours mean nothing without one, and you will not appear on the
+            calendar. <Link to="/account" className="link">Set it on Account</Link>.
+          </p>
+        )}
       </div>
 
       {/* Weekly hours */}

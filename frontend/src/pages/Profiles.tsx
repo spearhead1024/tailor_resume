@@ -2,6 +2,7 @@ import { useState, useRef } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useAuth } from '../lib/auth';
+import { CONTRACTS, CURRENCIES, PERIODS, contractText, salaryText } from '../lib/profile-terms';
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -39,8 +40,16 @@ const BLANK_PROFILE = {
   status: 'active',
   total_years_of_experience: 0,
   summary_seed: '',
+  // Who they are on paper (DOB) and on what terms they can be hired. A new profile must carry these
+  // keys or a profile created from this page starts out with whatever the server defaults to rather
+  // than what the form is showing.
+  date_of_birth: '',
+  contract_types: [] as string[],
+  b2b_country: '',
+  expected_salary: { min: 0, max: 0, currency: 'USD', period: 'year' },
   generation_settings: { summary_char_count: 650, skills_count: 85, bullet_counts: [] as number[] },
 };
+
 
 export default function Profiles() {
   const { user } = useAuth();
@@ -332,6 +341,76 @@ export default function Profiles() {
                     )
                     : <ReadValue value={(selected.status || 'active').toUpperCase()} />}
                 </Field>
+                <Field label="Date of birth">
+                  {editing
+                    ? <input type="date" value={selected.date_of_birth || ''}
+                        onChange={(e) => setSelected({ ...selected, date_of_birth: e.target.value })} />
+                    : <ReadValue value={selected.date_of_birth} />}
+                </Field>
+              </div>
+
+              {/* ── How they can be engaged ── */}
+              <div className="row">
+                <Field label="Can work as">
+                  {editing ? (
+                    <div style={{ display: 'flex', gap: 14, alignItems: 'center', padding: '6px 0', flexWrap: 'wrap' }}>
+                      {CONTRACTS.map((c) => (
+                        <label key={c.id} style={{ display: 'flex', gap: 5, alignItems: 'center', fontWeight: 400, cursor: 'pointer' }}>
+                          <input type="checkbox" checked={(selected.contract_types || []).includes(c.id)}
+                            onChange={(e) => {
+                              const cur: string[] = selected.contract_types || [];
+                              const next = e.target.checked ? [...cur, c.id] : cur.filter((x) => x !== c.id);
+                              setSelected({
+                                ...selected,
+                                contract_types: next,
+                                // drop the country when B2B goes away, or it lingers where nothing shows it
+                                b2b_country: next.includes('b2b') ? (selected.b2b_country || '') : '',
+                              });
+                            }} />
+                          {c.label}
+                        </label>
+                      ))}
+                    </div>
+                  ) : <ReadValue value={contractText(selected.contract_types, selected.b2b_country)} />}
+                </Field>
+                {(selected.contract_types || []).includes('b2b') && (
+                  <Field label="B2B country">
+                    {editing
+                      ? <input placeholder="Romania" value={selected.b2b_country || ''}
+                          onChange={(e) => setSelected({ ...selected, b2b_country: e.target.value })} />
+                      : <ReadValue value={selected.b2b_country} />}
+                  </Field>
+                )}
+              </div>
+
+              {/* ── What they expect to be paid ── */}
+              <div className="row">
+                <Field label="Expected salary (min)">
+                  {editing
+                    ? <input type="number" min={0} value={selected.expected_salary?.min ?? 0}
+                        onChange={(e) => setSelected({ ...selected, expected_salary: { ...(selected.expected_salary || {}), min: Number(e.target.value) } })} />
+                    : <ReadValue value={salaryText(selected.expected_salary)} />}
+                </Field>
+                {editing && (
+                  <>
+                    <Field label="Max">
+                      <input type="number" min={0} value={selected.expected_salary?.max ?? 0}
+                        onChange={(e) => setSelected({ ...selected, expected_salary: { ...(selected.expected_salary || {}), max: Number(e.target.value) } })} />
+                    </Field>
+                    <Field label="Currency">
+                      <select value={selected.expected_salary?.currency || 'USD'}
+                        onChange={(e) => setSelected({ ...selected, expected_salary: { ...(selected.expected_salary || {}), currency: e.target.value } })}>
+                        {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="Per">
+                      <select value={selected.expected_salary?.period || 'year'}
+                        onChange={(e) => setSelected({ ...selected, expected_salary: { ...(selected.expected_salary || {}), period: e.target.value } })}>
+                        {PERIODS.map((x) => <option key={x} value={x}>{x}</option>)}
+                      </select>
+                    </Field>
+                  </>
+                )}
               </div>
 
               {/* ── Work history ── */}

@@ -156,7 +156,17 @@ def _write_state(state: dict) -> None:
 
 # ── caller resolution (the Caller cell → a user record) ──────────────────────
 def _resolve_person(identity: str) -> dict | None:
-    """Match a Caller cell value (username or full name, case-insensitive) to a user."""
+    """Match a Caller/Creater cell value (username or full name, case-insensitive) to a user.
+
+    The board stores a DISPLAY name, not an id, and full names are not unique. So two people called
+    "John Smith" — or one whose full name is another's username — are genuinely ambiguous here, and a
+    reminder/creator ping resolved to the wrong one lands on a person who was never on the call while
+    the real caller hears nothing. We cannot invent the missing id, but we can refuse to guess: an
+    ambiguous name resolves to NOBODY (and says so), which fails loudly instead of misdelivering.
+
+    Exact-username stays the fast, unambiguous path — usernames ARE unique — so this only affects the
+    full-name fallback, and only when a name really is shared.
+    """
     needle = str(identity or "").strip().lower()
     if not needle:
         return None
@@ -164,9 +174,15 @@ def _resolve_person(identity: str) -> dict | None:
     u = storage.get_user_by_username(needle)
     if u:
         return u
-    for x in storage.get_users():
-        if needle in (str(x.get("username", "")).strip().lower(), str(x.get("full_name", "")).strip().lower()):
-            return x
+    matches = [x for x in storage.get_users()
+               if needle in (str(x.get("username", "")).strip().lower(),
+                             str(x.get("full_name", "")).strip().lower())]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        log.warning("Notification target %r is ambiguous — %d users share it (%s); not delivering to "
+                    "a guess. Give the Caller cell a unique name.", identity, len(matches),
+                    ", ".join(str(m.get("username")) for m in matches))
     return None
 
 

@@ -93,16 +93,39 @@ def _write(data: dict) -> None:
 
 
 def add_subscription(user_id: str, sub: dict) -> None:
-    """Store (or refresh) one browser subscription for a user, de-duped by endpoint."""
+    """Store (or refresh) one browser subscription for a user.
+
+    An endpoint identifies a BROWSER, not an account, so it can belong to exactly one user at a time
+    and claiming it here takes it away from whoever had it before. Sign out of a shared laptop and
+    sign in as somebody else and the browser hands the app the very same endpoint — it de-dupes only
+    within one user, so the endpoint used to end up filed under BOTH accounts, and stayed under every
+    account that had ever signed in there. Anything pushed to any of them was then delivered to that
+    one machine: a caller's interview reminder ringing on a colleague's laptop, addressed to them by
+    name. (This is not hypothetical — one endpoint in the live store was filed under 16 accounts.)
+    """
     endpoint = str((sub or {}).get("endpoint", "")).strip()
     if not endpoint:
         return
     with _lock:
         data = _read()
+        stolen = []
+        for other, subs in list(data.items()):
+            if other == user_id:
+                continue
+            kept = [s for s in subs if s.get("endpoint") != endpoint]
+            if len(kept) != len(subs):
+                stolen.append(other)
+                if kept:
+                    data[other] = kept
+                else:
+                    data.pop(other, None)
         subs = [s for s in data.get(user_id, []) if s.get("endpoint") != endpoint]
         subs.append(sub)
         data[user_id] = subs
         _write(data)
+    if stolen:
+        log.info("Push endpoint re-claimed by %s; removed from %d previous owner(s): %s",
+                 user_id, len(stolen), ", ".join(stolen))
 
 
 def remove_subscription(user_id: str, endpoint: str) -> None:

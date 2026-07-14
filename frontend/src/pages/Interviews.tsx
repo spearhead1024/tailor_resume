@@ -6,7 +6,9 @@ import { BoardLive, liveClient, subscribeLive, subscribeLiveState, type LiveMsg,
 import { addDays } from '../lib/availability';
 import { dateKeyIn, thisWeek } from '../lib/board-dates';
 import CalendarView, { type CalPerson } from '../lib/CalendarView';
+import ProfileCard from '../lib/ProfileCard';
 import { insertRowAt, removeRow, upsertRow } from '../lib/board-merge';
+import { effCol } from '../lib/board-cols';
 import { disablePush, enablePush, initPushSound, notifPermission, pushSupported, sendTestPush, syncPushIfGranted } from '../lib/push';
 import { useAuth } from '../lib/auth';
 
@@ -26,14 +28,29 @@ type Grid = { columns: Col[]; rows: Row[] };
     Position/Title, Job Description, Creater(last). Hidden/merged-secondary columns keep their
     relative order after the visible ones. Applied to the grid state on load so render + keyboard +
     clipboard all agree on the order. */
+/* ONE board, left → right:
+     Index │ Scheduled_at (min) │ Call Type │ Company Info │ Position/Title │ Job Description │
+     Profile Name │ Caller/Approved │ Status │ Creater/Created_At
+
+   Everybody sees this board. The roles differ only in what is TAKEN AWAY from it, and in what may be
+   typed into it — never in the order of the columns, which used to be shuffled per role and made two
+   people looking at "the board" mean two different pictures.
+
+     admin        everything
+     manager      no Creater
+     team member  no Creater
+     solo caller  no Creater, no Caller (every row on their board is already theirs)
+
+   Caller carries Approved beneath it — who makes the call and whether the call is agreed are two
+   halves of one decision. Status is the OUTCOME, a different question, so it stands alone.
+   A stacked column is ranked by its PRIMARY (c_caller), so c_approved needs no rank here. */
 const COL_RANK_ADMIN: Record<string, number> = {
-  c_index: 0, c_sched: 1, c_type: 2, c_company: 3, c_caller: 4, c_account: 5, c_title: 6, c_jd: 7, c_creater: 8,
+  c_index: 0, c_sched: 1, c_type: 2, c_company: 3, c_title: 4, c_jd: 5, c_account: 6,
+  c_caller: 7, c_status: 8, c_creater: 9,
 };
-// Caller view: the Caller & Creater columns are dropped; Approved + Status are combined into
-// one stacked column (Approved over Status), placed last — after Job Description.
-const COL_RANK_CALLER: Record<string, number> = {
-  c_index: 0, c_sched: 1, c_type: 2, c_company: 3, c_account: 4, c_title: 5, c_jd: 6, c_approved: 7,
-};
+// Solo caller: with the Caller column gone there is nothing for Approved to stack under, so Approved
+// takes Caller's slot as a column of its own. Everything else is in exactly the same place.
+const COL_RANK_CALLER: Record<string, number> = { ...COL_RANK_ADMIN, c_approved: 7 };
 function orderColumns(g: Grid): Grid {
   const rank = (id: string) => (id in L.COL_RANK ? L.COL_RANK[id] : 100);   // unranked (hidden/custom) → after, stable
   return { ...g, columns: [...(g.columns || [])].sort((a, b) => rank(a.id) - rank(b.id)) };
@@ -84,7 +101,9 @@ const SEL = '#2383E2';        // Coda/Sheets selection blue
 // Fixed text columns: no ⋯ settings menu (can't be renamed/retyped/deleted). Still resizable + editable cells.
 // Merged primaries are locked so an admin can't rename/delete them out of sync with the MERGED map below
 // (admins can still edit their select-option lists via the ⋯ menu).
-const LOCKED_COLS = new Set(['c_index', 'c_title', 'c_skill', 'c_client', 'c_type', 'c_sched', 'c_caller', 'c_creater', 'c_account', 'c_jd', 'c_company']);
+// (c_approved and c_status are locked too: the layout maps, the filter bar and the server's workflow
+//  rule all name them, so deleting either from the schema would break the board.)
+const LOCKED_COLS = new Set(['c_index', 'c_title', 'c_skill', 'c_client', 'c_type', 'c_sched', 'c_caller', 'c_creater', 'c_account', 'c_jd', 'c_company', 'c_approved', 'c_status']);
 // Stacked columns: render { primary: secondary } as ONE column with two stacked cells
 // (primary on top, secondary below). The secondary column is hidden as a standalone column
 // but stays in the schema so its cells still save. Each sub-cell keeps its own type.
@@ -98,24 +117,39 @@ const MERGED_ADMIN: Record<string, SubField[]> = {
   c_company: [{ colId: 'c_company', row: 0 }, { colId: 'c_salary', row: 1 }],                     // Company Info / Salary Range
   c_type:    [{ colId: 'c_type', row: 0 }, { colId: 'c_client', row: 1 }],                        // Call Type / Interviewer(role)
   c_sched:   [{ colId: 'c_sched', row: 0 }, { colId: 'c_min', row: 0, width: 35, icon: '🕐', hdText: '(min)' }, { colId: 'c_link', row: 1, label: 'Meeting Link' }],  // Scheduled_at | 🕐 (min) / Meeting Link
-  c_caller:  [{ colId: 'c_caller', row: 0 }, { colId: 'c_approved', row: 1 }],
-  c_creater: [{ colId: 'c_creater', row: 0 }, { colId: 'c_status', row: 1 }],                    // Creater / Status
+  // Caller carries Approved: whether a call is agreed only means anything once you know WHO is making
+  // it, so the two read together. Status — how the call went — is a separate question and stands alone.
+  c_caller:  [{ colId: 'c_caller', row: 0 }, { colId: 'c_approved', row: 1 }],                     // Caller / Approved
+  c_creater: [{ colId: 'c_creater', row: 0 }, { colId: 'c_created', row: 1, label: 'Created_At' }], // Creater / Created_At
   c_account: [{ colId: 'c_account', row: 0 }, { colId: 'c_resume', row: 1, label: 'Resume' }],     // Profile Name(Country) / Resume
   c_jd:      [{ colId: 'c_jd', row: 0 }, { colId: 'c_feedback', row: 1, label: 'Chat & Feedback' }], // Job Description / Chat & Feedback
 };
-// Caller view: the Caller and Creater columns are admin-only and dropped entirely. Approved &
-// Status are combined into one stacked column (Approved over Status), styled like the other
-// two-line cells (Company Info / Salary, Profile Name / Resume, …). Every other stack is
-// identical to the admin view (Scheduled_at keeps min + Meeting Link, etc.).
-const MERGED_CALLER: Record<string, SubField[]> = {
-  c_title:    MERGED_ADMIN.c_title,
-  c_company:  MERGED_ADMIN.c_company,
-  c_type:     MERGED_ADMIN.c_type,
-  c_sched:    MERGED_ADMIN.c_sched,
-  c_account:  MERGED_ADMIN.c_account,
-  c_jd:       MERGED_ADMIN.c_jd,
-  c_approved: [{ colId: 'c_approved', row: 0 }, { colId: 'c_status', row: 1 }],   // Approved / Status
-};
+// A manager and a team member get the admin's board, exactly — every stack, in the same order. What
+// they cannot do with it is a question of permission (see MANAGER_EDITABLE / CALLER_EDITABLE), not of
+// layout, and the two were being confused.
+const MERGED_MANAGER = MERGED_ADMIN;
+// A solo caller loses the Caller stack — and losing it means losing the stack's SECOND field too, so
+// Approved would vanish with it. Drop the key and Approved stands on its own instead (COL_RANK_CALLER
+// puts it in Caller's slot). Every other stack is untouched.
+const MERGED_CALLER: Record<string, SubField[]> = Object.fromEntries(
+  Object.entries(MERGED_ADMIN).filter(([colId]) => colId !== 'c_caller'),
+);
+// Written by the machine, never by a person — visible (Created_At now sits under Creater) but not
+// editable by anyone, admin included. Showing a value is not the same as inviting someone to retype it.
+const SYSTEM_COLS = new Set<string>(['c_created']);
+/** What a cell DISPLAYS, which is not always what the row stores.
+ *
+ *  There is no Team column on the board — the Caller cell IS the assignment. A call can be handed to a
+ *  team with nobody picked yet, and that is a real assignment waiting on the manager to choose someone.
+ *  So until a person is named, the Caller cell shows the team; otherwise a team-assigned call looks
+ *  exactly like an unassigned one.
+ *
+ *  Shared by BOTH renderers on purpose: this fallback used to live inside the stacked-cell path only,
+ *  and disappeared the moment Caller became a plain column. */
+function displayValue(row: Row, colId: string): any {
+  if (colId === 'c_caller' && !String(row.cells?.c_caller ?? '').trim()) return row.cells?.c_team ?? '';
+  return row.cells?.[colId];
+}
 // Displayed names that differ from the persisted column name (display-only override; used for headers AND cells).
 const DISPLAY_NAME: Record<string, string> = { c_account: 'Profile Name(Country)', c_jd: 'Job Description', c_feedback: 'Chat & Feedback' };
 // Select columns offered as dropdown filters above the table (c_caller is admin-only).
@@ -131,25 +165,34 @@ function buildStackHidden(merged: Record<string, SubField[]>, extra: string[] = 
 // the Caller dropdown, and used to scope a manager's board), but it is never shown as its own
 // column — the Caller cell displays the team until a person is assigned.
 const STACK_HIDDEN_ADMIN = buildStackHidden(MERGED_ADMIN, ['c_team']);
-// Callers also hide the admin-only Caller & Creater columns outright (Status is hidden as a
-// standalone column too — it lives inside the combined Approved/Status cell).
+// Manager & team member: the admin's board minus Creater. Nobody but an admin learns who booked a call.
+const STACK_HIDDEN_MANAGER = buildStackHidden(MERGED_MANAGER, ['c_creater', 'c_team']);
+// Solo caller: minus Creater AND minus Caller.
 const STACK_HIDDEN_CALLER = buildStackHidden(MERGED_CALLER, ['c_caller', 'c_creater', 'c_team']);
 
-// The board schema is shared; only these three maps differ by role. `L` is the active layout
+/* Hidden because of WHO YOU ARE, not because of how the cell is laid out.
+ *
+ * STACK_HIDDEN is the wrong set to reuse for this: it also contains c_min, c_link, c_skill, c_salary,
+ * c_client and c_created — fields that ARE shown, just inside somebody else's cell. Handing that set
+ * to the calendar would strip Duration, Meeting Link, Skillset, Salary and Interviewer(role) out of
+ * every popup. ROLE_HIDDEN is only the fields a role may not see at all, so the calendar's detail
+ * popup can hide exactly those and nothing else. */
+const ROLE_HIDDEN_ADMIN = new Set<string>();
+const ROLE_HIDDEN_MANAGER = new Set<string>(['c_creater']);
+const ROLE_HIDDEN_CALLER = new Set<string>(['c_caller', 'c_creater']);
+
+// The board schema is shared; only these maps differ by role. `L` is the active layout
 // for the session, set once at the top of <Interviews> (the app resolves the user before this
 // route mounts, so the role is known on the first render). The pure helpers above and the
 // once-bound document listeners below all read `L`, so render + keyboard + clipboard agree.
-type Layout = { MERGED: Record<string, SubField[]>; STACK_HIDDEN: Set<string>; COL_RANK: Record<string, number> };
-const ADMIN_LAYOUT: Layout = { MERGED: MERGED_ADMIN, STACK_HIDDEN: STACK_HIDDEN_ADMIN, COL_RANK: COL_RANK_ADMIN };
-const CALLER_LAYOUT: Layout = { MERGED: MERGED_CALLER, STACK_HIDDEN: STACK_HIDDEN_CALLER, COL_RANK: COL_RANK_CALLER };
-// Team-manager view: the caller's board PLUS the Caller column, so a manager can hand a call to
-// another caller on their team. Same stacks as a caller (Approved/Status combined); only Creater is
-// hidden. Caller sits right after Company Info, exactly where an admin sees it.
-const STACK_HIDDEN_MANAGER = buildStackHidden(MERGED_CALLER, ['c_creater', 'c_team']);
-const COL_RANK_MANAGER: Record<string, number> = {
-  c_index: 0, c_sched: 1, c_type: 2, c_company: 3, c_caller: 4, c_account: 5, c_title: 6, c_jd: 7, c_approved: 8,
+type Layout = {
+  MERGED: Record<string, SubField[]>; STACK_HIDDEN: Set<string>; COL_RANK: Record<string, number>;
+  ROLE_HIDDEN: Set<string>;
 };
-const MANAGER_LAYOUT: Layout = { MERGED: MERGED_CALLER, STACK_HIDDEN: STACK_HIDDEN_MANAGER, COL_RANK: COL_RANK_MANAGER };
+const ADMIN_LAYOUT: Layout = { MERGED: MERGED_ADMIN, STACK_HIDDEN: STACK_HIDDEN_ADMIN, COL_RANK: COL_RANK_ADMIN, ROLE_HIDDEN: ROLE_HIDDEN_ADMIN };
+// A manager and a team member read the admin's board in the admin's order — same ranks, same stacks.
+const MANAGER_LAYOUT: Layout = { MERGED: MERGED_MANAGER, STACK_HIDDEN: STACK_HIDDEN_MANAGER, COL_RANK: COL_RANK_ADMIN, ROLE_HIDDEN: ROLE_HIDDEN_MANAGER };
+const CALLER_LAYOUT: Layout = { MERGED: MERGED_CALLER, STACK_HIDDEN: STACK_HIDDEN_CALLER, COL_RANK: COL_RANK_CALLER, ROLE_HIDDEN: ROLE_HIDDEN_CALLER };
 let L: Layout = ADMIN_LAYOUT;
 const isMerged = (colId: string): boolean => colId in L.MERGED;
 // How long you must stay in a cell before it is claimed as yours. This is the exact width of the
@@ -421,7 +464,7 @@ function EditInput({ type = 'text', initial, seeded, placeholder, onCommit, onDo
   );
 }
 
-type CellProps = { col: Col; value: any; editing: boolean; onCommit: (v: any) => void; onDone: (dir?: Dir) => void; onOpen?: () => void; seed?: string; avatar?: string; tz?: string };
+type CellProps = { col: Col; value: any; editing: boolean; onCommit: (v: any) => void; onDone: (dir?: Dir) => void; onOpen?: () => void; onPeek?: () => void; seed?: string; avatar?: string; tz?: string };
 
 function TextCell({ col, value, editing, seed, onCommit, onDone }: CellProps) {
   if (editing) {
@@ -449,7 +492,7 @@ const OPT_MENU_H = 300;   // the option list's preferred height
 
 type MenuPos = { up: boolean; top: number; bottom: number; left: number; width: number; maxH: number };
 
-function SelectCell({ col, value, editing, seed, onCommit, onDone, onOpen }: CellProps) {
+function SelectCell({ col, value, editing, seed, onCommit, onDone, onOpen, onPeek }: CellProps) {
   const cellRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const [q, setQ] = useState('');
@@ -507,6 +550,12 @@ function SelectCell({ col, value, editing, seed, onCommit, onDone, onOpen }: Cel
   const pick = (label: string) => { onCommit(label); onDone(); };
   return (
     <div ref={cellRef} className="iv-cell" style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 4, padding: '4px 8px', minHeight: 32 }}>
+      {/* Peek at the person behind the call. Sits to the LEFT of the value, like the 🌐 on a meeting
+          link. onMouseDown is swallowed so opening the card doesn't also select/edit the cell. */}
+      {onPeek && (
+        <button className="iv-peekbtn" title="View profile information" onMouseDown={stop}
+          onClick={(e) => { e.stopPropagation(); onPeek(); }}>👁</button>
+      )}
       <span style={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>{cur
         ? <Pill opt={cur} />
         : (value ? <span className="muted" style={{ fontSize: '0.82rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block', maxWidth: '100%' }} title={String(value)}>{String(value)}</span> : null)}</span>
@@ -856,10 +905,10 @@ function ChatModal({ title, subtitle, value, me, readOnly, rowId, onSync, onClos
   );
 }
 
-function CellEditor({ col, value, editing, seed, avatar, tz, onCommit, onDone, onOpen }: CellProps) {
+function CellEditor({ col, value, editing, seed, avatar, tz, onCommit, onDone, onOpen, onPeek }: CellProps) {
   if (col.id === 'c_resume') return <ResumeCell value={value} editing={editing} seed={seed} onCommit={onCommit} onDone={onDone} />;   // Resume → downloadable link
   switch (col.type) {
-    case 'select': return <SelectCell col={col} value={value} editing={editing} seed={seed} onCommit={onCommit} onDone={onDone} onOpen={onOpen} />;
+    case 'select': return <SelectCell col={col} value={value} editing={editing} seed={seed} onCommit={onCommit} onDone={onDone} onOpen={onOpen} onPeek={onPeek} />;
     case 'person': return <PersonCell value={value} editing={editing} seed={seed} avatar={avatar} onCommit={onCommit} onDone={onDone} />;
     case 'url': return <LinkCell value={value} editing={editing} seed={seed} onCommit={onCommit} onDone={onDone} />;
     case 'file': return <FileCell value={value} editing={editing} seed={seed} onCommit={onCommit} onDone={onDone} />;
@@ -873,7 +922,7 @@ function CellEditor({ col, value, editing, seed, avatar, tz, onCommit, onDone, o
 /** One merged cell rendered from a list of sub-fields laid out in two visual rows (the top row may
     be split into left|right). Each sub-field is individually selectable + editable; the grid owns
     selection (subState) and editing (editSub). */
-function StackedCell({ fields, row, subState, editSub, editSeed, meName, avatarByName, tz, lockOf, onSelect, onEdit, onDone, onOpenModal, commit }: {
+function StackedCell({ fields, row, subState, editSub, editSeed, meName, avatarByName, tz, lockOf, onSelect, onEdit, onDone, onOpenModal, onPeekProfile, commit }: {
   fields: { col: Col; sub: number; row: 0 | 1; width?: number }[];
   row: Row; subState: SubState[]; editSub: number | null; editSeed?: string;
   meName?: string; avatarByName?: Record<string, string>; tz?: string;
@@ -883,27 +932,15 @@ function StackedCell({ fields, row, subState, editSub, editSeed, meName, avatarB
   onEdit: (sub: number) => void;
   onDone: (dir?: Dir) => void;
   onOpenModal?: (col: Col) => void;
+  /** Open the profile card for the Profile Name in this row (the 👁 on the c_account cell). */
+  onPeekProfile?: (label: string) => void;
   commit: (colId: string, v: any) => void;
 }) {
   const cellFor = (f: { col: Col; sub: number; width?: number }) => {
     const { col: rawCol, sub } = f;
-    // Workflow rule (the server enforces it too — this just stops the UI offering a choice that
-    // would be refused): Approved can't be 'Confirmed' until a Caller is assigned, so drop that
-    // option and leave Pending. Status is locked until Confirmed — handled by canEditCell, NOT by
-    // emptying its options, which would also strip the coloured pill off an already-set Status.
-    // A legacy row that is somehow already Confirmed with no caller keeps its option (and its pill).
-    const hasCaller = !!String(row.cells?.c_caller ?? '').trim();
-    const alreadyConfirmed = String(row.cells?.c_approved ?? '').trim() === 'Confirmed';
-    const col: Col = (rawCol.id === 'c_approved' && !hasCaller && !alreadyConfirmed)
-      ? { ...rawCol, options: rawCol.options.filter((o) => o.label !== 'Confirmed') }
-      : rawCol;
-
+    const col: Col = effCol(rawCol, row.cells);   // Approved can't be Confirmed with nobody assigned
     const isSelect = col.type === 'select';
-    // There is no Team column on the board — the Caller cell IS the assignment. Until a person is
-    // picked it shows the team the call was handed to, so a team-assigned row never looks blank.
-    const value = (col.id === 'c_caller' && !row.cells?.c_caller)
-      ? (row.cells?.c_team ?? '')
-      : row.cells?.[col.id];
+    const value = displayValue(row, col.id);
     const empty = value === '' || value === null || value === undefined;
     const h: Record<string, any> = {
       onMouseDown: (e: ReactMouseEvent) => { if (e.button !== 0) return; e.stopPropagation(); onSelect(sub, false, e.shiftKey); },  // body click = select (Shift = extend)
@@ -920,7 +957,8 @@ function StackedCell({ fields, row, subState, editSub, editSeed, meName, avatarB
         <CellEditor col={col} value={value} editing={editSub === sub} seed={editSub === sub ? editSeed : undefined} tz={tz}
           avatar={col.type === 'person' ? avatarByName?.[String(value ?? '')] : undefined}
           onCommit={(v) => commit(col.id, v)} onDone={onDone}
-          onOpen={col.type === 'button' ? () => onOpenModal?.(col) : (isSelect ? () => onEdit(sub) : undefined)} />
+          onOpen={col.type === 'button' ? () => onOpenModal?.(col) : (isSelect ? () => onEdit(sub) : undefined)}
+          onPeek={col.id === 'c_account' && !empty && onPeekProfile ? () => onPeekProfile(String(value)) : undefined} />
         {heldBy && <span className="iv-lock-tag" title={`${heldBy} is editing this cell`}>✎ {heldBy}</span>}
       </div>
     );
@@ -1138,6 +1176,7 @@ export default function Interviews() {
   const [grid, setGrid] = useState<Grid | null>(null);
   const [people, setPeople] = useState<{ label: string; roles?: string[]; team_id?: string; avatar_url?: string }[]>([]);   // all users (Caller dropdown + Creater avatars)
   const [profiles, setProfiles] = useState<{ id: string; name: string; label: string }[]>([]);            // Profiles tab / DB (Account Profile dropdown)
+  const [peekId, setPeekId] = useState<string>('');                                                       // 👁 on a Profile cell → whose card is open
   const [teams, setTeams] = useState<{ id: string; name: string }[]>([]);                                 // caller teams (Team dropdown)
   const [loading, setLoading] = useState(true);
   // Default view: THIS WEEK's calls (plus every unscheduled row — see `matched`). A board that opens
@@ -1219,10 +1258,23 @@ export default function Interviews() {
   const selRef = useRef(sel); useEffect(() => { selRef.current = sel; }, [sel]);
   const aSubRef = useRef(aSub); useEffect(() => { aSubRef.current = aSub; }, [aSub]);
   const editingRef = useRef(editing); useEffect(() => { editingRef.current = editing; }, [editing]);
-  const modalRef = useRef<unknown>(modal); useEffect(() => { modalRef.current = modal || confirmDel; }, [modal, confirmDel]);   // grid keys/clipboard inert while ANY overlay (editor or confirm) is open
+  // Grid keys/clipboard go inert while ANY overlay is open — the editor, the delete confirm, or the
+  // profile card. The card belongs in here too: opening it deliberately does NOT clear the cell
+  // selection, so without this, reading a profile and pressing Delete would wipe the cell still
+  // selected behind it — and save the wipe.
+  const modalRef = useRef<unknown>(modal);
+  useEffect(() => { modalRef.current = modal || confirmDel || peekId; }, [modal, confirmDel, peekId]);
   const toastRef = useRef(toast); useEffect(() => { toastRef.current = toast; }, [toast]);
   const effColsRef = useRef<Record<string, Col>>({});         // effective columns (incl. injected Caller options) for the codec
-  const canEditRef = useRef<(colId: string) => boolean>(() => true);   // per-column write permission (callers are limited) for once-bound listeners
+  /* Write permission for the once-bound document listeners (keyboard, paste, cut, fill).
+   *
+   * It takes the ROW, not just the column. Asking only "may you write this column?" was wrong for
+   * everyone who shares a board: a team member sees their team-mates' calls and may write Approved —
+   * on THEIR OWN calls. The column-only check let Enter open an editor on a team-mate's Approved (the
+   * typed value then vanished on commit, with no error), and let a paste or Ctrl+D spray writes across
+   * team-mates' rows that the server answered with a 404 apiece. It also ignored per-cell locks, so
+   * the same keys walked straight over a cell somebody else was in the middle of editing. */
+  const canWriteRef = useRef<(row: Row | null | undefined, colId: string) => boolean>(() => true);
   const moveActiveRef = useRef<(dir: Dir, extend: boolean) => void>(() => {});
   const fillRef = useRef<(dir: 'down' | 'right') => void>(() => {});
   const anchorTdRef = useRef<HTMLTableCellElement | null>(null);
@@ -1358,7 +1410,7 @@ export default function Interviews() {
         const rmin = Math.min(s.r1, s.r2), rmax = Math.max(s.r1, s.r2);
         const cmin = Math.min(s.c1, s.c2), cmax = Math.max(s.c1, s.c2);
         const isBtn = (cid: string) => g.columns.find((cc) => cc.id === cid)?.type === 'button';   // Job Description / Chat are modal-managed — Delete must not wipe them
-        const clearable = (cid: string) => canEditRef.current(cid) && !isBtn(cid);
+        const clearable = (row: Row, cid: string) => canWriteRef.current(row, cid) && !isBtn(cid);
         const changes: { rowId: string; colId: string; value: any }[] = [];
         for (let r = rmin; r <= rmax; r++) {
           const row = g.rows[r];
@@ -1367,8 +1419,8 @@ export default function Interviews() {
             const col = vis[c];
             if (!col) continue;
             const fields = MERGED[col.id];
-            if (fields) { for (const sub of subsOf(s, asub, r, c, fields.map((f) => f.row))) { const cid = fields[sub].colId; if (clearable(cid)) changes.push({ rowId: row.id, colId: cid, value: '' }); } }
-            else if (clearable(col.id)) changes.push({ rowId: row.id, colId: col.id, value: '' });
+            if (fields) { for (const sub of subsOf(s, asub, r, c, fields.map((f) => f.row))) { const cid = fields[sub].colId; if (clearable(row, cid)) changes.push({ rowId: row.id, colId: cid, value: '' }); } }
+            else if (clearable(row, col.id)) changes.push({ rowId: row.id, colId: col.id, value: '' });
           }
         }
         recordRef.current(changes);
@@ -1379,7 +1431,9 @@ export default function Interviews() {
       const acol = vis[c0];
       const afields = acol ? MERGED[acol.id] : null;
       const tcol = afields ? g.columns.find((c) => c.id === afields[sub0]?.colId) : acol;
-      const editable = !!tcol && tcol.type !== 'button' && tcol.type !== 'checkbox' && canEditRef.current(tcol.id);
+      // …on THIS row: Enter must not open an editor on a cell whose value would be thrown away on commit.
+      const editable = !!tcol && tcol.type !== 'button' && tcol.type !== 'checkbox'
+        && canWriteRef.current(g.rows[s.r1], tcol.id);
 
       if ((e.key === 'Enter' || e.key === 'F2') && editable) {            // edit the active cell, keep its value
         e.preventDefault();
@@ -1421,7 +1475,7 @@ export default function Interviews() {
         if (r < 0 || r >= nrows || li < 0 || li >= logi.length) return;
         const row = g.rows[r]; if (!row) return;
         const lc = logi[li];
-        if (!canEditRef.current(lc.colId)) return;                    // skip read-only columns (caller)
+        if (!canWriteRef.current(row, lc.colId)) return;               // skip what this user can't write HERE
         changes.push({ rowId: row.id, colId: lc.colId, value: parseCell(colOf(lc.colId), str, row.cells?.[lc.colId] ?? '') });
       };
       const rmin = Math.min(s.r1, s.r2), rmax = Math.max(s.r1, s.r2);
@@ -1495,9 +1549,9 @@ export default function Interviews() {
       const vis = g.columns.filter((c) => !STACK_HIDDEN.has(c.id));
       const rmin = Math.min(s.r1, s.r2), rmax = Math.max(s.r1, s.r2), cmin = Math.min(s.c1, s.c2), cmax = Math.max(s.c1, s.c2);
       const isBtn = (colId: string) => g.columns.find((cc) => cc.id === colId)?.type === 'button';   // cut copies '' for buttons → don't clear them
-      const clearable = (colId: string) => !isBtn(colId) && canEditRef.current(colId);              // and never clear a read-only column
+      const clearable = (row: Row, colId: string) => !isBtn(colId) && canWriteRef.current(row, colId);   // and never clear a cell this user can't write
       const changes: { rowId: string; colId: string; value: any }[] = [];
-      for (let r = rmin; r <= rmax; r++) { const row = g.rows[r]; if (!row) continue; for (let c = cmin; c <= cmax; c++) { const col = vis[c]; if (!col) continue; const fields = MERGED[col.id]; if (fields) { for (const sub of subsOf(s, asub, r, c, fields.map((f) => f.row))) { const cid = fields[sub].colId; if (clearable(cid)) changes.push({ rowId: row.id, colId: cid, value: '' }); } } else if (clearable(col.id)) changes.push({ rowId: row.id, colId: col.id, value: '' }); } }
+      for (let r = rmin; r <= rmax; r++) { const row = g.rows[r]; if (!row) continue; for (let c = cmin; c <= cmax; c++) { const col = vis[c]; if (!col) continue; const fields = MERGED[col.id]; if (fields) { for (const sub of subsOf(s, asub, r, c, fields.map((f) => f.row))) { const cid = fields[sub].colId; if (clearable(row, cid)) changes.push({ rowId: row.id, colId: cid, value: '' }); } } else if (clearable(row, col.id)) changes.push({ rowId: row.id, colId: col.id, value: '' }); } }
       recordRef.current(changes); setCopied(null);
     };
     document.addEventListener('copy', onCopy);
@@ -1588,8 +1642,8 @@ export default function Interviews() {
 
   // Callers may write only Approved, Status, and Feedback; admins anything. Backend enforces this too.
   const canEditCol = (colId: string) =>
-    !!me?.is_admin || (isTeamManager ? MANAGER_EDITABLE : CALLER_EDITABLE).has(colId);
-  canEditRef.current = canEditCol;
+    !SYSTEM_COLS.has(colId)
+    && (!!me?.is_admin || (isTeamManager ? MANAGER_EDITABLE : CALLER_EDITABLE).has(colId));
   // Row-level rule. A team caller SEES the whole team's schedule but may only write their own calls
   // (the backend 404s on the rest) — without this the UI would happily let them edit a team-mate's
   // Approved/Status and then silently drop it. Admins and the team's manager may write anywhere in
@@ -1607,15 +1661,14 @@ export default function Interviews() {
     const l = locks[`${rowId}|${colId}`];
     return l && l.user_id !== me?.id ? l.label : null;
   };
+  // Status is NOT gated on Approved. A call can be cancelled, rescheduled or no-showed long before
+  // anyone gets round to confirming it, and locking the outcome behind the paperwork just meant the
+  // board couldn't record what actually happened. (The server dropped the same rule.)
   const canEditCell = (row: Row | null | undefined, colId: string) => {
     if (row && lockedBy(row.id, colId)) return false;   // held by someone else — don't let me overwrite them
-    if (!canEditCol(colId) || !ownsRow(row)) return false;
-    // Status is NOT gated on Approved any more. Requiring 'Confirmed' first meant a call that fell
-    // through before anyone confirmed it could never be marked Cancelled or On hold — the outcome was
-    // locked behind an agreement that never happened. (Confirming still needs a Caller; that rule stays,
-    // and the server enforces it.)
-    return true;
+    return canEditCol(colId) && ownsRow(row);
   };
+  canWriteRef.current = canEditCell;   // the once-bound listeners ask the same question the cells do
   const commitCell = (rowId: string, colId: string, value: any) => {
     // read-only column, or someone else's call (a team caller can see team-mates' rows) → ignore.
     // Fall back to the FULL row set: gridRef holds only the table's visible rows, and the calendar can
@@ -1642,12 +1695,12 @@ export default function Interviews() {
       return;
     }
 
+    // Created_At is stamped by the SERVER when the row is created, and never again. It used to be
+    // back-stamped here the first time anyone typed an Index — which was invisible while the field was
+    // hidden, but now that it shows under Creater it would mean correcting the Index on an old row
+    // silently re-dated it to today. A creation date is a fact about the past; nothing you type later
+    // can change it.
     const changes: CellChange[] = [{ rowId, colId, value }];
-    // Created_at is hidden (shown on Index hover); stamp it the first time a row's Index is set.
-    if (colId === 'c_index' && value !== '' && value != null) {
-      const row = gridRef.current?.rows.find((r) => r.id === rowId);
-      if (row && !row.cells?.c_created) changes.push({ rowId, colId: 'c_created', value: new Date().toISOString() });
-    }
     recordCells(changes);
     // Editing Scheduled_at re-sorts the row to a new position — flag it so the effect above scrolls
     // to + flashes it, making the change (and where the row went) obvious instead of looking unchanged.
@@ -1763,6 +1816,16 @@ export default function Interviews() {
     return teams.find((t) => t.id === String(p?.team_id || '').trim())?.name || '';
   };
   const accountOpts: Opt[] = profiles.map((p, i) => ({ label: p.label, color: PALETTE[i % PALETTE.length] }));   // Account Profile options ← Profiles DB
+
+  // 👁 on a Profile cell. The cell holds the LABEL ("Ivan Montoya(US)"), so map it back to the id the
+  // API wants. A row can hold a label whose profile has since been renamed or deleted — say so instead
+  // of opening an empty card.
+  const peekProfile = (label: string) => {
+    const l = String(label || '').trim();
+    const p = profiles.find((x) => x.label === l) || profiles.find((x) => x.name === l);
+    if (!p) { toast(`No profile named "${l}" any more`, 'error'); return; }
+    setPeekId(p.id);
+  };
   const teamOpts: Opt[] = teams.map((t, i) => ({ label: t.name, color: PALETTE[i % PALETTE.length] }));          // Team options ← teams table
   // Creater is a real person, so offer the real people. Free text let it drift to names that belong to
   // nobody ("Spearhead1024"), and a Creater that resolves to no user silently receives none of the
@@ -1860,12 +1923,17 @@ export default function Interviews() {
   // Scheduled_at -> an absolute instant, or NaN if the call has no time yet.
   const schedMs = (r: Row) => { const s = String(r.cells?.c_sched ?? '').trim(); if (!s) return NaN; const t = new Date(s).getTime(); return isNaN(t) ? NaN : t; };
   const upcomingOnly = !isAdmin && !isTeamManager;
-  const calRows = grid.rows.filter(passOther).filter((r) => {
+  const shown = grid.rows.filter(passOther);          // everything the SEARCH + pill filters let through
+  const calRows = shown.filter((r) => {
     if (!upcomingOnly) return true;
     const ms = schedMs(r);
     return isNaN(ms) || ms >= nowMs;
   });
-  const matched = !hasFilters ? grid.rows : calRows.filter(passDate);
+  // The TABLE keeps the past. `matched` used to be derived from calRows, so the calendar's
+  // upcoming-only rule leaked into the table and a caller's finished calls vanished from the board —
+  // at the exact moment they went looking for them, which is to set the Status of the call they have
+  // just come off. Past calls are greyed here (iv-row--past), not hidden. Only the calendar drops them.
+  const matched = !hasFilters ? grid.rows : shown.filter(passDate);
   // The week the calendar shows. It IS the date filter, so the two views always agree on the period:
   // page the calendar to next week, switch to Table, and you are looking at the same seven days.
   // Snapped back to Monday because in table view you can pick any From date you like.
@@ -1922,11 +1990,15 @@ export default function Interviews() {
     const vc = g.columns.filter((c) => !STACK_HIDDEN.has(c.id));
     const rmin = Math.min(s.r1, s.r2), rmax = Math.max(s.r1, s.r2), cmin = Math.min(s.c1, s.c2), cmax = Math.max(s.c1, s.c2);
     const btn = new Set(g.columns.filter((c) => c.type === 'button').map((c) => c.id));   // JD/Feedback are modal-edited — never a fill source/target
-    const lg = logicalCols(vc).filter((x) => x.c >= cmin && x.c <= cmax && !btn.has(x.colId) && canEditRef.current(x.colId));  // skip read-only cols (caller)
+    const lg = logicalCols(vc).filter((x) => x.c >= cmin && x.c <= cmax && !btn.has(x.colId));
     const at = (r: number, colId: string) => g.rows[r]?.cells?.[colId] ?? '';
+    // The fill READS from any cell in the selection but WRITES only where this user may write — a fill
+    // is per (row, column), so the permission has to be too: a caller dragging Ctrl+D down a shared
+    // team board would otherwise fire one rejected PATCH per team-mate's row.
+    const writable = (row: Row | undefined, colId: string) => !!row && canWriteRef.current(row, colId);
     const changes: CellChange[] = [];
-    if (dir === 'down') { for (const lc of lg) { const top = at(rmin, lc.colId); for (let r = rmin + 1; r <= rmax; r++) { const row = g.rows[r]; if (row) changes.push({ rowId: row.id, colId: lc.colId, value: top }); } } }
-    else { for (let r = rmin; r <= rmax; r++) { const row = g.rows[r]; if (!row || !lg.length) continue; const left = at(r, lg[0].colId); for (let k = 1; k < lg.length; k++) changes.push({ rowId: row.id, colId: lg[k].colId, value: left }); } }
+    if (dir === 'down') { for (const lc of lg) { const top = at(rmin, lc.colId); for (let r = rmin + 1; r <= rmax; r++) { const row = g.rows[r]; if (writable(row, lc.colId)) changes.push({ rowId: row!.id, colId: lc.colId, value: top }); } } }
+    else { for (let r = rmin; r <= rmax; r++) { const row = g.rows[r]; if (!row || !lg.length) continue; const left = at(r, lg[0].colId); for (let k = 1; k < lg.length; k++) if (writable(row, lg[k].colId)) changes.push({ rowId: row.id, colId: lg[k].colId, value: left }); } }
     recordCells(changes);
   };
   fillRef.current = fill;
@@ -1994,7 +2066,11 @@ export default function Interviews() {
       {/* Filter bar */}
       <div className="iv-filters">
         <input className="iv-flt-q" placeholder="Search…" value={flt.q || ''} onChange={(e) => setFlt((f) => ({ ...f, q: e.target.value }))} />
-        {FILTER_COLS.filter((cid) => (!STAFF_ONLY_FILTERS.has(cid) || isAdmin || isTeamManager) && colById[cid]).map((cid) => {
+        {/* Offer a filter for exactly the columns this role can SEE. Asking "is this a staff filter,
+            and are you staff?" got it wrong for a team member: they see the Caller column (it is
+            their team's shared board) but were refused the Caller filter — the one filter that board
+            most needs. Keying off the layout means the two can never disagree again. */}
+        {FILTER_COLS.filter((cid) => (!STAFF_ONLY_FILTERS.has(cid) || !L.ROLE_HIDDEN.has(cid)) && colById[cid]).map((cid) => {
           const col = colById[cid];
           return (
             <FilterDropdown key={cid} label={DISPLAY_NAME[cid] || col.name} options={filterOptionsFor(cid)}
@@ -2049,6 +2125,7 @@ export default function Interviews() {
           onClaim={(rid, cid) => liveRef.current?.startEdit(rid, cid)}
           onRelease={() => liveRef.current?.endEdit()}
           columns={cols}
+          hideFields={L.ROLE_HIDDEN}
           canEdit={(rid, cid) => canEditCell(grid.rows.find((r) => r.id === rid), cid)}
           onPatch={commitCell}
           onDelete={isAdmin ? (rid) => { void deleteRow(rid); } : undefined}
@@ -2128,29 +2205,33 @@ export default function Interviews() {
                           onEdit={(sub) => editCell(ri, c, sub)}
                           onDone={(dir) => { setEditing(null); if (dir) moveActive(dir, false); }}
                           onOpenModal={(mcol) => openModal(row, mcol)}
+                          onPeekProfile={peekProfile}
                           commit={(cid, v) => commitCell(row.id, cid, v)} />
                       </td>
                     );
                   }
                   const ss = cellSel(ri, c);
                   const ce = copiedEdge(ri, c);
-                  const tdStyle: CSSProperties = { padding: 0, ...ss.style };
+                  const tdStyle: CSSProperties = { padding: 0, position: 'relative', ...ss.style };
                   if (ce.length) tdStyle.boxShadow = [ss.style.boxShadow, ...ce].filter(Boolean).join(', ');
                   const isEditing = !!editing && editing.r === ri && editing.c === c && editing.s === 0;
-                  const cval = row.cells?.[col.id];
-                  // Hovering the Index reveals this row's Created_at (now a hidden, hover-only field).
-                  const created = col.id === 'c_index' ? String(row.cells?.c_created ?? '').trim() : '';
-                  if (created) tdStyle.position = 'relative';
+                  const cval = displayValue(row, col.id);   // Caller falls back to the Team it was handed to
+                  // Somebody else is in this cell. The tag only ever showed on STACKED cells, so a plain
+                  // one (Status always, Approved for a solo caller) just went quietly dead in your hands:
+                  // no tag, and double-click did nothing. Same treatment for both kinds of cell now.
+                  const heldBy = lockedBy(row.id, col.id);
                   return (
-                    <td key={col.id} ref={isAnchorCell ? anchorTdRef : undefined} className={ss.className} style={tdStyle}
+                    <td key={col.id} ref={isAnchorCell ? anchorTdRef : undefined}
+                        className={(ss.className || '') + (heldBy ? ' iv-locked' : '')} style={tdStyle}
                         onMouseDown={(e) => selectCell(e, ri, c, 0, false)}
                         onMouseEnter={() => extendTo(ri, c)}
                         onDoubleClick={() => editCell(ri, c, 0)}>
-                      <CellEditor col={col} value={cval} editing={isEditing} seed={isEditing ? editing?.seed : undefined} tz={userTz}
+                      <CellEditor col={effCol(col, row.cells)} value={cval} editing={isEditing} seed={isEditing ? editing?.seed : undefined} tz={userTz}
                         avatar={col.type === 'person' ? avatarByName[String(cval ?? '')] : undefined}
                         onCommit={(v) => commitCell(row.id, col.id, v)} onDone={(dir) => { setEditing(null); if (dir) moveActive(dir, false); }}
-                        onOpen={col.type === 'button' ? () => openModal(row, col) : () => editCell(ri, c, 0)} />
-                      {created ? <span className="iv-created-tip">Created {tsInTz(created, me?.timezone)}</span> : null}
+                        onOpen={col.type === 'button' ? () => openModal(row, col) : () => editCell(ri, c, 0)}
+                        onPeek={col.id === 'c_account' && String(cval ?? '').trim() ? () => peekProfile(String(cval)) : undefined} />
+                      {heldBy && <span className="iv-lock-tag" title={`${heldBy} is editing this cell`}>✎ {heldBy}</span>}
                     </td>
                   );
                 })}
@@ -2176,6 +2257,7 @@ export default function Interviews() {
             onSave={(v) => commitCell(modal.rowId, modal.colId, v)}
             onClose={() => setModal(null)} />
       )}
+      {peekId && <ProfileCard profileId={peekId} onClose={() => setPeekId('')} />}
       {confirmDel && (
         <ConfirmModal title="Delete row?" message="This row and all of its data will be permanently removed."
           confirmLabel="Delete" danger

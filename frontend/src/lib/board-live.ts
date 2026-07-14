@@ -109,9 +109,12 @@ export class BoardLive {
   close(): void {
     this.closed = true;
     this.endEdit();
-    this.cleanup();
     if (this.timer !== null) { window.clearTimeout(this.timer); this.timer = null; }
+    // Close the socket BEFORE cleanup(): cleanup() sets this.ws = null, so doing it first left this
+    // line closing `null` and the real socket stayed open. That is the whole logout leak — the socket
+    // was authenticated as the user who just signed out, and the next user on the tab inherited it.
     try { this.ws?.close(); } catch { /* already gone */ }
+    this.cleanup();
   }
 }
 

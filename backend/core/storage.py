@@ -518,6 +518,46 @@ def _normalize_generation_settings(raw) -> dict:
     }
 
 
+_DOB_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+# How this person can be engaged. In the EU that is 'b2b' — invoicing through their own company, which
+# is always registered in a particular country (see b2b_country) — or plain 'freelancer'. In the US the
+# B2B equivalent is 'c2c' (corp-to-corp), which is its own value because it never carries a country.
+# A person can hold more than one: a Romanian contractor may work B2B *or* freelance.
+_CONTRACT_TYPES = ('b2b', 'c2c', 'freelancer')
+_SALARY_PERIODS = ('hour', 'day', 'month', 'year')
+
+
+def _normalize_contract_types(raw) -> list[str]:
+    if not isinstance(raw, (list, tuple)):
+        return []
+    picked = {str(t).strip().lower() for t in raw}
+    return [t for t in _CONTRACT_TYPES if t in picked]      # whitelist, de-duped, stable order
+
+
+def _normalize_expected_salary(raw) -> dict:
+    """What they expect to be paid. A range, because that is how the question is actually answered."""
+    if not isinstance(raw, dict):
+        return {'min': 0, 'max': 0, 'currency': 'USD', 'period': 'year'}
+
+    def num(v) -> int:
+        try:
+            return max(0, int(float(v)))
+        except Exception:
+            return 0
+
+    lo, hi = num(raw.get('min')), num(raw.get('max'))
+    if hi and lo > hi:                      # a range typed backwards is a typo, not a rejection
+        lo, hi = hi, lo
+    period = str(raw.get('period') or 'year').strip().lower()
+    return {
+        'min': lo,
+        'max': hi,
+        'currency': (str(raw.get('currency') or 'USD').strip().upper()[:3] or 'USD'),
+        'period': period if period in _SALARY_PERIODS else 'year',
+    }
+
+
 def _normalize_profile(item: dict) -> dict:
     work_history = []
     for raw_job in item.get('work_history', []) or []:
@@ -528,6 +568,15 @@ def _normalize_profile(item: dict) -> dict:
             'bullets': [str(b).strip() for b in raw_job.get('bullets', []) if str(b).strip()],
             'legacy_role': raw_job.get('legacy_role', raw_job.get('role', '')),
         })
+    dob = str(item.get('date_of_birth', '') or '').strip()
+    if not _DOB_RE.match(dob):
+        dob = ''
+    contract_types = _normalize_contract_types(item.get('contract_types'))
+    # The country belongs to the B2B entity, so it means nothing without B2B. Clearing it HERE rather
+    # than in the form means no client can leave a stale country behind after un-ticking B2B.
+    b2b_country = str(item.get('b2b_country', '') or '').strip()
+    if 'b2b' not in contract_types:
+        b2b_country = ''
     return {
         'id': item.get('id', ''),
         'name': item.get('name', ''),
@@ -553,6 +602,13 @@ def _normalize_profile(item: dict) -> dict:
         'created_by_user_id': str(item.get('created_by_user_id', '')).strip(),
         'created_by_username': str(item.get('created_by_username', '')).strip(),
         'total_years_of_experience': int(item['total_years_of_experience']) if str(item.get('total_years_of_experience') or '').strip().isdigit() else 0,
+        # Who they are on paper, and on what terms they can be hired. This dict is REBUILT from
+        # scratch on every read and every write — a key that is not named here does not exist, no
+        # matter what a client sends. That is why these four live here and not only in the router.
+        'date_of_birth': dob,
+        'contract_types': contract_types,
+        'b2b_country': b2b_country,
+        'expected_salary': _normalize_expected_salary(item.get('expected_salary')),
         'work_history': work_history,
         'education_history': [
             {

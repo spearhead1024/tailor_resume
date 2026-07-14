@@ -249,9 +249,14 @@ def _default_grid() -> dict:
         {"id": "c_skill", "name": "Skillset", "type": "text", "width": 170},
         {"id": "c_company", "name": "Company Info", "type": "text", "width": 170},
         {"id": "c_salary", "name": "Salary Range", "type": "text", "width": 130},
+        # The interview funnel, in the order it actually happens — the dropdown lists them in this
+        # order, so picking the next step is reading down the list rather than hunting through it.
         {"id": "c_type", "name": "Call Type", "type": "select", "width": 180, "options": [
-            s("Intro 1(Recruiter)", "#6366f1"), s("Tech Call(1)", "#ef4444"),
-            s("Phone Call", "#64748b"), s("Intro + Tech", "#22c55e")]},
+            s("Phone Call", "#64748b"),
+            s("Intro 1(Recruiter)", "#6366f1"), s("Intro 2(Company)", "#a855f7"),
+            s("Intro + Tech", "#22c55e"),
+            s("Tech Call(1)", "#ef4444"), s("Tech Call(2)", "#f59e0b"),
+            s("Final Call", "#06b6d4"), s("Final Call(Hiring)", "#3b82f6")]},
         {"id": "c_client", "name": "Interviewer(role)", "type": "text", "width": 180},
         {"id": "c_min", "name": "Duration(min)", "type": "text", "width": 100},
         {"id": "c_sched", "name": "Scheduled_at", "type": "date", "width": 140},
@@ -261,10 +266,13 @@ def _default_grid() -> dict:
         {"id": "c_approved", "name": "Approved", "type": "select", "width": 120, "options": [
             s("Confirmed", "#22c55e"), s("Pending", "#f59e0b"), s("Rejected", "#ef4444")]},
         {"id": "c_creater", "name": "Creater", "type": "person", "width": 140},
+        # Where the call has got to. Starts before the call exists in anyone's diary (Not Scheduled →
+        # Scheduled), then how it went. Ordered by the life of a call, for the same reason as Call Type.
         {"id": "c_status", "name": "Status", "type": "select", "width": 120, "options": [
-            s("Done", "#3b82f6"), s("Failed", "#ef4444"), s("OnSite", "#06b6d4"),
-            s("Closed", "#64748b"), s("Not Done", "#ef4444"), s("On-hold", "#f59e0b"),
-            s("Filled", "#a855f7"), s("Account", "#f59e0b")]},
+            s("Not Scheduled", "#64748b"), s("Scheduled", "#6366f1"),
+            s("Done", "#3b82f6"), s("Not Done", "#ef4444"), s("Failed", "#ef4444"),
+            s("OnSite", "#06b6d4"), s("On-hold", "#f59e0b"), s("Account", "#f59e0b"),
+            s("Filled", "#a855f7"), s("Closed", "#64748b")]},
         {"id": "c_link", "name": "Meeting Link", "type": "url", "width": 64},
         {"id": "c_account", "name": "Account Profile", "type": "select", "width": 150, "options": []},
         {"id": "c_jd", "name": "JD", "type": "button", "width": 88},
@@ -364,6 +372,43 @@ def _load_grid() -> dict:
     return storage.get_interview_grid()
 
 
+# Who booked a call is an admin's business. A caller, a team manager and a team member all see the
+# call; none of them see who put it there.
+PRIVATE_CELLS = ("c_creater", "c_created")
+
+
+def _public_row(row: dict, is_admin: bool) -> dict:
+    """The row as this user is allowed to receive it.
+
+    PURE — it returns a copy. Never strip in place: `row_audience` and `on_row_changed` read c_creater
+    off the very same dict to decide who the update goes to and who gets the notification, so mutating
+    it would quietly drop the creator out of their own board and their own reminders.
+
+    The COLUMN stays in the schema (hiding it there would let a non-admin's schema save delete it);
+    only the value is withheld, and the frontend renders no Creater column for these roles anyway. So
+    this is defence in depth, not the only lock — but without it the name was still on the wire, and
+    "can't see the creator" would have meant nothing more than "can't see it without opening devtools".
+    """
+    if is_admin:
+        return row
+    cells = {k: v for k, v in (row.get("cells") or {}).items() if k not in PRIVATE_CELLS}
+    return {**row, "cells": cells}
+
+
+def _broadcast_row(row: dict, audience: set[str]) -> None:
+    """Push a row to everyone who may see it — full to admins, creator-stripped to everyone else.
+
+    The hub fans out one payload to a set of user ids, so a per-recipient view means two sends. The
+    audience is computed by the CALLER from the unstripped cells; we only split it here."""
+    admins = {u["id"] for u in storage.get_users() if u.get("is_admin")}
+    staff = audience & admins
+    others = audience - admins
+    if staff:
+        hub.broadcast_soon({"type": "row", "row": _public_row(row, True)}, staff)
+    if others:
+        hub.broadcast_soon({"type": "row", "row": _public_row(row, False)}, others)
+
+
 @router.get("")
 def get_grid(user: dict = Depends(_access)):
     grid = _load_grid()
@@ -371,39 +416,56 @@ def get_grid(user: dict = Depends(_access)):
     # (including calls handed to the team that have no Caller assigned yet).
     if not user.get("is_admin"):
         can_see = _visibility(user)
-        grid = {**grid, "rows": [r for r in grid["rows"] if can_see(r)]}
+        grid = {**grid, "rows": [_public_row(r, False) for r in grid["rows"] if can_see(r)]}
     return grid
 
 
 @router.get("/people")
 def list_people(user: dict = Depends(_access)):
-    """All users — feeds the Caller dropdown (filtered by role), the Creater avatars, and the
-    calendar's availability panel.
+    """The people this user may be shown — feeds the Caller dropdown, the Creater avatars (admins),
+    and the calendar's availability panel.
 
-    For a manager this is narrowed to their own team, so the Caller dropdown can only ever offer
-    someone they're allowed to assign (the backend rejects the rest anyway — this just stops the UI
-    from presenting a choice that would be refused).
+    WHO IS IN THE LIST:
+        admin              → everyone.
+        manager            → their own team, so the Caller dropdown can only ever offer someone they
+                             are allowed to assign (the backend rejects the rest anyway — this just
+                             stops the UI presenting a choice that would be refused).
+        caller on a team   → their own team. They cannot assign anybody, but they SEE their team-mates'
+                             calls, and a Caller cell with no matching person renders as a bare string.
+        caller on no team  → themselves, and nobody else. Every row on their board is already theirs.
 
-    Availability rides along for the calendar, but ONLY for people this user is allowed to see the
-    roster of (_avail_scope: your team, or everyone if you're an admin) and only for approved callers
-    and managers. It is not attached to the whole list: this endpoint intentionally returns every user
-    to a caller — the Creater avatars need a name for anyone who ever booked a call — and hanging
-    working hours and days off off that would leak the entire company's roster to every caller.
+    This used to hand EVERY user to every caller. The reason was the Creater avatars: the board had to
+    be able to put a face to whoever booked a call, and that could be anyone. Creater is now withheld
+    from everyone but an admin (see _public_row), so that reason is gone — and what was left was a
+    caller being able to read the full staff directory out of the Caller dropdown, including people on
+    other teams they have nothing to do with.
+
+    Availability rides along for the calendar, but only for people whose roster this user may read
+    (_avail_scope: your team, or everyone if you're an admin) and only for approved callers/managers.
 
     `timezone` is load-bearing, not decoration: the hours are wall-clock times in the CALLER's own
     zone, so a calendar cannot place them without it (09:00 in Los Angeles is a different row on the
     grid from 09:00 in Seoul, and can even land on a different day).
     """
-    team_only = is_manager(user)
     tid = team_id_of(user)
+    my_ids = _caller_ids(user)
     may_see_roster = _avail_scope(user)
+
+    def _in_scope(u: dict) -> bool:
+        if user.get("is_admin"):
+            return True
+        if tid:                                     # manager or team caller → the team
+            return str(u.get("team_id", "")).strip() == tid
+        return {str(u.get("username", "")).strip().lower(),
+                str(u.get("full_name", "")).strip().lower()} & my_ids != set()   # solo caller → self
+
     out = []
     for u in storage.get_users():
         un = str(u.get("username", "")).strip()
         fn = str(u.get("full_name", "")).strip()
         if not (un or fn):
             continue
-        if team_only and str(u.get("team_id", "")).strip() != tid:
+        if not _in_scope(u):
             continue
         person = {
             "username": un, "full_name": fn, "label": fn or un,
@@ -442,6 +504,57 @@ def list_profiles(user: dict = Depends(_access)):
         label = f"{name}({region})" if region else name    # e.g. "Charlie Barahona(US)"
         out.append({"id": pid, "name": name, "region": region, "label": label})
     return {"profiles": out}
+
+
+# What the eye button on the board actually shows. Deliberately a curated view, not the raw record:
+# the résumé blob, template settings and generation config are the Profiles tab's business, not a
+# caller's — they want to know WHO they are about to be on a call as.
+_PROFILE_VIEW = (
+    "id", "name", "region", "email", "phone", "location", "address", "zip_code",
+    "linkedin", "github", "portfolio", "summary_seed", "technical_skills",
+    "total_years_of_experience", "work_history", "education_history",
+    # Date of birth, engagement terms and salary expectation. A caller is ON the call AS this person
+    # and gets asked all three, so they are on the card — but note this widens what a caller can read:
+    # anyone who can see a call can now read that profile's DOB and pay expectation.
+    "date_of_birth", "contract_types", "b2b_country", "expected_salary",
+)
+
+
+@router.get("/profiles/{profile_id}")
+def get_board_profile(profile_id: str, user: dict = Depends(_access)):
+    """The person behind a call — opened from the eye on the board's Profile cell.
+
+    This is NOT /api/profiles/{id}. That one belongs to the bidder workflow and only lets you read a
+    profile ASSIGNED to you, so it 403s a caller: a caller is not assigned the profile, they are simply
+    making the call for it. Widening that endpoint would hand the whole profile library to every bidder,
+    so the board gets its own door with its own rule:
+
+        admin  → any profile.
+        anyone else → only a profile that appears on a call they can actually SEE.
+
+    That last clause matters. Without it, any caller could walk the profile ids and read the contact
+    details of every persona in the company, including ones on another team's interviews.
+    """
+    p = storage.get_profile_by_id(str(profile_id or "").strip())
+    if not p:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    name = str(p.get("name", "")).strip()
+    region = str(p.get("region", "")).strip()
+    label = f"{name}({region})" if region else name
+
+    if not user.get("is_admin"):
+        can_see = _visibility(user)
+        on_my_board = {
+            str((r.get("cells") or {}).get("c_account", "")).strip()
+            for r in storage.get_interview_rows() if can_see(r)
+        }
+        if label not in on_my_board:
+            raise HTTPException(status_code=403, detail="That profile is not on any of your calls.")
+
+    view = {k: p.get(k) for k in _PROFILE_VIEW}
+    view["label"] = label
+    return view
 
 
 @router.put("/schema")
@@ -487,15 +600,22 @@ def add_row(body: dict | None = None, user: dict = Depends(_access)):
     # re-inserting a row (undo of a delete) keeps its original creator.
     if "c_creater" in valid and not str(cells.get("c_creater", "") or "").strip():
         cells["c_creater"] = str(user.get("full_name") or user.get("username") or "").strip()
+    # Created_At is a machine stamp, so stamp it HERE — not in the browser. It used to be set only by
+    # the frontend's Add-row, which meant any row born another way (the API, a seed, an import) simply
+    # had no creation date. Nobody noticed because the field was hidden; now it sits under Creater, so
+    # the hole would be on screen. An explicit value is respected, so re-inserting a row (undo of a
+    # delete) keeps its original date rather than being back-dated to the moment it was restored.
+    if "c_created" in valid and not str(cells.get("c_created", "") or "").strip():
+        cells["c_created"] = datetime.now(timezone.utc).isoformat()
     # an explicit id + position lets the client re-insert a row (undo of a delete / redo of an add)
     rid = str(body2.get("id") or "").strip()
     if not rid or any(r["id"] == rid for r in grid["rows"]):
         rid = _new_id("r")
     at = body2.get("at")
     row = storage.insert_interview_row(rid, cells, at if isinstance(at, int) else None)
-    hub.broadcast_soon({"type": "row", "row": row}, live_notify.row_audience(cells))
+    _broadcast_row(row, live_notify.row_audience(cells))   # audience from the UNSTRIPPED cells
     live_notify.on_row_changed(rid, {}, cells, user)      # a row created already naming a caller/team
-    return row
+    return _public_row(row, bool(user.get("is_admin")))
 
 
 def detach_team(team_name: str) -> int:
@@ -525,8 +645,11 @@ def detach_team(team_name: str) -> int:
         log.exception("Could not detach interviews from the deleted team %r", name)
         return 0
 
-    for row in touched:                       # tell every open board, so nobody keeps the stale name
-        hub.broadcast_soon({"type": "row", "row": row}, live_notify.row_audience(row.get("cells") or {}))
+    # Tell every open board, so nobody keeps the stale name. Through _broadcast_row, not the hub
+    # directly: it is the one place that decides who may see the Creater, and a raw send here would
+    # hand every caller on the row the creator's name that the REST path is careful to withhold.
+    for row in touched:
+        _broadcast_row(row, live_notify.row_audience(row.get("cells") or {}))
     return len(touched)
 
 
@@ -578,8 +701,9 @@ def patch_row(row_id: str, body: dict, user: dict = Depends(_access)):
     row = storage.get_interview_row(row_id)
     if row is None or not _owns_row(user, row):
         raise HTTPException(status_code=404, detail="Row not found")
+    is_admin = bool(user.get("is_admin"))
     if not patch:                    # nothing this user is allowed to change → no-op
-        return row
+        return _public_row(row, is_admin)
     before = dict(row.get("cells") or {})
     _check_workflow(before, patch)
     updated = storage.patch_interview_row(row_id, patch)   # one-row UPDATE, in a transaction
@@ -587,12 +711,13 @@ def patch_row(row_id: str, body: dict, user: dict = Depends(_access)):
         raise HTTPException(status_code=404, detail="Row not found")
 
     # Push the new row to every board that may see it, and tell whoever the change affects. Both are
-    # fire-and-forget — a socket must never fail an interview edit.
+    # fire-and-forget — a socket must never fail an interview edit. The audience is worked out from
+    # the FULL cells (it needs the creator to find them); only the payload is trimmed per recipient.
     after = dict(updated.get("cells") or {})
-    hub.broadcast_soon({"type": "row", "row": {"id": row_id, "cells": after}},
-                       live_notify.row_audience(after) | live_notify.row_audience(before))
+    _broadcast_row({"id": row_id, "cells": after},
+                   live_notify.row_audience(after) | live_notify.row_audience(before))
     live_notify.on_row_changed(row_id, before, after, user)
-    return updated
+    return _public_row(updated, is_admin)
 
 
 @router.delete("/rows/{row_id}")

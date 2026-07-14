@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api/client';
+import { closeLive } from './board-live';
 
 const TOKEN_KEY = 'tailorresume.token';
 
@@ -92,6 +93,12 @@ export async function login(identifier: string, password: string): Promise<User>
 }
 
 export function logout() {
+  // Tear the live socket down FIRST. It was opened with this user's JWT baked into the URL, and the
+  // app is a SPA — signing out and back in never reloads the page, so a surviving socket would still
+  // be authenticated as the person who just left. The next user to sign in on this browser would
+  // inherit it and receive THEIR notifications and board rows. closeLive() drops it so the next
+  // subscribe rebuilds a fresh socket with the new user's token.
+  closeLive();
   setToken(null);
   setUser(null);
 }

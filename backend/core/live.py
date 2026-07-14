@@ -19,8 +19,9 @@ notification must never break the edit that produced it.
 from __future__ import annotations
 
 import logging
+import threading
 
-from core import inbox
+from core import inbox, push
 from core.hub import hub
 
 log = logging.getLogger("live")
@@ -136,6 +137,29 @@ def _actor_name(actor: dict) -> str:
     return str(a.get("full_name") or a.get("username") or "Someone").strip() or "Someone"
 
 
+def _push_soon(user_ids: set[str], payload: dict) -> None:
+    """Fire the OS pushes off the request thread.
+
+    send_push talks HTTP to a push service (FCM and friends), once per device, and waits. This runs
+    inside the PATCH that saved the cell, so doing it inline would make every edit on the board pay
+    for somebody else's notification — several hundred milliseconds, sometimes seconds if a push
+    service is slow, and all of it while the person who typed the value is watching the cell.
+    A push is best-effort by nature (the socket already delivered it to anyone actually looking), so
+    it is the right thing to hand to a thread and forget."""
+    ids = [u for u in user_ids if u]
+    if not ids:
+        return
+
+    def _run() -> None:
+        for uid in ids:
+            try:
+                push.send_push(uid, payload)
+            except Exception:               # send_push already swallows; belt and braces
+                log.exception("push failed for %s", uid)
+
+    threading.Thread(target=_run, name="board-push", daemon=True).start()
+
+
 def on_row_changed(row_id: str, before: dict, after: dict, actor: dict) -> None:
     """Emit the live notifications for one board edit. Never raises.
 
@@ -231,5 +255,16 @@ def on_row_changed(row_id: str, before: dict, after: dict, actor: dict) -> None:
             inbox.add(ids, "board", title, body, row_id=row_id, frm=who)
             hub.broadcast_soon({"type": "notify", "kind": "board", "title": title, "body": body,
                                 "row_id": row_id, "from": who}, ids)
+            # And to the OS, for everyone who isn't looking at the board — which is most people, most
+            # of the time. Only reminders used to be pushed, so being handed a call, or having the
+            # call you booked confirmed, reached you only if you happened to have the tab open. That
+            # is the one notification you cannot afford to find out about later.
+            # No `alarm`: this is news, not an imminent interview, and it must not ring.
+            _push_soon(ids, {
+                "title": title, "body": body,
+                "tag": f"board-{row_id}",     # a later edit to the same call replaces the old banner
+                "url": "/interviews",
+                "row_id": row_id,
+            })
     except Exception:
         log.exception("live notify failed for row %s", row_id)
