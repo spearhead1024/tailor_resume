@@ -18,10 +18,14 @@ import Applied from './pages/Applied';
 import Screenshots from './pages/Screenshots';
 import Interviews from './pages/Interviews';
 import Account from './pages/Account';
+import AvailabilityPage from './pages/Availability';
 
 /** Tab → roles allowed. Admin always has access. Order = display order. */
 const TABS: { path: string; label: string; roles: Role[]; method?: 1 | 2 }[] = [
   { path: '/interviews', label: 'Interviews', roles: ['admin', 'caller', 'manager'] },
+  // Callers and team managers only: an admin never takes a call, so they have no hours to set —
+  // they read everyone else's on the calendar instead.
+  { path: '/availability', label: 'Availability', roles: ['caller', 'manager'] },
   { path: '/jobs',     label: 'Jobs',     roles: ['admin', 'job_adder'] },
   { path: '/bid',      label: 'Bid',      roles: ['admin', 'bidder'], method: 2 },
   { path: '/resumes',  label: 'Resumes',  roles: ['admin', 'bidder'], method: 1 },
@@ -125,6 +129,7 @@ export default function App() {
           <Route path="/resumes"  element={<RoleGate roles={['admin', 'bidder']}><Resumes /></RoleGate>} />
           <Route path="/apply"    element={<RoleGate roles={['admin', 'bidder']}><Apply /></RoleGate>} />
           <Route path="/interviews" element={<RoleGate roles={['admin', 'caller', 'manager']}><Interviews /></RoleGate>} />
+          <Route path="/availability" element={<RoleGate roles={['caller', 'manager']}><AvailabilityPage /></RoleGate>} />
           <Route path="/jobs"     element={<RoleGate roles={['admin', 'job_adder']}><Jobs /></RoleGate>} />
           <Route path="/applied"  element={<RoleGate roles={['admin']}><Applied /></RoleGate>} />
           <Route path="/screenshots" element={<RoleGate roles={['admin']}><Screenshots /></RoleGate>} />

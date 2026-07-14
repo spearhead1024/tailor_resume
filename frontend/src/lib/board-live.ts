@@ -18,6 +18,9 @@ export type LiveMsg =
   | { type: 'row'; row: { id: string; cells: Record<string, unknown> } }
   | { type: 'row_delete'; row_id: string }
   | { type: 'schema'; columns: unknown[] }
+  /** Somebody's working hours / time zone / meetings / days off changed — re-read /people.
+   *  The board caches that list, so without this the calendar shades a week that is no longer true. */
+  | { type: 'roster'; user_id?: string }
   | { type: 'notify'; kind?: 'board' | 'reminder'; title: string; body: string; row_id?: string; from?: string }
   | { type: 'pong' };
 

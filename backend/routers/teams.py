@@ -9,6 +9,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Body, Depends, HTTPException
 
 from auth import get_current_user, require_admin, storage, team_id_of
+# detach_team(): a deleted team must not leave its name behind on the calls it was given.
+from routers import interviews
 
 router = APIRouter(prefix="/api/teams", tags=["teams"])
 
@@ -47,8 +49,14 @@ def rename_team(team_id: str, body: dict = Body(...), user: dict = Depends(requi
 
 @router.delete("/{team_id}")
 def delete_team(team_id: str, user: dict = Depends(require_admin)):
-    """Delete the team. Its members are kept — they just become ungrouped."""
-    if not storage.get_team(team_id):
+    """Delete the team. Its members are kept — they just become ungrouped.
+
+    The calls it was handed are un-teamed too: a Team cell pointing at a team that no longer exists is a
+    call assigned to a phantom, and every notification for its manager and members would go silently
+    nowhere. The Caller is untouched — if a person was picked, the call is still theirs."""
+    team = storage.get_team(team_id)
+    if not team:
         raise HTTPException(status_code=404, detail="Team not found")
     storage.delete_team(team_id)
+    interviews.detach_team(str(team.get("name", "")))
     return {"ok": True}

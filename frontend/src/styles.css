@@ -866,8 +866,8 @@ body.iv-col-resizing { cursor: col-resize !important; user-select: none !importa
 .iv-viewtog button:hover { color: #e2e8f0; }
 .iv-viewtog button.on { background: #1e293b; color: #f1f5f9; box-shadow: inset 0 0 0 1px #334155; }
 
-/* ── Calendar: 2/3 grid, 1/3 caller + availability rail ────────────────────── */
-.cal-wrap { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; align-items: start; min-height: 0; }
+/* ── Calendar: 4/5 grid, 1/5 caller + availability rail ────────────────────── */
+.cal-wrap { display: grid; grid-template-columns: 4fr 1fr; gap: 14px; align-items: start; min-height: 0; }
 .cal-main { background: #0d1119; border: 1px solid #1e293b; border-radius: 12px; overflow: hidden; min-width: 0; }
 
 .cal-head { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-bottom: 1px solid #1e293b; flex-wrap: wrap; }
@@ -928,14 +928,14 @@ body.iv-col-resizing { cursor: col-resize !important; user-select: none !importa
 .cal-search { margin-bottom: 8px; font-size: 0.82rem; padding: 6px 9px; }
 .cal-empty { font-size: 0.78rem; margin: 4px 0 0; }
 
-.cal-people { display: flex; flex-direction: column; gap: 2px; max-height: 210px; overflow-y: auto; }
-.cal-person { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px;
+.cal-people { display: flex; flex-direction: column; gap: 2px; }
+.cal-person { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; padding: 6px 8px;
   background: transparent; border: 0; border-radius: 7px; color: #cbd5e1; cursor: pointer;
-  font-size: 0.83rem; text-align: left; }
+  font-size: 0.83rem; text-align: left; overflow: hidden; }
 .cal-person:hover { background: #151d2c; }
 .cal-person--on { background: #1e293b; color: #f1f5f9; box-shadow: inset 0 0 0 1px #334155; }
 .cal-swatch { width: 10px; height: 10px; border-radius: 3px; flex: 0 0 auto; }
-.cal-person-n { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cal-person-n { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cal-person-n2 { font-size: 0.7rem; color: #64748b; background: #0f1725; border-radius: 999px; padding: 1px 7px; }
 
 .cal-av-tz { font-size: 0.74rem; color: #94a3b8; line-height: 1.45; margin-bottom: 8px; }
@@ -958,7 +958,6 @@ body.iv-col-resizing { cursor: col-resize !important; user-select: none !importa
 /* Narrow: the rail drops BELOW the calendar rather than squeezing it to nothing. */
 @media (max-width: 1100px) {
   .cal-wrap { grid-template-columns: 1fr; }
-  .cal-people { max-height: 160px; }
   .cal-body { max-height: 55vh; }
 }
 @media (max-width: 640px) {
@@ -1021,4 +1020,64 @@ body.cal-dragging .cal-ev { cursor: grabbing; }
 
 @media (max-width: 560px) {
   .cal-modal-b { grid-template-columns: 1fr; }
+}
+
+/* A call handed to a whole TEAM (no caller picked yet) — a real assignment, shown as one. */
+.cal-ev-c--team { font-weight: 600; opacity: 0.95; }
+.cal-side-h--sub { margin-top: 12px; }
+
+/* The selected caller's daily meeting (standup / team sync). They ARE at work — they just cannot take
+   a call then. Drawn ON TOP of the free-time shading, so the gap in availability has a visible reason. */
+.cal-meeting {
+  position: absolute; left: 0; right: 0; z-index: 1; pointer-events: none; overflow: hidden;
+  background: repeating-linear-gradient(45deg,
+    rgba(148, 163, 184, 0.16) 0 6px, rgba(148, 163, 184, 0.05) 6px 12px);
+  border-top: 1px dashed rgba(148, 163, 184, 0.55);
+  border-bottom: 1px dashed rgba(148, 163, 184, 0.55);
+}
+.cal-meeting-l {
+  display: block; padding: 1px 6px; font-size: 0.65rem; font-weight: 600;
+  color: #cbd5e1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ── the rail as a tree: Everyone → individuals → teams (members nested) ────── */
+.cal-team { display: flex; flex-direction: column; }
+.cal-team-hd { display: flex; align-items: center; gap: 0; }
+/* The caret is its own button: folding a team must not also SELECT it. */
+.cal-fold {
+  flex: 0 0 auto; width: 16px; padding: 0; margin: 0;
+  background: transparent; border: 0; box-shadow: none;
+  color: #64748b; font-size: 0.7rem; line-height: 1; cursor: pointer;
+}
+.cal-fold:hover { color: #cbd5e1; background: transparent; box-shadow: none; }
+.cal-team-hd .cal-person { flex: 1; min-width: 0; }
+.cal-person--team .cal-person-n { font-weight: 600; }
+/* A member sits under its team — indented past the caret so the hierarchy is readable at a glance. */
+.cal-person--nested { padding-left: 30px; }
+.cal-person-tz {
+  flex: 0 0 auto; font-size: 0.66rem; color: #64748b;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+
+/* The caller tree does NOT scroll. It grows, and the page scrolls — which is what you already do to
+   reach the rest of the rail. (An overflow-y here would also force overflow-x to auto: a box cannot be
+   visible on one axis and clipped on the other, so capping the height silently added a sideways
+   scrollbar as well.) */
+.cal-side-sec--callers { max-height: none; overflow: visible; }
+
+/* A call somebody ELSE is moving, resizing or editing right now. Inert here — the server would refuse
+   our write anyway (409) — and it says who, so a call jumping under your cursor has a name on it. */
+.cal-ev--held { cursor: not-allowed; outline: 2px dashed #fbbf24; outline-offset: -2px; }
+.cal-ev-held {
+  position: absolute; right: 3px; bottom: 2px;
+  font-size: 0.6rem; font-weight: 700; line-height: 1;
+  padding: 1px 4px; border-radius: 4px;
+  background: #fbbf24; color: #1c1917;
+  max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* ...and the same, per field, in the detail popup. */
+.cal-fld-held {
+  margin-left: 6px; font-size: 0.62rem; font-weight: 700;
+  padding: 1px 5px; border-radius: 4px; background: #fbbf24; color: #1c1917;
+  text-transform: none; letter-spacing: 0;
 }

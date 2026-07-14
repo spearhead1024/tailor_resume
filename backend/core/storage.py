@@ -622,6 +622,56 @@ def _normalize_availability(raw: Any) -> dict:
     return out
 
 
+MAX_MEETINGS = 8          # a working day with more standing meetings than this is not a working day
+
+
+def _normalize_daily_meeting(raw: Any) -> dict:
+    """ONE recurring meeting the person has on their working days — a standup, a team sync.
+
+    It sits INSIDE the working window (you are at work, you are simply not free to take a call), so it
+    is a hole punched in availability rather than a change to the working hours. Times are wall-clock
+    in the person's own zone, exactly like `availability`.
+
+    `days` narrows it to a subset of the working days; empty means "every day you work".
+    """
+    src = raw if isinstance(raw, dict) else {}
+    start = str(src.get('start', '') or '').strip()
+    end = str(src.get('end', '') or '').strip()
+    if not _TIME_RE.match(start):
+        start = '10:00'
+    if not _TIME_RE.match(end):
+        end = '10:30'
+    if end <= start:                                       # zero/negative window → back to the default
+        start, end = '10:00', '10:30'
+    days = [d for d in (src.get('days') or []) if d in AVAIL_DAYS]
+    return {
+        'on': bool(src.get('on', True)),                   # an entry that exists is on unless told otherwise
+        'title': str(src.get('title', '') or '').strip()[:60] or 'Daily meeting',
+        'start': start,
+        'end': end,
+        'days': sorted(set(days), key=AVAIL_DAYS.index),   # [] → every working day
+    }
+
+
+def _normalize_daily_meetings(raw: Any, legacy: Any = None) -> list[dict]:
+    """EVERY recurring meeting the person has. A standup and a team sync and a 1:1 are all normal.
+
+    Accepts the old single-meeting field so nobody's saved standup disappears when they next load the
+    page: if there is no list yet but there is a legacy `daily_meeting` that was switched on, it becomes
+    the first entry. Sorted by start time, so the UI and the calendar agree on the order.
+    """
+    if isinstance(raw, list):
+        items = [_normalize_daily_meeting(m) for m in raw if isinstance(m, dict)]
+    elif isinstance(raw, dict):                            # a single object where a list was expected
+        items = [_normalize_daily_meeting(raw)]
+    else:
+        items = []
+        one = _normalize_daily_meeting(legacy) if isinstance(legacy, dict) else None
+        if one and one['on']:
+            items = [one]
+    return sorted(items, key=lambda m: m['start'])[:MAX_MEETINGS]
+
+
 def _normalize_days_off(raw: Any) -> list[str]:
     """Specific dates the person cannot work, as sorted, de-duped YYYY-MM-DD strings."""
     if not isinstance(raw, list):
@@ -662,6 +712,14 @@ def _normalize_user(item: dict) -> dict:
         'team_id': str(item.get('team_id', '')).strip(),
         # When this person can take calls: a Mon–Sat weekly window, plus specific days they can't.
         'availability': _normalize_availability(item.get('availability')),
+        # Has this person actually FILLED IN their availability, or is what's above just the default we
+        # synthesised for them? _normalize_availability hands everyone a Mon–Fri 09:00–18:00 week, so the
+        # data alone can never answer that — and a calendar that shades invented hours is worse than one
+        # that shades none. Written explicitly when they save the Account page; see routers/auth.py.
+        'availability_set': bool(item.get('availability_set', False)),
+        # A person can have several standing meetings. The old single `daily_meeting` is migrated into
+        # the list on first read, so an existing standup is not lost.
+        'daily_meetings': _normalize_daily_meetings(item.get('daily_meetings'), item.get('daily_meeting')),
         'days_off': _normalize_days_off(item.get('days_off')),
         'force_password_change': bool(item.get('force_password_change', False)),
         'auth_tokens': _normalize_auth_tokens(item.get('auth_tokens', []) or []),

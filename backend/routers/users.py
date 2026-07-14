@@ -11,6 +11,8 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from auth import get_current_user, is_manager, require_admin, storage, team_id_of
 from core.storage import build_password_record
+# detach_team(): a deleted team must not leave its name behind on the calls it was given.
+from routers import interviews
 from schemas import UserUpsertRequest
 
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -144,8 +146,34 @@ def update_user(user_id: str, body: UserUpsertRequest, user: dict = Depends(_acc
 
 @router.delete("/{user_id}")
 def delete_user(user_id: str, user: dict = Depends(require_admin)):
-    """Admin only — a manager can deactivate a caller (status), but not erase the account."""
+    """Admin only — a manager can deactivate a caller (status), but not erase the account.
+
+    Deleting a MANAGER takes their team with them. The team was minted for them and is named after them
+    ("Hamna" → "Hamna team", see _autoteam_for_manager), so leaving it behind orphans a team with no
+    Hamna in it — nobody runs it, yet it keeps appearing in every Caller dropdown and can still be
+    assigned calls that will never reach a manager.
+
+    Two things it does NOT do:
+      • delete the members — storage.delete_team un-groups them, it never erases anyone.
+      • delete a team somebody else still runs — if another manager is on it, the team stays.
+    """
     if user_id == user["id"]:
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
+
+    victim = storage.get_user_by_id(user_id) or {}
+    roles = {str(r).strip() for r in (victim.get("roles") or [])}
+    tid = str(victim.get("team_id", "")).strip()
+    team = storage.get_team(tid) if tid else None
+
     storage.delete_user(user_id)
+
+    if "manager" in roles and team:
+        still_run = any(
+            str(u.get("team_id", "")).strip() == tid
+            and "manager" in {str(r).strip() for r in (u.get("roles") or [])}
+            for u in storage.get_users()
+        )
+        if not still_run:
+            storage.delete_team(tid)                       # un-groups the members; deletes nobody
+            interviews.detach_team(str(team.get("name", "")))   # and strips the dead name off its calls
     return {"ok": True}

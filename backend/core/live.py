@@ -75,6 +75,37 @@ def _team_people(team_name: str) -> tuple[set[str], set[str]]:
     return mgrs, members
 
 
+def roster_audience(user: dict) -> set[str]:
+    """Who is shown THIS person's working hours, and therefore needs to know when they change.
+
+    Mirrors _avail_scope in routers/interviews.py, from the other side: an admin sees everyone's roster;
+    a manager sees their own team's; a caller sees only their own. So a change to one person's hours
+    matters to every admin, to their team's manager, and to themselves.
+
+    Without this the board fetched /people ONCE on mount and never again: a caller could switch a day
+    off and the admin's calendar would keep shading it as free — right up until somebody happened to
+    reload the page.
+    """
+    ids: set[str] = {str(user.get("id", ""))}
+    tid = str(user.get("team_id", "")).strip()
+    for u in _users():
+        roles = {str(r).strip() for r in (u.get("roles") or [])}
+        if "admin" in roles:
+            ids.add(u["id"])
+        elif "manager" in roles and tid and str(u.get("team_id", "")).strip() == tid:
+            ids.add(u["id"])
+    return {i for i in ids if i}
+
+
+def on_roster_changed(user: dict) -> None:
+    """Somebody's availability / time zone / meetings / days off changed. Tell the boards that show it,
+    so they re-read /people instead of shading a week that is no longer true. Never raises."""
+    try:
+        hub.broadcast_soon({"type": "roster", "user_id": str(user.get("id", ""))}, roster_audience(user))
+    except Exception:
+        log.exception("on_roster_changed failed")
+
+
 def row_audience(cells: dict) -> set[str]:
     """Everyone allowed to SEE this row — the only people a live update may be pushed to.
 
