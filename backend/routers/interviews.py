@@ -311,9 +311,18 @@ def _bootstrap() -> None:
     with _lock:
         if _bootstrapped:
             return
-        if not storage.get_interview_columns():          # empty DB board → seed it
+        if not storage.get_interview_columns():           # empty DB board → seed it whole
             grid = _read_legacy_json() or _default_grid()
             storage.seed_interview_grid(grid["columns"], grid["rows"])
+        elif not storage.get_interview_rows():
+            # Columns exist but there are no rows — a restore that carried the schema but not the
+            # data. Backfill the rows from the legacy JSON if it's still around, WITHOUT touching the
+            # existing columns (seed_interview_grid would delete them). An empty board is a valid
+            # state, so do nothing when there's no JSON to recover from.
+            legacy = _read_legacy_json()
+            if legacy and legacy.get("rows"):
+                for i, r in enumerate(legacy["rows"]):
+                    storage.insert_interview_row(r["id"], r.get("cells") or {}, i)
         storage.append_interview_columns(_REQUIRED_COLS)  # add newly-required columns
         _migrate_sched_db()                               # legacy wall-clock Scheduled_at → UTC
         _bootstrapped = True
