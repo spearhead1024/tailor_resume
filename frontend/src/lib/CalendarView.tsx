@@ -67,6 +67,9 @@ type Props = {
      could drag the same call at the same time and neither would see the other doing it; the loser's
      work would only be refused at the very end (the server 409s). Claiming makes it visible up front. */
   lockOf: (rowId: string, colId: string) => string | null;   // who else holds it, or null
+  /** The holder's presence colour as CSS custom properties (--lk-*), or null. Keyed on user id, so a
+   *  given person is the same colour here as on the table. */
+  lockVarsOf?: (rowId: string, colId: string) => CSSProperties | null;
   onClaim: (rowId: string, colId: string) => void;
   onRelease: () => void;
 };
@@ -204,7 +207,7 @@ function packLanes(evs: Ev[]): void {
 export default function CalendarView(props: Props) {
   const { rows, weekFrom, onWeekChange, userTz, people, teams, canSchedule, canSearch, showPicker, meLabel,
           columns, hideFields, canEdit, onOpenRow, onPatch, onDelete, onCreateAt, onReschedule, onResizeRow,
-          lockOf, onClaim, onRelease } = props;
+          lockOf, lockVarsOf, onClaim, onRelease } = props;
   const [detailId, setDetailId] = useState<string>('');
   // Re-read the row from `rows` every render, so a live edit by somebody else updates the open popup
   // instead of leaving you staring at a stale copy you are about to save over.
@@ -663,6 +666,8 @@ export default function CalendarView(props: Props) {
                     // the call is in motion instead of silently jumping under our cursor.
                     const heldBy = lockOf(ev.id, DRAG_COL.move) || lockOf(ev.id, DRAG_COL.resize)
                                 || lockOf(ev.id, 'c_company') || lockOf(ev.id, 'c_caller');
+                    const heldVars = heldBy ? (lockVarsOf?.(ev.id, DRAG_COL.move) || lockVarsOf?.(ev.id, DRAG_COL.resize)
+                                || lockVarsOf?.(ev.id, 'c_company') || lockVarsOf?.(ev.id, 'c_caller')) : null;
                     const c = colourFor(ev.assignee);
                     const dimmed = showPicker && !!selCaller && !inSelection(ev.assignee);
                     const past = ev.ts < nowTs;
@@ -678,6 +683,7 @@ export default function CalendarView(props: Props) {
                       width: `calc(${w}% - 4px)`,
                       background: c.bg, borderLeft: `3px solid ${c.bd}`, color: c.fg,
                       ...(beingDragged ? { opacity: 0.25 } : null),
+                      ...(heldVars || null),
                     };
                     return (
                       <button key={ev.id} type="button"
@@ -883,7 +889,7 @@ export default function CalendarView(props: Props) {
       {detailRow && (
         <EventDetail row={detailRow} columns={columns} hideFields={hideFields} canEdit={canEdit} userTz={userTz}
           onPatch={onPatch} onDelete={onDelete} onClose={() => { onRelease(); setDetailId(''); }}
-          lockOf={lockOf} onClaim={onClaim} onRelease={onRelease}
+          lockOf={lockOf} lockVarsOf={lockVarsOf} onClaim={onClaim} onRelease={onRelease}
           onOpenRow={(rid) => { onRelease(); setDetailId(''); onOpenRow(rid); }} />
       )}
     </div>
@@ -898,11 +904,12 @@ export default function CalendarView(props: Props) {
  * is "Acme" and simply not being able to change it is more useful than the field vanishing.
  */
 function EventDetail({ row, columns, hideFields, canEdit, userTz, onPatch, onDelete, onOpenRow, onClose,
-                      lockOf, onClaim, onRelease }: {
+                      lockOf, lockVarsOf, onClaim, onRelease }: {
   row: CalRow; columns: CalCol[]; hideFields?: Set<string>; canEdit: (rowId: string, colId: string) => boolean;
   userTz: string; onPatch: (rowId: string, colId: string, v: any) => void;
   onDelete?: (rowId: string) => void; onOpenRow: (rowId: string) => void; onClose: () => void;
   lockOf: (rowId: string, colId: string) => string | null;
+  lockVarsOf?: (rowId: string, colId: string) => CSSProperties | null;
   onClaim: (rowId: string, colId: string) => void;
   onRelease: () => void;
 }) {
@@ -935,6 +942,7 @@ function EventDetail({ row, columns, hideFields, canEdit, userTz, onPatch, onDel
     // Somebody else is in this exact field right now. The server would refuse our write (409) — so make
     // it read-only and name them, rather than letting us type into something that will be thrown away.
     const heldBy = lockOf(row.id, cid);
+    const heldVars = heldBy ? lockVarsOf?.(row.id, cid) : null;
     const editable = canEdit(row.id, cid) && !heldBy;
     // The Caller cell is where a TEAM assignment lives too: handing a call to a team writes c_team and
     // leaves c_caller empty. Without this fallback the dropdown reads blank the instant after you pick a
@@ -985,7 +993,7 @@ function EventDetail({ row, columns, hideFields, canEdit, userTz, onPatch, onDel
       <label key={cid} className={'cal-fld' + (editable ? '' : ' cal-fld--ro')}>
         <span className="cal-fld-l">
           {col.name}{cid === 'c_sched' ? ` (${tzShort(userTz) || userTz})` : ''}
-          {heldBy && <span className="cal-fld-held" title={`${heldBy} is editing this right now`}>✎ {heldBy}</span>}
+          {heldBy && <span className="cal-fld-held" style={heldVars || undefined} title={`${heldBy} is editing this right now`}>✎ {heldBy}</span>}
         </span>
         {input}
       </label>

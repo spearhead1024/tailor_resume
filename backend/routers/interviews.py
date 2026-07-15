@@ -264,15 +264,22 @@ def _default_grid() -> dict:
         {"id": "c_team", "name": "Team", "type": "select", "width": 140, "options": []},
         {"id": "c_caller", "name": "Caller", "type": "select", "width": 140, "options": []},
         {"id": "c_approved", "name": "Approved", "type": "select", "width": 120, "options": [
-            s("Confirmed", "#22c55e"), s("Pending", "#f59e0b"), s("Rejected", "#ef4444")]},
+            s("Confirmed", "#4F9768"), s("Pending", "#C19138"), s("Rejected", "#BE524B")]},
         {"id": "c_creater", "name": "Creater", "type": "person", "width": 140},
         # Where the call has got to. Starts before the call exists in anyone's diary (Not Scheduled →
         # Scheduled), then how it went. Ordered by the life of a call, for the same reason as Call Type.
+        #
+        # Colours are the EXACT Notion muted-token hexes (the board snaps every pill to the nearest of
+        # nine tokens, so passing the token's own hex pins each status to one deliberate colour instead
+        # of drifting). Each status gets its own token, mapped by meaning — inactive→gray, active→blue,
+        # good→green, missed→orange, bad→red, progressed→purple, paused→yellow, won→pink, filled→brown.
+        # The two dormant ends of the funnel (Not Scheduled / Closed) share gray on purpose: both mean
+        # "no call is happening", and their position in the list tells them apart.
         {"id": "c_status", "name": "Status", "type": "select", "width": 120, "options": [
-            s("Not Scheduled", "#64748b"), s("Scheduled", "#6366f1"),
-            s("Done", "#3b82f6"), s("Not Done", "#ef4444"), s("Failed", "#ef4444"),
-            s("OnSite", "#06b6d4"), s("On-hold", "#f59e0b"), s("Account", "#f59e0b"),
-            s("Filled", "#a855f7"), s("Closed", "#64748b")]},
+            s("Not Scheduled", "#9B9B9B"), s("Scheduled", "#447ACB"),
+            s("Done", "#4F9768"), s("Not Done", "#CB7B37"), s("Failed", "#BE524B"),
+            s("OnSite", "#865DBB"), s("On-hold", "#C19138"), s("Account", "#BA4A78"),
+            s("Filled", "#A27763"), s("Closed", "#9B9B9B")]},
         {"id": "c_link", "name": "Meeting Link", "type": "url", "width": 64},
         {"id": "c_account", "name": "Account Profile", "type": "select", "width": 150, "options": []},
         {"id": "c_jd", "name": "JD", "type": "button", "width": 88},
@@ -344,7 +351,40 @@ def _bootstrap() -> None:
                     storage.insert_interview_row(r["id"], r.get("cells") or {}, i)
         storage.append_interview_columns(_REQUIRED_COLS)  # add newly-required columns
         _migrate_sched_db()                               # legacy wall-clock Scheduled_at → UTC
+        _migrate_option_colors()                          # repaint Status/Approved pills (see below)
         _bootstrapped = True
+
+
+# The professional pill colours, keyed by option label. Applied to boards seeded before the palette
+# changed — the seed only paints a FRESH board, so without this an existing deployment keeps the old
+# bright hexes, which the pill renderer snaps to the wrong muted token (Not Scheduled and Closed came
+# out green, Scheduled/Done/OnSite all one blue). Matches by label; leaves any admin-added option alone.
+_OPTION_COLORS = {
+    "c_status": {
+        "Not Scheduled": "#9B9B9B", "Scheduled": "#447ACB", "Done": "#4F9768",
+        "Not Done": "#CB7B37", "Failed": "#BE524B", "OnSite": "#865DBB",
+        "On-hold": "#C19138", "Account": "#BA4A78", "Filled": "#A27763", "Closed": "#9B9B9B",
+    },
+    "c_approved": {"Confirmed": "#4F9768", "Pending": "#C19138", "Rejected": "#BE524B"},
+}
+
+
+def _migrate_option_colors() -> None:
+    """Repaint known Status/Approved options to the professional palette. Idempotent, and only touches
+    the options it knows by name, so a board an admin has customised keeps their own additions."""
+    cols = storage.get_interview_columns()
+    changed = False
+    for col in cols:
+        want = _OPTION_COLORS.get(col.get("id", ""))
+        if not want:
+            continue
+        for opt in (col.get("options") or []):
+            label = str(opt.get("label", "")).strip()
+            if label in want and opt.get("color") != want[label]:
+                opt["color"] = want[label]
+                changed = True
+    if changed:
+        storage.replace_interview_columns(cols)
 
 
 def _migrate_sched_db() -> None:

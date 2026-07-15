@@ -858,16 +858,23 @@ a.pc-line-v:hover { text-decoration: underline; }
 /* A cell somebody else is editing right now. Tinted + tagged with their name, so you can see it is
    taken BEFORE you type into it — the server also refuses the write, but nobody should get that far. */
 /* Held by somebody else. Applies to a stacked sub-cell AND to a plain <td> — Status is never stacked,
-   so scoping this to .iv-subcell meant a locked Status cell looked completely ordinary. */
+   so scoping this to .iv-subcell meant a locked Status cell looked completely ordinary.
+   The colour comes from --lk-* custom properties the cell sets per editor (lockColor), so several
+   people editing at once each show in their own colour. The amber fallbacks keep it sane if a cell is
+   somehow locked without the vars set. */
 .iv-subcell.iv-locked,
-td.iv-locked { background: rgba(245,158,11,0.10); box-shadow: inset 0 0 0 1px rgba(245,158,11,0.45); }
+td.iv-locked {
+  background: var(--lk-tint, rgba(245,158,11,0.10));
+  box-shadow: inset 0 0 0 1px var(--lk-line, rgba(245,158,11,0.45));
+}
 .iv-lock-tag {
   position: absolute; top: -7px; right: 2px; z-index: 5;
   display: inline-flex; align-items: center; gap: 3px;
   max-width: calc(100% - 6px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   padding: 0 5px; border-radius: 999px;
   font-size: 9.5px; line-height: 14px; font-weight: 600;
-  color: #1c1400; background: #f59e0b; box-shadow: 0 1px 3px rgba(0,0,0,0.45);
+  color: var(--lk-ink, #1c1400); background: var(--lk-line, #f59e0b);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.45);
   pointer-events: none;
 }
 
@@ -1098,18 +1105,20 @@ body.cal-dragging .cal-ev { cursor: grabbing; }
 .cal-side-sec--callers { max-height: none; overflow: visible; }
 
 /* A call somebody ELSE is moving, resizing or editing right now. Inert here — the server would refuse
-   our write anyway (409) — and it says who, so a call jumping under your cursor has a name on it. */
-.cal-ev--held { cursor: not-allowed; outline: 2px dashed #fbbf24; outline-offset: -2px; }
+   our write anyway (409) — and it says who, so a call jumping under your cursor has a name on it.
+   Colour comes from the holder's --lk-* vars (same presence palette as the table), amber fallback. */
+.cal-ev--held { cursor: not-allowed; outline: 2px dashed var(--lk-line, #fbbf24); outline-offset: -2px; }
 .cal-ev-held {
   position: absolute; right: 3px; bottom: 2px;
   font-size: 0.6rem; font-weight: 700; line-height: 1;
   padding: 1px 4px; border-radius: 4px;
-  background: #fbbf24; color: #1c1917;
+  background: var(--lk-line, #fbbf24); color: var(--lk-ink, #1c1917);
   max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 /* ...and the same, per field, in the detail popup. */
 .cal-fld-held {
   margin-left: 6px; font-size: 0.62rem; font-weight: 700;
-  padding: 1px 5px; border-radius: 4px; background: #fbbf24; color: #1c1917;
+  padding: 1px 5px; border-radius: 4px;
+  background: var(--lk-line, #fbbf24); color: var(--lk-ink, #1c1917);
   text-transform: none; letter-spacing: 0;
 }

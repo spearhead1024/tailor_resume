@@ -1,4 +1,4 @@
-import { type CSSProperties, type MouseEvent as ReactMouseEvent, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { type CSSProperties, type MouseEvent as ReactMouseEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../api/client';
 import { useToast } from '../lib/toast';
@@ -95,6 +95,31 @@ const NOTION: Record<string, { bg: string; text: string }> = {
 };
 const NOTION_LIST = Object.values(NOTION);
 const PALETTE = NOTION_LIST.map((c) => c.text); // option.color stores the token's text hex
+
+/* Presence colours — WHO is editing a cell right now. The opposite job from the status pills above:
+   those are muted so the board stays calm; these are meant to stand out and, above all, to be told
+   APART. When three or four people edit at once, one shared amber can't say who is where.
+
+   Colours are assigned by SLOT, not by hashing the user id. Hashing into a small palette collides too
+   easily — with eight colours, three editors already have a ~1-in-3 chance that two share one, which
+   is exactly the case this is meant to disambiguate. Instead each person currently holding a lock
+   takes the next colour in a fixed order, so every concurrent editor is guaranteed a different one
+   (up to eight, then it wraps). Bright-but-clean — the convention every multiplayer editor uses. */
+type LockColor = { tint: string; line: string; ink: string };
+const LOCK_HUES = ['#3B82F6', '#16A34A', '#8B5CF6', '#EA580C', '#DB2777', '#0891B2', '#CA8A04', '#65A30D'];
+const LOCK_COLORS: LockColor[] = LOCK_HUES.map((line) => {
+  const [r, g, b] = [1, 3, 5].map((k) => parseInt(line.slice(k, k + 2), 16));
+  // Tag text: white on the darker hues, near-black on the light ones (amber, lime), where white would
+  // wash out. Picked from the background's relative luminance so every tag stays legible.
+  const lum = [r, g, b].map((v) => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; });
+  const L = 0.2126 * lum[0] + 0.7152 * lum[1] + 0.0722 * lum[2];
+  return { tint: `rgba(${r},${g},${b},0.13)`, line, ink: L > 0.25 ? '#10131a' : '#fff' };
+});
+/** The per-user lock colour as CSS custom properties, so one class can paint any editor's colour. */
+const lockVars = (c: LockColor): CSSProperties => ({
+  ['--lk-tint' as string]: c.tint, ['--lk-line' as string]: c.line, ['--lk-ink' as string]: c.ink,
+});
+
 const DEFAULT_W = 160;        // fallback column width (px)
 const MIN_W = 60, MAX_W = 1000;
 const SEL = '#2383E2';        // Coda/Sheets selection blue
@@ -926,8 +951,8 @@ function StackedCell({ fields, row, subState, editSub, editSeed, meName, avatarB
   fields: { col: Col; sub: number; row: 0 | 1; width?: number }[];
   row: Row; subState: SubState[]; editSub: number | null; editSeed?: string;
   meName?: string; avatarByName?: Record<string, string>; tz?: string;
-  /** Who (if anyone) is currently editing this cell — someone else, not you. */
-  lockOf?: (colId: string) => string | null;
+  /** Who (if anyone) is currently editing this cell — someone else, not you — and their presence colour. */
+  lockOf?: (colId: string) => { label: string; color: LockColor } | null;
   onSelect: (sub: number, openType: boolean, shift: boolean) => void;
   onEdit: (sub: number) => void;
   onDone: (dir?: Dir) => void;
@@ -948,18 +973,19 @@ function StackedCell({ fields, row, subState, editSub, editSeed, meName, avatarB
     h.onDoubleClick = (e: ReactMouseEvent) => { e.stopPropagation(); onEdit(sub); };   // double-click edits / opens
     const st = subState[sub];
     const selStyle: CSSProperties = st === 'anchor' ? { boxShadow: `inset 0 0 0 2px ${SEL}` } : st === 'fill' ? { background: '#15212e' } : {};
-    // Somebody else is in this cell right now. Show who, and make it inert — this is what stops two
-    // people typing into the same cell and one of them silently losing their work.
-    const heldBy = lockOf?.(col.id) || null;
+    // Somebody else is in this cell right now. Tint it in THEIR colour and tag it with their name, so
+    // when several people are editing you can tell whose cell is whose at a glance. (The write is also
+    // blocked in canEditCell — this is the visible half of that.)
+    const held = lockOf?.(col.id) || null;
     return (
-      <div key={f.sub} className={'iv-subcell' + (sub !== 0 ? ' iv-sub' : '') + (heldBy ? ' iv-locked' : '')}
-        style={{ flex: f.width ? `0 0 ${f.width}px` : 1, minWidth: 0, position: 'relative', ...selStyle }} {...h}>
+      <div key={f.sub} className={'iv-subcell' + (sub !== 0 ? ' iv-sub' : '') + (held ? ' iv-locked' : '')}
+        style={{ flex: f.width ? `0 0 ${f.width}px` : 1, minWidth: 0, position: 'relative', ...(held ? lockVars(held.color) : {}), ...selStyle }} {...h}>
         <CellEditor col={col} value={value} editing={editSub === sub} seed={editSub === sub ? editSeed : undefined} tz={tz}
           avatar={col.type === 'person' ? avatarByName?.[String(value ?? '')] : undefined}
           onCommit={(v) => commit(col.id, v)} onDone={onDone}
           onOpen={col.type === 'button' ? () => onOpenModal?.(col) : (isSelect ? () => onEdit(sub) : undefined)}
           onPeek={col.id === 'c_account' && !empty && onPeekProfile ? () => onPeekProfile(String(value)) : undefined} />
-        {heldBy && <span className="iv-lock-tag" title={`${heldBy} is editing this cell`}>✎ {heldBy}</span>}
+        {held && <span className="iv-lock-tag" title={`${held.label} is editing this cell`}>✎ {held.label}</span>}
       </div>
     );
   };
@@ -1661,6 +1687,40 @@ export default function Interviews() {
     const l = locks[`${rowId}|${colId}`];
     return l && l.user_id !== me?.id ? l.label : null;
   };
+  // Presence-colour SLOTS: a stable, distinct colour for everyone currently holding a lock.
+  //
+  // Each person prefers the hue their user id hashes to; if two live editors want the same one, the
+  // earlier-sorted id keeps it and the other probes to the next free hue. Two important properties:
+  //   • EVERY holder is slotted, including ME — so the map is a pure function of the current lock set
+  //     and comes out identical on every screen (the blue cell really is the same person for everyone).
+  //     My own cells simply aren't tagged (heldInfo returns null for me).
+  //   • A new editor whose hue is free perturbs nobody; a colour only moves on an actual collision,
+  //     not on every join the way a positional slot would.
+  const lockSlots = useMemo(() => {
+    const ids = Array.from(new Set(Object.values(locks).map((l) => l.user_id).filter(Boolean))).sort();
+    const taken = new Set<number>();
+    const m = new Map<string, number>();
+    const n = LOCK_COLORS.length;
+    for (const id of ids) {
+      let h = 0;
+      for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+      let slot = h % n;
+      for (let t = 0; taken.has(slot) && t < n; t++) slot = (slot + 1) % n;   // probe past collisions
+      taken.add(slot);
+      m.set(id, slot);
+    }
+    return m;
+  }, [locks]);
+  const presenceColor = (userId: string): LockColor =>
+    LOCK_COLORS[(lockSlots.get(userId) ?? 0) % LOCK_COLORS.length];
+  /** Who holds this cell (their name) plus their presence colour, for the tag + tint. */
+  const heldInfo = (rowId: string, colId: string): { label: string; color: LockColor } | null => {
+    const l = locks[`${rowId}|${colId}`];
+    if (!l || l.user_id === me?.id) return null;
+    return { label: l.label, color: presenceColor(l.user_id) };
+  };
+  const heldColorOf = (rowId: string, colId: string): LockColor | null =>
+    heldInfo(rowId, colId)?.color ?? null;
   // Status is NOT gated on Approved. A call can be cancelled, rescheduled or no-showed long before
   // anyone gets round to confirming it, and locking the outcome behind the paperwork just meant the
   // board couldn't record what actually happened. (The server dropped the same rule.)
@@ -2122,6 +2182,7 @@ export default function Interviews() {
              once and neither sees the other doing it. The server already refuses the loser (409); this
              is what makes it VISIBLE before they waste the effort. */
           lockOf={(rid, cid) => lockedBy(rid, cid)}
+          lockVarsOf={(rid, cid) => { const c = heldColorOf(rid, cid); return c ? lockVars(c) : null; }}
           onClaim={(rid, cid) => liveRef.current?.startEdit(rid, cid)}
           onRelease={() => liveRef.current?.endEdit()}
           columns={cols}
@@ -2197,7 +2258,7 @@ export default function Interviews() {
                     return (
                       <td key={col.id} ref={isAnchorCell ? anchorTdRef : undefined} style={{ padding: 0, ...(ce.length ? { boxShadow: ce.join(', ') } : {}) }} onMouseEnter={() => extendTo(ri, c)}>
                         <StackedCell fields={fields} row={row} meName={meName} avatarByName={avatarByName} tz={userTz}
-                          lockOf={(colId) => lockedBy(row.id, colId)}
+                          lockOf={(colId) => heldInfo(row.id, colId)}
                           subState={stackState(ri, c, col.id)}
                           editSub={editing && editing.r === ri && editing.c === c ? editing.s : null}
                           editSeed={editing && editing.r === ri && editing.c === c ? editing.seed : undefined}
@@ -2218,11 +2279,13 @@ export default function Interviews() {
                   const cval = displayValue(row, col.id);   // Caller falls back to the Team it was handed to
                   // Somebody else is in this cell. The tag only ever showed on STACKED cells, so a plain
                   // one (Status always, Approved for a solo caller) just went quietly dead in your hands:
-                  // no tag, and double-click did nothing. Same treatment for both kinds of cell now.
-                  const heldBy = lockedBy(row.id, col.id);
+                  // no tag, and double-click did nothing. Same treatment for both kinds of cell now,
+                  // tinted in the holder's own presence colour.
+                  const held = heldInfo(row.id, col.id);
                   return (
                     <td key={col.id} ref={isAnchorCell ? anchorTdRef : undefined}
-                        className={(ss.className || '') + (heldBy ? ' iv-locked' : '')} style={tdStyle}
+                        className={(ss.className || '') + (held ? ' iv-locked' : '')}
+                        style={held ? { ...tdStyle, ...lockVars(held.color) } : tdStyle}
                         onMouseDown={(e) => selectCell(e, ri, c, 0, false)}
                         onMouseEnter={() => extendTo(ri, c)}
                         onDoubleClick={() => editCell(ri, c, 0)}>
@@ -2231,7 +2294,7 @@ export default function Interviews() {
                         onCommit={(v) => commitCell(row.id, col.id, v)} onDone={(dir) => { setEditing(null); if (dir) moveActive(dir, false); }}
                         onOpen={col.type === 'button' ? () => openModal(row, col) : () => editCell(ri, c, 0)}
                         onPeek={col.id === 'c_account' && String(cval ?? '').trim() ? () => peekProfile(String(cval)) : undefined} />
-                      {heldBy && <span className="iv-lock-tag" title={`${heldBy} is editing this cell`}>✎ {heldBy}</span>}
+                      {held && <span className="iv-lock-tag" title={`${held.label} is editing this cell`}>✎ {held.label}</span>}
                     </td>
                   );
                 })}
