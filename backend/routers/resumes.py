@@ -299,19 +299,35 @@ def search_applied_resumes(
     # filters so a search stays consistent across both sources; VPS_1 rows feed the facet lists too.
     if has_role(user, "admin"):
         # local hourly mirror, pre-filtered to 'applied' in SQL — no per-search network call and no
-        # deserializing the thousands of non-applied VPS_1 rows
+        # deserializing the thousands of non-applied VPS_1 rows. VPS_1 rows honour EVERY filter the
+        # local rows do (profile / bidder / date / keyword), so the filters behave identically across
+        # both sources.
         for a in storage.get_vps1_applications(status="applied"):
             row = vps1_adapt.applied_row(a)
             who = str(row["bidder"]).strip()
-            if bl and bl not in who.lower():
-                continue
-            if ql and ql not in " ".join(str(row.get(k, "")) for k in
-                                         ("job_company", "job_title", "bidder")).lower():
-                continue
+
+            # facets first (built from the full applied set, like the local loop above)
             if row["profile_name"]:
                 facet_profiles[row["profile_id"]] = row["profile_name"]
             if who:
                 facet_bidders.add(who)
+
+            # filters — same semantics as the local block
+            if profile_id and row["profile_id"] != profile_id:
+                continue
+            if bl and who.lower() != bl:
+                continue
+            applied_day = _et_day(row.get("applied_at") or row.get("created_at"))
+            if date_from and applied_day and applied_day < date_from:
+                continue
+            if date_to and applied_day and applied_day > date_to:
+                continue
+            if ql:
+                hay = " ".join(str(row.get(k, "")) for k in
+                               ("job_company", "job_title", "bidder")).lower()
+                if ql not in hay:
+                    continue
+
             rows.append(row)
 
     rows.sort(key=lambda x: x.get("applied_at") or x.get("created_at") or "", reverse=True)
@@ -336,6 +352,26 @@ def search_applied_resumes(
 def get_resume_job_detail(resume_id: str, user: dict = Depends(get_current_user)):
     """Full job detail (description, link, region) behind an applied resume —
     for the expandable row in the Applied tab."""
+    # VPS_1 applied resume: pull the job detail from the local mirror (admins only).
+    if resume_id.startswith("vps1:"):
+        if not has_role(user, "admin"):
+            raise HTTPException(status_code=403, detail="Forbidden")
+        rid = resume_id[len("vps1:"):]
+        app = next((a for a in storage.get_vps1_applications()
+                    if str(a.get("generated_resume_id") or a.get("id")) == rid), None)
+        if not app:
+            raise HTTPException(status_code=404, detail="Resume not found")
+        return {
+            "job_id": app.get("job_id", ""),
+            "company": app.get("company", ""),
+            "job_title": app.get("job_title", ""),
+            "link": app.get("job_link", ""),
+            "region": app.get("region", ""),
+            "status": app.get("current_status", ""),
+            "description": str(app.get("target_role") or ""),   # VPS_1 doesn't ship the JD in the summary
+            "job_exists": bool(app.get("job_id")),
+        }
+
     rec = storage.get_generated_resume_by_id(resume_id) if hasattr(storage, "get_generated_resume_by_id") else None
     if not rec:
         raise HTTPException(status_code=404, detail="Resume not found")
@@ -1217,14 +1253,20 @@ def get_resume_pdf(resume_id: str, user: dict = Depends(get_current_user)):
         if cache_file.exists() and cache_file.stat().st_size > 0:
             return Response(content=cache_file.read_bytes(), media_type="application/pdf")
         got = vps1_client.get_resume_file(remote_id, "pdf")
-        if not got or not got[0]:
-            raise HTTPException(status_code=502, detail="Could not fetch resume from VPS_1")
-        content, _fn, media = got
-        try:
-            cache_file.write_bytes(content)          # cache for next time; a write failure just re-fetches
-        except Exception:
-            pass
-        return Response(content=content, media_type=media or "application/pdf")
+        if got and got[0]:
+            content, _fn, media = got
+            try:
+                cache_file.write_bytes(content)      # cache for next time; a write failure just re-fetches
+            except Exception:
+                pass
+            return Response(content=content, media_type=media or "application/pdf")
+        # Couldn't fetch/render the file — hand back VPS_1's own PUBLIC resume link so the user can
+        # still open it. 409 + the URL in the body; the Applied tab opens it in a new tab. (A redirect
+        # would be fetched cross-origin by the blob XHR and hit CORS — a plain URL avoids that.)
+        share_url = vps1_client.get_resume_share_link(remote_id, "pdf")
+        if share_url:
+            raise HTTPException(status_code=409, detail={"vps1_resume_url": share_url})
+        raise HTTPException(status_code=502, detail="Could not fetch resume from VPS_1")
 
     record = storage.get_generated_resume_by_id(resume_id) if hasattr(storage, "get_generated_resume_by_id") else None
     if not record:

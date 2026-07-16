@@ -532,17 +532,29 @@ def list_people(user: dict = Depends(_access)):
 
 @router.get("/profiles")
 def list_profiles(user: dict = Depends(_access)):
-    """All profile names (from the Profiles tab / DB) — feeds the Account Profile dropdown.
-    Labels only; every board user (admin + caller) sees the full list, like the Caller dropdown."""
-    out = []
-    for p in storage.get_profiles():
-        pid = str(p.get("id", "")).strip()
-        name = str(p.get("name", "")).strip()
+    """All profile names — feeds the Account Profile dropdown. Includes BOTH this server's profiles
+    (Profiles tab / DB) and VPS_1's mirrored profiles, so a caller can attach any profile to an
+    interview regardless of which server it lives on. Labels only; de-duped by label."""
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    def _add(pid: str, name: str, region: str) -> None:
+        name = name.strip()
         if not name:
-            continue
-        region = str(p.get("region", "")).strip()
-        label = f"{name}({region})" if region else name    # e.g. "Charlie Barahona(US)"
-        out.append({"id": pid, "name": name, "region": region, "label": label})
+            return
+        label = f"{name}({region.strip()})" if region.strip() else name   # e.g. "Charlie Barahona(US)"
+        key = label.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        out.append({"id": pid, "name": name, "region": region.strip(), "label": label})
+
+    for p in storage.get_profiles():
+        _add(str(p.get("id", "")).strip(), str(p.get("name", "")), str(p.get("region", "")))
+    # VPS_1's profiles from the local hourly mirror — namespaced ids so they can't collide.
+    for p in storage.get_vps1_profiles():
+        _add(f"vps1:{p.get('id', '')}", str(p.get("name", "")), str(p.get("region", "")))
+
     return {"profiles": out}
 
 

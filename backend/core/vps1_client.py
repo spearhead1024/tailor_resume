@@ -125,3 +125,21 @@ def get_resume_file(resume_id: str, fmt: str = "pdf") -> tuple[bytes, str, str] 
         filename = cd.split("filename=", 1)[1].strip().strip('"')
     media = resp.headers.get("Content-Type", "application/octet-stream")
     return resp.content, filename, media
+
+
+def get_resume_share_link(resume_id: str, fmt: str = "pdf") -> str | None:
+    """Ask VPS_1 for a PUBLIC (no-login) download URL for a resume — the fallback used when the direct
+    file fetch fails. Returns the URL or None. `resume_id` is VPS_1's raw id (no 'vps1:' prefix)."""
+    if not is_configured():
+        return None
+    try:
+        resp = _session.get(
+            f"{BASE_URL}/api/external/resumes/{resume_id}/share-link",
+            params={"fmt": fmt}, headers=_headers(), timeout=HTTP_TIMEOUT,
+        )
+        resp.raise_for_status()
+        url = (resp.json() or {}).get("url")
+        return str(url) if url else None
+    except Exception as e:
+        log.warning("VPS_1 share-link %s failed: %s", resume_id, e)
+        return None

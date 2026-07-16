@@ -89,6 +89,20 @@ export default function NotifCenter() {
     } catch { /* ignore */ }
   };
 
+  // Permanently remove every notification for this user — the inbox grows unbounded over time, so this
+  // is the "empty it" action. Confirmed, since it's not undoable.
+  const deleteAll = async () => {
+    if (items.length === 0) return;
+    if (!confirm('Delete all notifications? This cannot be undone.')) return;
+    try {
+      const r = await api.raw.delete<{ counts: Counts }>('/api/notifications');
+      setItems([]);
+      setCounts(r.data.counts || { unread: 0, board: 0, reminder: 0 });
+    } catch {
+      toast('Could not delete notifications', 'error');
+    }
+  };
+
   const shown = tab ? items.filter((i) => i.kind === tab) : items;
   const badge = counts.unread;
 
@@ -126,7 +140,7 @@ export default function NotifCenter() {
           </div>
 
           {/* categories */}
-          <div style={{ display: 'flex', gap: 6, padding: '8px 12px', borderBottom: '1px solid var(--border)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px', borderBottom: '1px solid var(--border)' }}>
             {([['', 'All', counts.unread], ['board', 'Board', counts.board], ['reminder', 'Reminders', counts.reminder]] as const)
               .map(([k, label, n]) => (
                 <button key={k || 'all'} className={tab === k ? '' : 'secondary'} onClick={() => setTab(k as '' | NotifKind)}
@@ -134,6 +148,12 @@ export default function NotifCenter() {
                   {label}{n > 0 && <span style={{ opacity: 0.75, marginLeft: 4 }}>{n}</span>}
                 </button>
               ))}
+            <span style={{ flex: 1 }} />
+            {/* Empty the whole inbox — it accumulates unbounded otherwise. */}
+            <button className="ghost danger" onClick={deleteAll} disabled={items.length === 0}
+              title="Delete all notifications" style={{ fontSize: '0.74rem', padding: '3px 8px', borderRadius: 999 }}>
+              🗑 Delete all
+            </button>
           </div>
 
           <div style={{ maxHeight: 380, overflowY: 'auto' }}>

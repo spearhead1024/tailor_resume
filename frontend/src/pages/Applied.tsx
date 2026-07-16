@@ -83,9 +83,12 @@ export default function Applied() {
       if (!blob || blob.size === 0) throw new Error('Empty PDF');
       window.open(URL.createObjectURL(blob), '_blank');
     } catch (e: any) {
-      let msg = 'Failed to open PDF';
-      try { msg = JSON.parse(await e?.response?.data?.text())?.detail || msg; } catch { /* */ }
-      toast(msg, 'error');
+      // A VPS_1 resume that couldn't be fetched comes back as 409 with a public VPS_1 link — open it.
+      let detail: any;
+      try { detail = JSON.parse(await e?.response?.data?.text())?.detail; } catch { /* */ }
+      const vps1Url = detail && typeof detail === 'object' ? detail.vps1_resume_url : undefined;
+      if (vps1Url) { window.open(vps1Url, '_blank', 'noopener'); return; }
+      toast((typeof detail === 'string' && detail) || 'Failed to open PDF', 'error');
     }
   }
 
@@ -198,13 +201,12 @@ function RowView({ row, open, onToggle, onPdf, onJump, onSchedule }: {
   const { data: detail, isLoading } = useQuery({
     queryKey: ['applied', 'job', row.saved_resume_id],
     queryFn: () => api.get<JobDetail>(`/api/resumes/${row.saved_resume_id}/job`),
-    enabled: open && !remote,   // the detail endpoint is local-only; a vps1: id won't resolve
+    enabled: open,   // works for VPS_1 rows too — the backend serves their detail from the mirror
   });
 
   return (
     <>
-      {/* VPS_1 rows don't expand (their resume/job detail lives on VPS_1) — only the posting link works. */}
-      <tr style={{ cursor: remote ? 'default' : 'pointer' }} onClick={remote ? undefined : onToggle}>
+      <tr style={{ cursor: 'pointer' }} onClick={onToggle}>
         <td><SourceBadge source={row.source} /></td>
         <td>{row.job_company || '—'}</td>
         <td>{row.job_link
@@ -214,18 +216,21 @@ function RowView({ row, open, onToggle, onPdf, onJump, onSchedule }: {
         <td>{row.bidder || '—'}</td>
         <td style={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }}>{etDateTime(row.applied_at || row.created_at)}</td>
         <td style={{ whiteSpace: 'nowrap' }}>
-          {/* VPS_1 rows: the resume PDF streams through from VPS_1, but Job-lookup and Schedule are
-              local-only workflows, so they're hidden. */}
+          {/* PDF works for both: a VPS_1 resume streams through the backend, falling back to VPS_1's
+              public link if it can't be fetched. Job opens the local Jobs tab (VPS_2) or the posting
+              (VPS_1). Schedule adds a row to the Interviews board for either source. */}
           <button className="secondary" onClick={(e) => { e.stopPropagation(); onPdf(); }}>📄 PDF</button>
-          {!remote && (<>
-          <button className="secondary" style={{ marginLeft: 4 }} onClick={(e) => { e.stopPropagation(); onJump(); }} title="Find this job in the Jobs tab">↗ Job</button>
+          {remote
+            ? (row.job_link && <a className="secondary" href={row.job_link} target="_blank" rel="noreferrer"
+                style={{ marginLeft: 4, textDecoration: 'none', display: 'inline-block' }}
+                onClick={(e) => e.stopPropagation()} title="Open the job posting">↗ Job</a>)
+            : <button className="secondary" style={{ marginLeft: 4 }} onClick={(e) => { e.stopPropagation(); onJump(); }} title="Find this job in the Jobs tab">↗ Job</button>}
           <button className="secondary" style={{ marginLeft: 4 }} disabled={scheduling}
             onClick={async (e) => { e.stopPropagation(); setScheduling(true); try { await onSchedule(); } finally { setScheduling(false); } }}
             title="Add this resume + job description as a row on the Interviews board">{scheduling ? '…' : '📅 Schedule'}</button>
-          </>)}
         </td>
       </tr>
-      {open && !remote && (
+      {open && (
         <tr>
           <td colSpan={7} style={{ background: 'var(--panel-2)', padding: '1rem' }}>
             {isLoading ? <span className="spinner" /> : detail ? (
