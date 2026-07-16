@@ -13,6 +13,7 @@ from auth import (
     create_jwt,
     devices,
     get_current_user,
+    has_role,
     storage,
 )
 from core.devices import is_mobile_or_tablet, parse_user_agent
@@ -44,26 +45,49 @@ def _password_policy_error(password: str) -> str:
     return ""
 
 
+# Roles that may sign in from a phone or tablet. Bidding is the one desktop-only workflow, so a
+# bidder-ONLY account is the only thing turned away.
+_MOBILE_ALLOWED_ROLES = ("admin", "caller", "manager", "job_adder")
+
+
+def _may_use_mobile(user: dict) -> bool:
+    """May this account sign in from a mobile/tablet?
+
+    True for admins and for anyone holding a non-bidder role. Roles stack — an admin or caller who is
+    ALSO a bidder keeps mobile access; only an account whose sole role is `bidder` is blocked. An
+    account with no roles at all is treated as a bidder (the restrictive default).
+    """
+    if user.get("is_admin"):
+        return True
+    return has_role(user, *_MOBILE_ALLOWED_ROLES)
+
+
 @router.post("/login", response_model=LoginResponse)
 def login(body: LoginRequest, request: Request):
     ua = request.headers.get("user-agent", "")
-
-    # Block mobile + tablet logins outright. Admins log in from desktop only.
-    if is_mobile_or_tablet(ua):
-        info = parse_user_agent(ua)
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                f"Mobile and tablet devices are not allowed ({info['device_type']}). "
-                f"Please sign in from a desktop browser."
-            ),
-        )
 
     user = authenticate_user(body.identifier, body.password)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     if user.get("status") != "approved":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account pending approval")
+
+    # Mobile / tablet is allowed for everyone EXCEPT bidders: callers take calls on the move, admins
+    # and job-adders need to get in from anywhere, but bidding is a desktop workflow.
+    #
+    # The check runs AFTER authenticating, because it needs to know who this is — and it asks "does
+    # this account hold any role other than bidder?", not "is bidder in their roles". Roles stack:
+    # an admin who is also a bidder is still an admin, and testing for the bidder role alone would
+    # lock them out of their phone. Only a bidder-ONLY account is turned away.
+    if is_mobile_or_tablet(ua) and not _may_use_mobile(user):
+        info = parse_user_agent(ua)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Bidders cannot sign in from mobile or tablet devices ({info['device_type']}). "
+                f"Please sign in from a desktop browser."
+            ),
+        )
 
     # Record (or refresh) the device session for this user.
     session = devices.record_login(user["id"], ua, _client_ip(request))

@@ -1205,20 +1205,21 @@ export default function Interviews() {
   const [peekId, setPeekId] = useState<string>('');                                                       // 👁 on a Profile cell → whose card is open
   const [teams, setTeams] = useState<{ id: string; name: string }[]>([]);                                 // caller teams (Team dropdown)
   const [loading, setLoading] = useState(true);
-  // Default view: THIS WEEK's calls (plus every unscheduled row — see `matched`). A board that opens
-  // on all history is mostly noise; the week you're working in is what you actually came to see.
-  // It's a normal filter, so the date pickers show it and Clear drops it to show everything.
-  const [flt, setFlt] = useState<Record<string, string>>(() => {
-    const w = thisWeek(me?.timezone || undefined);
-    return { dateFrom: w.from, dateTo: w.to };
-  });
+  // Default view: everything from MONDAY OF THIS WEEK onwards — the week you're working in plus what's
+  // still to come. Open-ended on purpose: no To date, so a call booked for next month is still there.
+  // It's a normal filter, so the From picker shows it and Clear drops it to show all history.
+  const [flt, setFlt] = useState<Record<string, string>>(() => ({
+    dateFrom: thisWeek(me?.timezone || undefined).from,
+  }));
   const [colFlt, setColFlt] = useState<Record<string, string[]>>({});  // per-column multi-select (checkable) filters
   // Rows added in this session. A brand-new row is empty, so it matches no filter and would vanish
   // the instant it was created — you'd click Add and see nothing. It used to be worse: adding WIPED
   // your filters. Exempt the new row from the filters instead, so your filter survives and the row
   // you just asked for is there to type into. It re-joins the normal rules on the next load.
   const [justAdded, setJustAdded] = useState<Set<string>>(() => new Set());
-  const [limit, setLimit] = useState(50);                          // show the recent N schedules (0 = all)
+  // 0 = no cap. The default view is scoped by the From date above, not by a recent-N count; the box is
+  // still there to cap the list by hand when you want.
+  const [limit, setLimit] = useState(0);
   const [liveUp, setLiveUp] = useState(true);                      // socket connected? (shown in the toolbar)
   // Table or calendar — the SAME rows, the same socket, the same filters, drawn two ways. Remembered,
   // because whichever one you work in is the one you want back tomorrow.
@@ -2146,9 +2147,9 @@ export default function Interviews() {
           <input type="date" className="iv-flt-date" title="Scheduled from" value={flt.dateFrom || ''} onChange={(e) => setFlt((f) => ({ ...f, dateFrom: e.target.value }))} />
           <span className="muted iv-flt-lbl">To</span>
           <input type="date" className="iv-flt-date" title="Scheduled to" value={flt.dateTo || ''} onChange={(e) => setFlt((f) => ({ ...f, dateTo: e.target.value }))} />
-          {/* The board opens on this week. Clear drops the range to show ALL history, so there has to be
-              a one-click way back — otherwise the default view is unreachable once you leave it. */}
-          <button className="ghost iv-flt-week" title="Show this week's calls (the default view)"
+          {/* The board opens unfiltered on the most recent calls, so this is the one-click way to narrow
+              to the week you're working in. */}
+          <button className="ghost iv-flt-week" title="Show this week's calls"
             onClick={() => { const w = thisWeek(userTz); setFlt((f) => ({ ...f, dateFrom: w.from, dateTo: w.to })); }}>This week</button>
         </>}
         {hasFilters && <button className="secondary iv-flt-clear" onClick={() => { setFlt({}); setColFlt({}); }}>Clear</button>}
