@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from auth import get_current_user, require_admin, storage
-from core import vps1_adapt, vps1_client
+from core import vps1_adapt
 from schemas import ProfileUpsertRequest
 
 
@@ -37,7 +37,9 @@ def list_profiles(user: dict = Depends(get_current_user)):
     local = vps1_adapt.tag_local(_accessible(user, storage.get_profiles()))
     if not user.get("is_admin"):
         return local
-    remote = [vps1_adapt.profile(p) for p in vps1_client.get_profiles()]
+    # VPS_1 rows come from the local hourly mirror (core/vps1_sync.py), so this stays a fast DB read —
+    # no per-load network call to VPS_1.
+    remote = [vps1_adapt.profile(p) for p in storage.get_vps1_profiles()]
     return local + remote
 
 

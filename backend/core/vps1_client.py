@@ -96,7 +96,8 @@ def get_users() -> list[dict]:
     return _fetch_list("/api/external/users", "users")
 
 
-def get_applications(limit: int = 2000) -> list[dict]:
+def get_applications(limit: int = 50000) -> list[dict]:
+    # Pull the whole set (VPS_1 caps at 50k) — the hourly sync does a full replace.
     return _fetch_list("/api/external/applications", "applications", {"limit": limit})
 
 

@@ -145,6 +145,42 @@ class OpenAICallRow(Base):
     data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+# ── VPS_1 mirror cache ───────────────────────────────────────────────────────
+# Read-only snapshots of VPS_1 (Resume-Generator-v2) profiles / users / applications, refreshed by
+# core/vps1_sync.py every hour (full replace). Kept in DEDICATED tables — never mixed into the local
+# `profiles`/`users`/`generated_resumes` tables — so every existing local query, count and delete is
+# untouched, and a rollback is just "drop these tables". Each row stores VPS_1's already-serialized
+# dict verbatim in `data`; `id` is VPS_1's own id (a UUID string).
+class Vps1ProfileRow(Base):
+    __tablename__ = 'vps1_profiles'
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), default='', index=True)
+    data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class Vps1UserRow(Base):
+    __tablename__ = 'vps1_users'
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    username: Mapped[str] = mapped_column(String(128), default='', index=True)
+    data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class Vps1ApplicationRow(Base):
+    __tablename__ = 'vps1_applications'
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    created_at_iso: Mapped[str] = mapped_column(String(40), default='', index=True)
+    # current_status mirrored to a column so the Applied tab can filter to 'applied' in SQL instead
+    # of deserializing every row's JSON on each search.
+    status: Mapped[str] = mapped_column(String(40), default='', index=True)
+    data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
 class DeviceSessionRow(Base):
     """One row per (user, device fingerprint). Created on login.
 

@@ -298,9 +298,9 @@ def search_applied_resumes(
     # Admins also see VPS_1's applied rows (read-only, live proxy). Apply the same keyword / bidder
     # filters so a search stays consistent across both sources; VPS_1 rows feed the facet lists too.
     if has_role(user, "admin"):
-        for a in vps1_client.get_applications():
-            if str(a.get("current_status", "")).strip().lower() != "applied":
-                continue
+        # local hourly mirror, pre-filtered to 'applied' in SQL — no per-search network call and no
+        # deserializing the thousands of non-applied VPS_1 rows
+        for a in storage.get_vps1_applications(status="applied"):
             row = vps1_adapt.applied_row(a)
             who = str(row["bidder"]).strip()
             if bl and bl not in who.lower():
@@ -1206,15 +1206,24 @@ def delete(resume_id: str, user: dict = Depends(get_current_user)):
 
 @router.get("/{resume_id}/pdf")
 def get_resume_pdf(resume_id: str, user: dict = Depends(get_current_user)):
-    # A VPS_1 resume (id "vps1:<uuid>") is streamed straight from VPS_1 — admins only, since only they
-    # see VPS_1 rows in the first place.
+    # A VPS_1 resume (id "vps1:<uuid>") — admins only, since only they see VPS_1 rows. We don't sync
+    # every resume file hourly (thousands of renders nobody views); instead fetch from VPS_1 the first
+    # time someone opens it, then cache the PDF locally so the next open is instant.
     if resume_id.startswith("vps1:"):
         if not has_role(user, "admin"):
             raise HTTPException(status_code=403, detail="Forbidden")
-        got = vps1_client.get_resume_file(resume_id[len("vps1:"):], "pdf")
-        if not got:
+        remote_id = resume_id[len("vps1:"):]
+        cache_file = PDF_CACHE_DIR / f"vps1_{remote_id}.pdf"
+        if cache_file.exists() and cache_file.stat().st_size > 0:
+            return Response(content=cache_file.read_bytes(), media_type="application/pdf")
+        got = vps1_client.get_resume_file(remote_id, "pdf")
+        if not got or not got[0]:
             raise HTTPException(status_code=502, detail="Could not fetch resume from VPS_1")
         content, _fn, media = got
+        try:
+            cache_file.write_bytes(content)          # cache for next time; a write failure just re-fetches
+        except Exception:
+            pass
         return Response(content=content, media_type=media or "application/pdf")
 
     record = storage.get_generated_resume_by_id(resume_id) if hasattr(storage, "get_generated_resume_by_id") else None

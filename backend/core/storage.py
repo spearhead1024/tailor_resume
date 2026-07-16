@@ -37,6 +37,9 @@ from .db.models import (
     TeamRow,
     TemplateRow,
     UserRow,
+    Vps1ApplicationRow,
+    Vps1ProfileRow,
+    Vps1UserRow,
 )
 
 
@@ -2064,3 +2067,58 @@ class Storage:
             for i, rr in enumerate(session.scalars(select(InterviewRow).order_by(InterviewRow.position)).all()):
                 rr.position = i
             return True
+
+    # ── VPS_1 mirror cache (written by core/vps1_sync.py, read by the tabs) ──────────────────────
+    def replace_vps1_profiles(self, rows: list[dict]) -> int:
+        """Atomically swap the whole VPS_1 profile snapshot for `rows` (each = VPS_1's serialized
+        dict). One transaction, so a reader never sees a half-written snapshot."""
+        with session_scope(self.db_path) as session:
+            session.query(Vps1ProfileRow).delete()
+            for r in rows:
+                rid = str(r.get('id') or '').strip()
+                if not rid:
+                    continue
+                session.add(Vps1ProfileRow(id=rid, name=str(r.get('name') or ''), data=r))
+            return len(rows)
+
+    def replace_vps1_users(self, rows: list[dict]) -> int:
+        with session_scope(self.db_path) as session:
+            session.query(Vps1UserRow).delete()
+            for r in rows:
+                rid = str(r.get('id') or '').strip()
+                if not rid:
+                    continue
+                session.add(Vps1UserRow(id=rid, username=str(r.get('username') or ''), data=r))
+            return len(rows)
+
+    def replace_vps1_applications(self, rows: list[dict]) -> int:
+        with session_scope(self.db_path) as session:
+            session.query(Vps1ApplicationRow).delete()
+            for r in rows:
+                rid = str(r.get('id') or '').strip()
+                if not rid:
+                    continue
+                session.add(Vps1ApplicationRow(
+                    id=rid, created_at_iso=str(r.get('created_at') or ''),
+                    status=str(r.get('current_status') or '').strip().lower(), data=r))
+            return len(rows)
+
+    def get_vps1_profiles(self) -> list[dict]:
+        with session_scope(self.db_path) as session:
+            rows = session.scalars(select(Vps1ProfileRow).order_by(Vps1ProfileRow.name)).all()
+            return [dict(r.data or {}) for r in rows]
+
+    def get_vps1_users(self) -> list[dict]:
+        with session_scope(self.db_path) as session:
+            rows = session.scalars(select(Vps1UserRow).order_by(Vps1UserRow.username)).all()
+            return [dict(r.data or {}) for r in rows]
+
+    def get_vps1_applications(self, status: str = '') -> list[dict]:
+        """VPS_1 applications, newest first. `status` (e.g. 'applied') filters in SQL via the mirrored
+        status column, so the Applied tab doesn't deserialize thousands of non-applied rows."""
+        with session_scope(self.db_path) as session:
+            stmt = select(Vps1ApplicationRow).order_by(Vps1ApplicationRow.created_at_iso.desc())
+            st = str(status or '').strip().lower()
+            if st:
+                stmt = stmt.where(Vps1ApplicationRow.status == st)
+            return [dict(r.data or {}) for r in session.scalars(stmt).all()]

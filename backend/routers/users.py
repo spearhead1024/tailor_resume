@@ -10,7 +10,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from auth import get_current_user, is_manager, require_admin, storage, team_id_of
-from core import vps1_adapt, vps1_client
+from core import vps1_adapt
 from core.storage import build_password_record
 # detach_team(): a deleted team must not leave its name behind on the calls it was given.
 from routers import interviews
@@ -99,7 +99,8 @@ def list_users(user: dict = Depends(_access)):
     if not user.get("is_admin"):
         tid = team_id_of(user)
         return [u for u in users if str(u.get("team_id", "")).strip() == tid]
-    remote = [vps1_adapt.user(u) for u in vps1_client.get_users()]
+    # VPS_1 users come from the local hourly mirror (core/vps1_sync.py) — a fast DB read.
+    remote = [vps1_adapt.user(u) for u in storage.get_vps1_users()]
     return users + remote
 
 

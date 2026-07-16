@@ -44,5 +44,21 @@ module.exports = {
       autorestart: true,
       restart_delay: 5000,
     },
+    {
+      // Mirrors VPS_1 (Resume-Generator-v2) profiles/users/applications into the local
+      // vps1_* cache tables every hour, so the Profiles/Users/Applied tabs read them
+      // instantly from SQLite instead of calling VPS_1 on every page load.
+      name: 'vps1-sync',
+      cwd: '/var/@TailorResume/backend',
+      script: '.venv/bin/python',
+      args: 'core/vps1_sync.py',
+      interpreter: 'none',
+      env: {
+        PYTHONUNBUFFERED: '1',
+      },
+      max_memory_restart: '256M',
+      autorestart: true,
+      restart_delay: 5000,
+    },
   ],
 };
