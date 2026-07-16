@@ -135,11 +135,9 @@ def _visibility(user: dict):
     admin   → everything. They are the only ones with the whole picture.
     manager → their whole team, INCLUDING calls handed to the team with nobody picked yet — that is the
               queue they assign from, so they have to see it.
-    caller  → their own calls; and, if they are on a team, that team's schedule too, so team-mates can
-              see what the rest of the team is booked for.
-    a caller with NO team → strictly their own, and nothing else.
-
-    Seeing is not editing: a team-mate's call is read-only to them (see _writability, which is narrower).
+    caller  → ONLY the calls assigned to them, full stop — being on a team does not widen this. A
+              caller has no business reading a colleague's interviews, their contact details, or who
+              they are speaking to; the team's schedule is the manager's view, not theirs.
     """
     if user.get("is_admin"):
         return lambda row: True
@@ -148,11 +146,7 @@ def _visibility(user: dict):
         return _team_scope(user)
 
     ids = _caller_ids(user)
-    mine = lambda row: str((row.get("cells") or {}).get("c_caller", "")).strip().lower() in ids
-    if not team_id_of(user):
-        return mine
-    in_team = _team_scope(user)
-    return lambda row: mine(row) or in_team(row)
+    return lambda row: str((row.get("cells") or {}).get("c_caller", "")).strip().lower() in ids
 
 
 def _writability(user: dict):
@@ -587,7 +581,11 @@ def get_board_profile(profile_id: str, user: dict = Depends(_access)):
     That last clause matters. Without it, any caller could walk the profile ids and read the contact
     details of every persona in the company, including ones on another team's interviews.
     """
-    p = storage.get_profile_by_id(str(profile_id or "").strip())
+    pid = str(profile_id or "").strip()
+    # A VPS_1 profile ("vps1:<uuid>") is read from the local mirror, with any admin edits merged in —
+    # same door, same rule as a local one.
+    p = (storage.get_vps1_profile_by_id(pid[len("vps1:"):]) if pid.startswith("vps1:")
+         else storage.get_profile_by_id(pid))
     if not p:
         raise HTTPException(status_code=404, detail="Profile not found")
 

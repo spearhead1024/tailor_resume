@@ -69,6 +69,18 @@ def create_profile(body: ProfileUpsertRequest, user: dict = Depends(require_admi
 
 @router.patch("/{profile_id}")
 def update_profile(profile_id: str, body: ProfileUpsertRequest, user: dict = Depends(get_current_user)):
+    # A VPS_1 profile is edited HERE but lives THERE: VPS_1 only sends a few fields, so admins fill the
+    # rest in on this side. The edit is stored as an override (admin edits win, and the hourly mirror
+    # can't wipe them) — we never write back to VPS_1.
+    if profile_id.startswith("vps1:"):
+        if not user.get("is_admin"):
+            raise HTTPException(status_code=403, detail="Only an admin can edit a VPS_1 profile.")
+        patch = {k: v for k, v in dict(body.payload).items() if k != "id"}
+        updated = storage.patch_vps1_profile(profile_id[len("vps1:"):], patch)
+        if not updated:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        return vps1_adapt.profile(updated)
+
     if not user.get("is_admin") and profile_id not in (user.get("assigned_profile_ids") or []):
         raise HTTPException(status_code=403, detail="Forbidden")
     payload = dict(body.payload)

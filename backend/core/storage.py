@@ -21,7 +21,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from .db import session_scope
@@ -38,6 +38,7 @@ from .db.models import (
     TemplateRow,
     UserRow,
     Vps1ApplicationRow,
+    Vps1ProfileOverrideRow,
     Vps1ProfileRow,
     Vps1UserRow,
 )
@@ -1259,6 +1260,36 @@ class Storage:
             rows = session.scalars(select(GeneratedResumeRow).order_by(GeneratedResumeRow.created_at_ts)).all()
             return [_normalize_generated_resume(dict(row.data or {})) for row in rows]
 
+    # Fields the Applied list needs. They live inside the `data` JSON (no columns for them), so pull
+    # them with json_extract and let SQLite do the extraction.
+    _APPLIED_INDEX_SQL = text("""
+        SELECT id                                        AS saved_resume_id,
+               json_extract(data, '$.job_id')            AS job_id,
+               json_extract(data, '$.job_company')       AS job_company,
+               json_extract(data, '$.job_title')         AS job_title,
+               json_extract(data, '$.job_link')          AS job_link,
+               json_extract(data, '$.job_region')        AS job_region,
+               json_extract(data, '$.profile_id')        AS profile_id,
+               json_extract(data, '$.applied_at')        AS applied_at,
+               json_extract(data, '$.created_at')        AS created_at,
+               json_extract(data, '$.applied_by_username')  AS applied_by,
+               json_extract(data, '$.created_by_username')  AS created_by,
+               json_extract(data, '$.job_description')   AS job_description
+        FROM generated_resumes
+        WHERE json_extract(data, '$.applied_status') = 'applied'
+    """)
+
+    def get_applied_resume_index(self) -> list[dict]:
+        """The APPLIED resumes, as lightweight rows for the Applied list.
+
+        Deliberately NOT get_generated_resumes(): that deserializes every row's full resume JSON —
+        ~40 MB across ~3.8k rows — just to render company/title/date, which cost ~1.5 s per search.
+        Extracting the handful of needed fields in SQL keeps the blobs in the database and makes the
+        same query ~15x faster. The full record is still loaded per-row when someone opens one.
+        """
+        with session_scope(self.db_path) as session:
+            return [dict(m) for m in session.execute(self._APPLIED_INDEX_SQL).mappings().all()]
+
     def save_generated_resume(self, payload: dict) -> None:
         normalized = _normalize_generated_resume(payload)
         with session_scope(self.db_path) as session:
@@ -2104,9 +2135,52 @@ class Storage:
             return len(rows)
 
     def get_vps1_profiles(self) -> list[dict]:
+        """VPS_1's profiles with any local admin edits merged over the top (edits win). The hourly
+        mirror refreshes the snapshot; the overrides table survives it — see Vps1ProfileOverrideRow."""
         with session_scope(self.db_path) as session:
             rows = session.scalars(select(Vps1ProfileRow).order_by(Vps1ProfileRow.name)).all()
-            return [dict(r.data or {}) for r in rows]
+            overrides = {o.id: dict(o.data or {})
+                         for o in session.scalars(select(Vps1ProfileOverrideRow)).all()}
+            out = []
+            for r in rows:
+                merged = dict(r.data or {})
+                merged.update(overrides.get(r.id) or {})     # admin edit always wins
+                out.append(merged)
+            return out
+
+    def get_vps1_profile_by_id(self, vps1_id: str) -> dict | None:
+        """One VPS_1 profile (snapshot + local edits). `vps1_id` is VPS_1's raw id, no 'vps1:' prefix."""
+        pid = str(vps1_id or '').strip()
+        if not pid:
+            return None
+        with session_scope(self.db_path) as session:
+            row = session.get(Vps1ProfileRow, pid)
+            if row is None:
+                return None
+            merged = dict(row.data or {})
+            ov = session.get(Vps1ProfileOverrideRow, pid)
+            if ov is not None:
+                merged.update(dict(ov.data or {}))
+            return merged
+
+    def patch_vps1_profile(self, vps1_id: str, patch: dict) -> dict | None:
+        """Record an admin's edit to a VPS_1 profile. Stores ONLY the given fields, merged into any
+        previous edit — so the next hourly mirror refreshes everything else but leaves these alone."""
+        pid = str(vps1_id or '').strip()
+        if not pid:
+            return None
+        with session_scope(self.db_path) as session:
+            if session.get(Vps1ProfileRow, pid) is None:
+                return None                       # unknown profile — don't create an orphan override
+            ov = session.get(Vps1ProfileOverrideRow, pid)
+            fields = dict(ov.data or {}) if ov is not None else {}
+            fields.update(patch or {})
+            fields.pop('id', None)                # the id is never an editable field
+            if ov is None:
+                session.add(Vps1ProfileOverrideRow(id=pid, data=fields))
+            else:
+                ov.data = fields                  # reassign: SQLAlchemy won't see an in-place mutation
+        return self.get_vps1_profile_by_id(pid)
 
     def get_vps1_users(self) -> list[dict]:
         with session_scope(self.db_path) as session:

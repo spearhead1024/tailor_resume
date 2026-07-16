@@ -244,11 +244,13 @@ export default function Profiles() {
                 )}
                 {selected.source === 'VPS_1' && <SourceBadge source={selected.source} />}
                 <div style={{ flex: 1 }} />
-                {/* VPS_1 profiles are a read-only mirror — no edit/delete (manage them on VPS_1). */}
-                {isAdmin && !editing && selected.source !== 'VPS_1' && (
+                {/* A VPS_1 profile IS editable here: VPS_1 only sends a few fields, so an admin fills
+                    the rest in on this side and the edit is kept even when the hourly mirror refreshes.
+                    Delete stays hidden though — the row belongs to VPS_1 and would just come back. */}
+                {isAdmin && !editing && (
                   <>
                     <button onClick={handleEdit} className="secondary">Edit</button>
-                    {selected.id && (
+                    {selected.id && selected.source !== 'VPS_1' && (
                       <button className="danger" style={{ marginLeft: 6 }}
                         onClick={() => { if (confirm('Delete profile?')) deleteMutation.mutate(selected.id); }}>
                         Delete

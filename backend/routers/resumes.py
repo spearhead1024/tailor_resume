@@ -246,9 +246,8 @@ def search_applied_resumes(
     facet_profiles: dict[str, str] = {}
     facet_bidders: set[str] = set()
 
-    for r in storage.get_generated_resumes():
-        if r.get("applied_status") != "applied":
-            continue
+    # Lightweight index (json_extract in SQL) — never pulls the ~40 MB of resume blobs into Python.
+    for r in storage.get_applied_resume_index():
         pid = r.get("profile_id") or ""
         if allowed_pids is not None and pid not in allowed_pids:
             continue
@@ -256,7 +255,7 @@ def search_applied_resumes(
         # facets (built from the full applied set this user can see)
         if pid in profiles:
             facet_profiles[pid] = profiles[pid].get("name", "")
-        who = (r.get("applied_by_username") or r.get("created_by_username") or "").strip()
+        who = (r.get("applied_by") or r.get("created_by") or "").strip()
         if who:
             facet_bidders.add(who)
 
@@ -282,16 +281,16 @@ def search_applied_resumes(
 
         rows.append({
             "saved_resume_id": r.get("saved_resume_id"),
-            "job_id": r.get("job_id", ""),
-            "job_company": r.get("job_company", ""),
-            "job_title": r.get("job_title", ""),
-            "job_link": r.get("job_link", ""),
-            "job_region": r.get("job_region", ""),
+            "job_id": r.get("job_id") or "",
+            "job_company": r.get("job_company") or "",
+            "job_title": r.get("job_title") or "",
+            "job_link": r.get("job_link") or "",
+            "job_region": r.get("job_region") or "",
             "profile_id": pid,
             "profile_name": profiles.get(pid, {}).get("name", ""),
             "bidder": who,
-            "applied_at": r.get("applied_at", ""),
-            "created_at": r.get("created_at", ""),
+            "applied_at": r.get("applied_at") or "",
+            "created_at": r.get("created_at") or "",
             "source": vps1_adapt.SOURCE_LOCAL,
         })
 

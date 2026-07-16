@@ -1,6 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useQuery, keepPreviousData } from '@tanstack/react-query';
-import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { useToast } from '../lib/toast';
 import { etDateTime } from '../lib/etTime';
@@ -35,7 +34,6 @@ type JobDetail = {
 
 export default function Applied() {
   const toast = useToast();
-  const navigate = useNavigate();
 
   const [query, setQuery] = useState('');
   const [debounced, setDebounced] = useState('');
@@ -174,7 +172,6 @@ export default function Applied() {
                 open={expanded === r.saved_resume_id}
                 onToggle={() => setExpanded(expanded === r.saved_resume_id ? null : r.saved_resume_id)}
                 onPdf={() => viewPdf(r.saved_resume_id)}
-                onJump={() => navigate(`/jobs?company=${encodeURIComponent(r.job_company)}`)}
                 onSchedule={() => scheduleInterview(r)}
               />
             ))}
@@ -193,8 +190,8 @@ export default function Applied() {
   );
 }
 
-function RowView({ row, open, onToggle, onPdf, onJump, onSchedule }: {
-  row: Row; open: boolean; onToggle: () => void; onPdf: () => void; onJump: () => void; onSchedule: () => Promise<void>;
+function RowView({ row, open, onToggle, onPdf, onSchedule }: {
+  row: Row; open: boolean; onToggle: () => void; onPdf: () => void; onSchedule: () => Promise<void>;
 }) {
   const [scheduling, setScheduling] = useState(false);
   const remote = row.source === 'VPS_1';
@@ -217,14 +214,8 @@ function RowView({ row, open, onToggle, onPdf, onJump, onSchedule }: {
         <td style={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }}>{etDateTime(row.applied_at || row.created_at)}</td>
         <td style={{ whiteSpace: 'nowrap' }}>
           {/* PDF works for both: a VPS_1 resume streams through the backend, falling back to VPS_1's
-              public link if it can't be fetched. Job opens the local Jobs tab (VPS_2) or the posting
-              (VPS_1). Schedule adds a row to the Interviews board for either source. */}
+              public link if it can't be fetched. Schedule adds a row to the Interviews board. */}
           <button className="secondary" onClick={(e) => { e.stopPropagation(); onPdf(); }}>📄 PDF</button>
-          {remote
-            ? (row.job_link && <a className="secondary" href={row.job_link} target="_blank" rel="noreferrer"
-                style={{ marginLeft: 4, textDecoration: 'none', display: 'inline-block' }}
-                onClick={(e) => e.stopPropagation()} title="Open the job posting">↗ Job</a>)
-            : <button className="secondary" style={{ marginLeft: 4 }} onClick={(e) => { e.stopPropagation(); onJump(); }} title="Find this job in the Jobs tab">↗ Job</button>}
           <button className="secondary" style={{ marginLeft: 4 }} disabled={scheduling}
             onClick={async (e) => { e.stopPropagation(); setScheduling(true); try { await onSchedule(); } finally { setScheduling(false); } }}
             title="Add this resume + job description as a row on the Interviews board">{scheduling ? '…' : '📅 Schedule'}</button>

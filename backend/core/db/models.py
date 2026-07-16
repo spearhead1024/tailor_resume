@@ -160,6 +160,22 @@ class Vps1ProfileRow(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
+class Vps1ProfileOverrideRow(Base):
+    """Admin edits to a VPS_1 profile, made here on VPS_2.
+
+    VPS_1 only sends a handful of fields (name/email/phone/location/region…), so the rest of a profile
+    is blank until an admin fills it in — and the hourly mirror REPLACES the vps1_profiles snapshot
+    wholesale, which would wipe those edits. So edits live in their own table, keyed by the VPS_1
+    profile id, holding ONLY the fields that were actually changed. Reads merge snapshot + overrides
+    (overrides win), so the sync keeps VPS_1-sourced fields fresh while never touching an admin's work.
+    """
+    __tablename__ = 'vps1_profile_overrides'
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)   # the VPS_1 profile id (raw uuid)
+    data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)   # only the edited fields
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
 class Vps1UserRow(Base):
     __tablename__ = 'vps1_users'
 

@@ -15,19 +15,26 @@ def tag_local(rows: list[dict]) -> list[dict]:
     return [{**r, "source": SOURCE_LOCAL} for r in rows]
 
 
+# VPS_1 sends these; everything else on a VPS_1 profile (tech_stacks, work_history, expected_salary,
+# …) only exists because an admin filled it in here — see storage.patch_vps1_profile.
+_VPS1_PROFILE_FIELDS = ("name", "email", "phone", "location", "region",
+                        "has_uploaded_resume", "uploaded_resume_filename")
+
+
 def profile(p: dict) -> dict:
-    """VPS_1 ProfileSummary → the loose dict Profiles.tsx renders (it reads name/email/... directly)."""
-    return {
-        "id": f"vps1:{p.get('id', '')}",       # namespaced so a UUID can't collide with a local id
-        "name": p.get("name", ""),
-        "email": p.get("email", ""),
-        "phone": p.get("phone", ""),
-        "location": p.get("location", ""),
-        "region": p.get("region", ""),
-        "has_uploaded_resume": bool(p.get("has_uploaded_resume")),
-        "uploaded_resume_filename": p.get("uploaded_resume_filename", ""),
-        "source": SOURCE_REMOTE,
-    }
+    """A VPS_1 profile (snapshot + any local admin edits already merged) → the loose dict
+    Profiles.tsx renders.
+
+    Passes every field THROUGH rather than whitelisting: the admin-only fields are the whole point of
+    letting them edit a VPS_1 profile, and a whitelist would silently hide the values they just typed.
+    Only `id` (namespaced so a VPS_1 uuid can't collide with a local id) and `source` are imposed.
+    """
+    out = {k: v for k, v in (p or {}).items() if k != "id"}
+    for k in _VPS1_PROFILE_FIELDS:               # keep the shape stable even when VPS_1 omits one
+        out.setdefault(k, "")
+    out["id"] = f"vps1:{p.get('id', '')}"
+    out["source"] = SOURCE_REMOTE
+    return out
 
 
 def user(u: dict) -> dict:
