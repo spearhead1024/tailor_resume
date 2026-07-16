@@ -51,7 +51,7 @@ from core.storage import COMPANY_DEDUP_DAYS
 # The remote DB is Docker-internal and not reachable; instead we pull approved
 # jobs over the remote box's public REST API (the same API its UI uses).
 # Credentials live in backend/.env (git-ignored) — see .env.template.
-API_BASE_URL = os.environ.get("JOB_SYNC_API_BASE_URL", "http://69.169.109.18:8010").rstrip("/")
+API_BASE_URL = os.environ.get("JOB_SYNC_API_BASE_URL", "https://easyremotejob.duckdns.org").rstrip("/")
 API_USER = os.environ.get("JOB_SYNC_API_USER", "")
 API_PASSWORD = os.environ.get("JOB_SYNC_API_PASSWORD", "")
 API_TTL_DAYS = 7

@@ -3,6 +3,7 @@ import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useToast } from '../lib/toast';
 import { Role, useAuth } from '../lib/auth';
+import SourceBadge from '../lib/SourceBadge';
 
 function fmtWhen(iso?: string): string {
   const s = (iso || '').trim();
@@ -353,24 +354,27 @@ export default function Users() {
         <div className="card"><span className="muted">No users with this role.</span></div>
       ) : (
       <table>
-        <thead><tr><th>Username</th><th>Name</th><th>Email</th><th>Roles</th><th>Team</th><th>Bid method</th><th>Status</th><th>Assigned profiles</th><th></th></tr></thead>
+        <thead><tr><th>Source</th><th>Username</th><th>Name</th><th>Email</th><th>Roles</th><th>Team</th><th>Bid method</th><th>Status</th><th>Assigned profiles</th><th></th></tr></thead>
         <tbody>
-          {filtered.map((u) => (
+          {filtered.map((u) => { const remote = u.source === 'VPS_1'; return (
             <Fragment key={u.id}>
             <tr>
+              <td><SourceBadge source={u.source} /></td>
               <td>
                 <button className="ghost u-expand" title="Full profile" onClick={() => setExpanded(expanded === u.id ? null : u.id)}>{expanded === u.id ? '▾' : '▸'}</button>
                 {u.username}
               </td>
               <td>{u.full_name}</td>
               <td>{u.email}</td>
-              <td><CheckboxDropdown options={ALL_ROLES} selected={u.roles || []}
-                onChange={(roles) => updateRoles(u, roles as Role[])}
-                disabled={!isAdmin || updateMutation.isPending} placeholder="No roles" /></td>
+              <td>{remote
+                ? <span className="muted">{(u.roles || []).join(', ') || '—'}</span>
+                : <CheckboxDropdown options={ALL_ROLES} selected={u.roles || []}
+                    onChange={(roles) => updateRoles(u, roles as Role[])}
+                    disabled={!isAdmin || updateMutation.isPending} placeholder="No roles" />}</td>
               <td>
                 {/* Team for BOTH callers and managers — a manager's team is the one they run.
                     (The Teams tree only lists callers, so a manager can only be placed from here.) */}
-                {(isCaller(u) || isTeamManager(u)) ? (
+                {remote ? <span className="muted">—</span> : (isCaller(u) || isTeamManager(u)) ? (
                   <select value={teamOf(u)} disabled={!isAdmin || updateMutation.isPending}
                     onChange={(e) => updateMutation.mutate({ id: u.id, payload: { team_id: e.target.value } })}
                     title={isTeamManager(u) ? 'The team this manager runs' : 'The team this caller belongs to'}>
@@ -380,7 +384,7 @@ export default function Users() {
                 ) : <span className="muted">—</span>}
               </td>
               <td>
-                {(u.roles || []).includes('bidder') ? (
+                {!remote && (u.roles || []).includes('bidder') ? (
                   <select value={u.bid_method ?? 2}
                     onChange={(e) => updateMutation.mutate({ id: u.id, payload: { bid_method: Number(e.target.value) } })}
                     disabled={updateMutation.isPending} title="Which bidding workflow this bidder sees">
@@ -390,11 +394,14 @@ export default function Users() {
                 ) : <span className="muted">—</span>}
               </td>
               <td>
-                <select value={u.status} onChange={(e) => updateMutation.mutate({ id: u.id, payload: { status: e.target.value } })}>
-                  <option value="approved">Approved</option><option value="pending">Pending</option><option value="disabled">Disabled</option>
-                </select>
+                {remote
+                  ? <span className="muted">{u.status || '—'}</span>
+                  : <select value={u.status} onChange={(e) => updateMutation.mutate({ id: u.id, payload: { status: e.target.value } })}>
+                      <option value="approved">Approved</option><option value="pending">Pending</option><option value="disabled">Disabled</option>
+                    </select>}
               </td>
               <td>
+                {remote ? <span className="muted">—</span> : (
                 <CheckboxDropdown
                   options={profiles.map((p: any) => ({ value: p.id, label: p.name }))}
                   selected={u.assigned_profile_ids || []}
@@ -402,17 +409,19 @@ export default function Users() {
                   disabled={updateMutation.isPending}
                   placeholder="No profiles"
                   summary={(labels) => (labels.length > 2 ? `${labels.length} profiles` : labels.join(', '))}
-                />
+                />)}
               </td>
               <td>
-                {isAdmin
+                {remote
+                  ? <span className="muted" title="This account lives on VPS_1 — manage it there.">read-only</span>
+                  : isAdmin
                   ? <button className="danger" onClick={() => { if (confirm('Delete user?')) deleteMutation.mutate(u.id); }}>Delete</button>
                   : <span className="muted" title="Only an admin can delete an account — you can set the status to Disabled instead.">—</span>}
               </td>
             </tr>
             {expanded === u.id && (
               <tr className="u-detail-row">
-                <td colSpan={9}>
+                <td colSpan={10}>
                   <div className="u-detail">
                     <div className="u-detail-hd">
                       {u.avatar_url
@@ -448,7 +457,7 @@ export default function Users() {
               </tr>
             )}
             </Fragment>
-          ))}
+          ); })}
         </tbody>
       </table>
       ))}

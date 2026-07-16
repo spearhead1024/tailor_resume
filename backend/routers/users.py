@@ -10,6 +10,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from auth import get_current_user, is_manager, require_admin, storage, team_id_of
+from core import vps1_adapt, vps1_client
 from core.storage import build_password_record
 # detach_team(): a deleted team must not leave its name behind on the calls it was given.
 from routers import interviews
@@ -92,12 +93,14 @@ def _autoteam_for_manager(payload: dict, existing: dict | None = None) -> dict:
 
 @router.get("")
 def list_users(user: dict = Depends(_access)):
-    """Admins see everyone; a manager sees only their own team."""
-    users = [_sanitize(u) for u in storage.get_users()]
-    if user.get("is_admin"):
-        return users
-    tid = team_id_of(user)
-    return [u for u in users if str(u.get("team_id", "")).strip() == tid]
+    """Admins see everyone (local, tagged VPS_2 — plus VPS_1's users, tagged VPS_1 and read-only);
+    a manager sees only their own local team."""
+    users = vps1_adapt.tag_local([_sanitize(u) for u in storage.get_users()])
+    if not user.get("is_admin"):
+        tid = team_id_of(user)
+        return [u for u in users if str(u.get("team_id", "")).strip() == tid]
+    remote = [vps1_adapt.user(u) for u in vps1_client.get_users()]
+    return users + remote
 
 
 @router.post("")

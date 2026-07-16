@@ -2,6 +2,7 @@ import { useState, useRef } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useAuth } from '../lib/auth';
+import SourceBadge from '../lib/SourceBadge';
 import { CONTRACTS, CURRENCIES, PERIODS, contractText, salaryText } from '../lib/profile-terms';
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
@@ -214,7 +215,10 @@ export default function Profiles() {
                 borderBottom: '1px solid var(--border)',
                 background: selected?.id === p.id ? 'var(--panel-2)' : '',
               }}>
-                <div style={{ fontWeight: 600 }}>{p.name || '(unnamed)'}</div>
+                <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span>{p.name || '(unnamed)'}</span>
+                  {p.source === 'VPS_1' && <SourceBadge source={p.source} />}
+                </div>
                 <div className="muted" style={{ fontSize: '0.8rem' }}>{p.email}</div>
               </div>
             ))}
@@ -233,13 +237,15 @@ export default function Profiles() {
                 <h2 style={{ margin: 0 }}>
                   {editing ? (selected.id ? 'Edit profile' : 'New profile') : selected.name}
                 </h2>
-                {!editing && selected.id && (
+                {!editing && selected.id && selected.source !== 'VPS_1' && (
                   <span className={`pill ${selected.status === 'restricted' ? 'rejected' : 'approved'}`}>
                     {(selected.status || 'active').toUpperCase()}
                   </span>
                 )}
+                {selected.source === 'VPS_1' && <SourceBadge source={selected.source} />}
                 <div style={{ flex: 1 }} />
-                {isAdmin && !editing && (
+                {/* VPS_1 profiles are a read-only mirror — no edit/delete (manage them on VPS_1). */}
+                {isAdmin && !editing && selected.source !== 'VPS_1' && (
                   <>
                     <button onClick={handleEdit} className="secondary">Edit</button>
                     {selected.id && (

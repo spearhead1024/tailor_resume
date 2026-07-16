@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { useToast } from '../lib/toast';
 import { etDateTime } from '../lib/etTime';
+import SourceBadge from '../lib/SourceBadge';
 
 type Row = {
   saved_resume_id: string;
@@ -17,6 +18,7 @@ type Row = {
   bidder: string;
   applied_at: string;
   created_at: string;
+  source?: string;
 };
 type SearchResp = {
   results: Row[];
@@ -159,7 +161,7 @@ export default function Applied() {
       ) : (
         <table>
           <thead>
-            <tr><th>Company</th><th>Title</th><th>Profile</th><th>Bidder</th><th style={{ whiteSpace: 'nowrap' }}>Applied (ET)</th><th></th></tr>
+            <tr><th>Source</th><th>Company</th><th>Title</th><th>Profile</th><th>Bidder</th><th style={{ whiteSpace: 'nowrap' }}>Applied (ET)</th><th></th></tr>
           </thead>
           <tbody>
             {rows.map((r) => (
@@ -192,15 +194,18 @@ function RowView({ row, open, onToggle, onPdf, onJump, onSchedule }: {
   row: Row; open: boolean; onToggle: () => void; onPdf: () => void; onJump: () => void; onSchedule: () => Promise<void>;
 }) {
   const [scheduling, setScheduling] = useState(false);
+  const remote = row.source === 'VPS_1';
   const { data: detail, isLoading } = useQuery({
     queryKey: ['applied', 'job', row.saved_resume_id],
     queryFn: () => api.get<JobDetail>(`/api/resumes/${row.saved_resume_id}/job`),
-    enabled: open,
+    enabled: open && !remote,   // the detail endpoint is local-only; a vps1: id won't resolve
   });
 
   return (
     <>
-      <tr style={{ cursor: 'pointer' }} onClick={onToggle}>
+      {/* VPS_1 rows don't expand (their resume/job detail lives on VPS_1) — only the posting link works. */}
+      <tr style={{ cursor: remote ? 'default' : 'pointer' }} onClick={remote ? undefined : onToggle}>
+        <td><SourceBadge source={row.source} /></td>
         <td>{row.job_company || '—'}</td>
         <td>{row.job_link
           ? <a href={row.job_link} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>{row.job_title}</a>
@@ -209,16 +214,20 @@ function RowView({ row, open, onToggle, onPdf, onJump, onSchedule }: {
         <td>{row.bidder || '—'}</td>
         <td style={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }}>{etDateTime(row.applied_at || row.created_at)}</td>
         <td style={{ whiteSpace: 'nowrap' }}>
+          {/* VPS_1 rows: the resume PDF streams through from VPS_1, but Job-lookup and Schedule are
+              local-only workflows, so they're hidden. */}
           <button className="secondary" onClick={(e) => { e.stopPropagation(); onPdf(); }}>📄 PDF</button>
+          {!remote && (<>
           <button className="secondary" style={{ marginLeft: 4 }} onClick={(e) => { e.stopPropagation(); onJump(); }} title="Find this job in the Jobs tab">↗ Job</button>
           <button className="secondary" style={{ marginLeft: 4 }} disabled={scheduling}
             onClick={async (e) => { e.stopPropagation(); setScheduling(true); try { await onSchedule(); } finally { setScheduling(false); } }}
             title="Add this resume + job description as a row on the Interviews board">{scheduling ? '…' : '📅 Schedule'}</button>
+          </>)}
         </td>
       </tr>
-      {open && (
+      {open && !remote && (
         <tr>
-          <td colSpan={6} style={{ background: 'var(--panel-2)', padding: '1rem' }}>
+          <td colSpan={7} style={{ background: 'var(--panel-2)', padding: '1rem' }}>
             {isLoading ? <span className="spinner" /> : detail ? (
               <div style={{ fontSize: '0.86rem', lineHeight: 1.6 }}>
                 <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 8 }}>

@@ -21,6 +21,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.responses import Response
 
 from auth import get_current_user, has_role, storage
+from core import vps1_adapt, vps1_client
 from core.docx_resume_export import build_docx_style_pdf_bundle
 from core.storage import normalize_job_url, tech_stacks_match
 
@@ -291,7 +292,27 @@ def search_applied_resumes(
             "bidder": who,
             "applied_at": r.get("applied_at", ""),
             "created_at": r.get("created_at", ""),
+            "source": vps1_adapt.SOURCE_LOCAL,
         })
+
+    # Admins also see VPS_1's applied rows (read-only, live proxy). Apply the same keyword / bidder
+    # filters so a search stays consistent across both sources; VPS_1 rows feed the facet lists too.
+    if has_role(user, "admin"):
+        for a in vps1_client.get_applications():
+            if str(a.get("current_status", "")).strip().lower() != "applied":
+                continue
+            row = vps1_adapt.applied_row(a)
+            who = str(row["bidder"]).strip()
+            if bl and bl not in who.lower():
+                continue
+            if ql and ql not in " ".join(str(row.get(k, "")) for k in
+                                         ("job_company", "job_title", "bidder")).lower():
+                continue
+            if row["profile_name"]:
+                facet_profiles[row["profile_id"]] = row["profile_name"]
+            if who:
+                facet_bidders.add(who)
+            rows.append(row)
 
     rows.sort(key=lambda x: x.get("applied_at") or x.get("created_at") or "", reverse=True)
     total = len(rows)
@@ -1185,6 +1206,17 @@ def delete(resume_id: str, user: dict = Depends(get_current_user)):
 
 @router.get("/{resume_id}/pdf")
 def get_resume_pdf(resume_id: str, user: dict = Depends(get_current_user)):
+    # A VPS_1 resume (id "vps1:<uuid>") is streamed straight from VPS_1 — admins only, since only they
+    # see VPS_1 rows in the first place.
+    if resume_id.startswith("vps1:"):
+        if not has_role(user, "admin"):
+            raise HTTPException(status_code=403, detail="Forbidden")
+        got = vps1_client.get_resume_file(resume_id[len("vps1:"):], "pdf")
+        if not got:
+            raise HTTPException(status_code=502, detail="Could not fetch resume from VPS_1")
+        content, _fn, media = got
+        return Response(content=content, media_type=media or "application/pdf")
+
     record = storage.get_generated_resume_by_id(resume_id) if hasattr(storage, "get_generated_resume_by_id") else None
     if not record:
         raise HTTPException(status_code=404, detail="Resume not found")

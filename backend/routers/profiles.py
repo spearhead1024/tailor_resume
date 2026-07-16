@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from auth import get_current_user, require_admin, storage
+from core import vps1_adapt, vps1_client
 from schemas import ProfileUpsertRequest
 
 
@@ -31,7 +32,13 @@ def _accessible(user: dict, profiles: list[dict]) -> list[dict]:
 
 @router.get("")
 def list_profiles(user: dict = Depends(get_current_user)):
-    return _accessible(user, storage.get_profiles())
+    """Local profiles (tagged VPS_2), plus — for admins — VPS_1's profiles (tagged VPS_1, read-only).
+    VPS_1 rows are a live best-effort proxy: if VPS_1 is down they simply don't appear."""
+    local = vps1_adapt.tag_local(_accessible(user, storage.get_profiles()))
+    if not user.get("is_admin"):
+        return local
+    remote = [vps1_adapt.profile(p) for p in vps1_client.get_profiles()]
+    return local + remote
 
 
 @router.get("/{profile_id}")
