@@ -36,9 +36,7 @@ const TABS: { path: string; label: string; roles: Role[]; method?: 1 | 2 }[] = [
   { path: '/metrics',  label: 'Metrics',  roles: ['admin', 'bidder', 'job_adder'] },
   { path: '/help', label: 'Help', roles: ['admin'] },
   { path: '/profiles', label: 'Profiles', roles: ['admin'] },
-  // A team manager reaches Users to run their own team (create/approve its callers). The page and
-  // the API both scope them to that team — they never see or touch anyone else.
-  { path: '/users',    label: 'Users',    roles: ['admin', 'manager'] },
+  { path: '/users',    label: 'Users',    roles: ['admin'] },
   { path: '/sessions', label: 'Sessions', roles: ['admin'] },
   { path: '/settings', label: 'Settings', roles: ['admin'] },
 ];
@@ -137,7 +135,7 @@ export default function App() {
           <Route path="/metrics"  element={<RoleGate roles={['admin', 'bidder', 'job_adder']}><Metrics /></RoleGate>} />
           <Route path="/help" element={<RoleGate roles={['admin']}><Help /></RoleGate>} />
           <Route path="/profiles" element={<RoleGate roles={['admin']}><Profiles /></RoleGate>} />
-          <Route path="/users"    element={<RoleGate roles={['admin', 'manager']}><Users /></RoleGate>} />
+          <Route path="/users"    element={<RoleGate roles={['admin']}><Users /></RoleGate>} />
           <Route path="/sessions" element={<RoleGate roles={['admin']}><Devices /></RoleGate>} />
           <Route path="/settings" element={<RoleGate roles={['admin']}><Settings /></RoleGate>} />
           <Route path="/account"  element={<Private><Account /></Private>} />

@@ -577,11 +577,28 @@ tbody tr:hover td { background: var(--panel-2); color: var(--text); }
   background: transparent; border: 0; border-radius: 0; accent-color: #2383E2; cursor: pointer; }
 .iv-flt-ddopt span { flex: 1; min-width: 0; white-space: nowrap; }
 .iv-flt-ddclear { width: 100%; margin-top: 3px; font-size: 0.76rem; }
+/* Scrolls, but the bars are hidden — the board is busy enough without a track down its edge. Only the
+   chrome goes: the wheel, trackpad, keyboard and drag-select all still scroll it (overflow stays auto,
+   NOT hidden). Both axes go together: Firefox's scrollbar-width can't target one axis, so hiding just
+   the vertical would leave a horizontal bar in Firefox and none in Chrome. Same trick as .tabs. */
 .iv-wrap { overflow: auto; max-height: calc(100vh - 12rem); background: transparent;
+  scrollbar-width: none; -ms-overflow-style: none;
   font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, "Apple Color Emoji", Arial, sans-serif; }
-.iv-grid { border-collapse: separate; border-spacing: 0; table-layout: fixed; width: 100%; font-size: 14px; line-height: 20px; color: #D4D4D4; user-select: none; }
-.iv-grid td.iv-td-fill { background: #15212e !important; }   /* range-selected cells (not the anchor) */
-.iv-grid td { background: #191919; border-right: 1px solid rgba(255,255,255,0.067); border-bottom: 1px solid rgba(255,255,255,0.067); height: 32px; vertical-align: middle; }
+.iv-wrap::-webkit-scrollbar { display: none; }
+/* border-spacing (not margins — rows are <tr>, which margins don't touch) puts a small gap between
+   rows. The gap shows the page background through the transparent .iv-wrap, so each call reads as its
+   own band. Horizontal spacing stays 0 so columns still meet edge-to-edge. The rows' bottom hairline
+   is gone with it: a separator line AND a gap would double up. */
+.iv-grid { border-collapse: separate; border-spacing: 0 3px; table-layout: fixed; width: 100%; font-size: 14px; line-height: 20px; color: #D4D4D4; user-select: none; }
+/* Range-selected cells are painted from SEL_FILL in Interviews.tsx — one constant shared by the plain
+   and the stacked cells, so the two can't drift apart again. Nothing to do here. */
+.iv-grid td { background: #191919; border-right: 1px solid rgba(255,255,255,0.067); height: 32px; vertical-align: middle; }
+/* Zebra — odd rows a touch lighter than the #191919 base. `.iv-row--odd td` weighs exactly (0,1,1),
+   the SAME as `.iv-grid td` and as the state rules below (.iv-row--next td etc). Placed right after
+   the base rule and before every state rule, so source order settles the ties: zebra beats the base,
+   and next/past/hover/selection all beat zebra — a "next call" stays yellow, a hovered row stays
+   hovered, a selected cell stays blue. */
+.iv-row--odd td { background: #202024; }
 .iv-grid thead th {
   position: sticky; top: 0; z-index: 12;
   background: #191919; color: #9B9B9B;
@@ -591,15 +608,19 @@ tbody tr:hover td { background: var(--panel-2); color: var(--text); }
   border-right: 1px solid rgba(255,255,255,0.067);
   border-bottom: 1px solid rgba(255,255,255,0.094);
 }
-.iv-row:hover td:not(.iv-gutter) { background: #202024; }   /* hover tint on the panel cells, not the margin */
+/* Hover — the tint lands on the panel cells only, never the transparent margins either side. It is a
+   deliberately clear step up from the row's resting colour (the old +7 shade was almost invisible),
+   and the first data cell carries an accent bar so the whole row reads as picked out at a glance. */
+.iv-row:hover td:not(.iv-gutter):not(.iv-rowend) { background: #2e2f36; }
+.iv-row:hover td.iv-gutter + td { box-shadow: inset 2px 0 0 0 var(--accent); }
 /* The NEXT upcoming call — the only *highlighted* row on the board (yellow). Every call after the
    next one stays plain. Placed after `.iv-grid td` so it wins the equal-specificity tie. */
 .iv-row--next td { background: #3b3418; }
-.iv-row--next:hover td:not(.iv-gutter) { background: #484020; }
+.iv-row--next:hover td:not(.iv-gutter):not(.iv-rowend) { background: #574c1d; }
 /* A call whose time has already gone: greyed out — still readable, clearly finished. The text is
    dimmed as well as the background, so a past row reads as inactive at a glance. */
 .iv-row--past td { background: #232428; color: #74767e; }
-.iv-row--past:hover td:not(.iv-gutter) { background: #2b2c31; }
+.iv-row--past:hover td:not(.iv-gutter):not(.iv-rowend) { background: #383a43; }
 .iv-row--past .iv-disp, .iv-row--past .iv-cell { opacity: 0.62; }
 /* Flash a row that just re-sorted after a Scheduled_at edit, so its jump to a new position is
    obvious. A fading overlay (pseudo-element) is used so it doesn't fight the cell background or
@@ -660,10 +681,19 @@ body.iv-col-resizing { cursor: col-resize !important; user-select: none !importa
 .iv-grid td.iv-gutter + td, .iv-grid thead th.iv-gutter-hd + th { border-left: 1px solid rgba(255,255,255,0.094); }
 .iv-num { opacity: 0; transition: opacity .08s ease; }     /* hidden unless marked or the row is hovered */
 .iv-num--mark { opacity: 1; }                              /* shown on every 5th row */
-.iv-row:hover .iv-num { opacity: 1; color: #9B9B9B; }      /* reveal this row's number on hover */
-.iv-del { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; color: #9B9B9B; font-size: 11px; }
-.iv-gutter:hover .iv-del { display: flex; }                /* delete appears when hovering the gutter */
-.iv-gutter:hover .iv-num { opacity: 0; }                   /* tuck the number under the delete */
+.iv-row:hover .iv-num { opacity: 1; color: #cfcfcf; }      /* reveal this row's number on hover */
+/* Delete — in the .iv-rowend margin to the RIGHT of the panel, mirroring the row-number gutter on the
+   left. Hidden until its row is hovered, so the board isn't a wall of ✕. */
+.iv-grid td.iv-rowend { width: 12px; background: transparent; border-right-color: transparent;
+  text-align: center; vertical-align: middle; padding: 0; }
+.iv-grid thead th.iv-rowend-hd { background: var(--bg); border-right-color: transparent; border-bottom-color: transparent; }
+/* Deliberately tiny — it is a margin affordance, not a primary action. The box is only 7px wide, so the
+   glyph is allowed to overflow it rather than be clipped; the full row height stays clickable. */
+.iv-del { display: inline-flex; align-items: center; justify-content: center; width: 7px; height: 14px;
+  padding: 0; border-radius: 3px; color: #6b6b6b; font-size: 8px; line-height: 1; overflow: visible;
+  opacity: 0; transition: opacity .08s ease, color .08s ease, background .08s ease; }
+.iv-row:hover .iv-del { opacity: 1; }
+.iv-del:hover { color: #ff6b6b; background: rgba(255,107,107,0.13); }
 .iv-opt:hover { background: rgba(255,255,255,0.055); }
 .iv-opt-hl { background: rgba(35,131,226,0.22); }   /* keyboard-highlighted dropdown option */
 .iv-search { width: 100%; margin-bottom: 6px; padding: 5px 8px; background: #2a2a2a; border: 1px solid rgba(255,255,255,0.12);

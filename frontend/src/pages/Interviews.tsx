@@ -122,7 +122,17 @@ const lockVars = (c: LockColor): CSSProperties => ({
 
 const DEFAULT_W = 160;        // fallback column width (px)
 const MIN_W = 60, MAX_W = 1000;
-const SEL = '#2383E2';        // Coda/Sheets selection blue
+const SEL = '#2383E2';        // Coda/Sheets selection blue — the anchor cell's border
+/* The wash over the REST of the selection, in that same blue so a selected row reads as one thing.
+ *
+ * It is a background-IMAGE, not a background-color, on purpose: it lays over the cell's own colour
+ * instead of replacing it, so the yellow "next call" and grey "past call" rows still read as
+ * themselves under the selection. Over a normal row it composites to ~#205c96 — the blue in SEL.
+ *
+ * ONE constant, used by both the plain cells (cellSel) and the stacked ones (StackedCell). It used to
+ * be a hardcoded '#15212e' in StackedCell AND a separate `.iv-td-fill` rule in the CSS; the two drifted,
+ * so selecting a row lit up the one unstacked column and left every stacked one looking untouched. */
+const SEL_FILL = `linear-gradient(rgba(35,131,226,0.62), rgba(35,131,226,0.62))`;
 // Fixed text columns: no ⋯ settings menu (can't be renamed/retyped/deleted). Still resizable + editable cells.
 // Merged primaries are locked so an admin can't rename/delete them out of sync with the MERGED map below
 // (admins can still edit their select-option lists via the ⋯ menu).
@@ -972,7 +982,7 @@ function StackedCell({ fields, row, subState, editSub, editSeed, meName, avatarB
     };
     h.onDoubleClick = (e: ReactMouseEvent) => { e.stopPropagation(); onEdit(sub); };   // double-click edits / opens
     const st = subState[sub];
-    const selStyle: CSSProperties = st === 'anchor' ? { boxShadow: `inset 0 0 0 2px ${SEL}` } : st === 'fill' ? { background: '#15212e' } : {};
+    const selStyle: CSSProperties = st === 'anchor' ? { boxShadow: `inset 0 0 0 2px ${SEL}` } : st === 'fill' ? { backgroundImage: SEL_FILL } : {};
     // Somebody else is in this cell right now. Tint it in THEIR colour and tag it with their name, so
     // when several people are editing you can tell whose cell is whose at a glance. (The write is also
     // blocked in canEditCell — this is the visible half of that.)
@@ -1892,7 +1902,14 @@ export default function Interviews() {
   // nobody ("Spearhead1024"), and a Creater that resolves to no user silently receives none of the
   // notifications addressed to the person who booked the call. (The table renders `person` cells with
   // PersonCell, which ignores options — so this only turns it into a picker where it's a form field.)
-  const creatorOpts: Opt[] = people.map((p, i) => ({ label: p.label, color: PALETTE[i % PALETTE.length] }));
+  //
+  // ADMINS only: adding a row is admin-only (add_row 403s everyone else), so the person who booked a
+  // call is always an admin — offering a caller here would only ever name someone who cannot have been
+  // the creator. Filtering the options doesn't hide anything historical: PersonCell renders the stored
+  // value regardless, so a legacy non-admin Creater still displays.
+  const creatorOpts: Opt[] = people
+    .filter((p) => (p.roles || []).includes('admin'))
+    .map((p, i) => ({ label: p.label, color: PALETTE[i % PALETTE.length] }));
   const cols = grid.columns.map((c) => {
     let cc = c;
     if (c.id === 'c_caller') cc = { ...cc, options: callerOpts };
@@ -2065,16 +2082,17 @@ export default function Interviews() {
   fillRef.current = fill;
 
   const norm = sel ? { rmin: Math.min(sel.r1, sel.r2), rmax: Math.max(sel.r1, sel.r2), cmin: Math.min(sel.c1, sel.c2), cmax: Math.max(sel.c1, sel.c2) } : null;
-  /** Selection look for a NON-stacked cell: anchor = full border; range cells = fill + perimeter. */
-  const cellSel = (r: number, c: number): { className: string; style: CSSProperties } => {
-    if (!norm || !sel || r < norm.rmin || r > norm.rmax || c < norm.cmin || c > norm.cmax) return { className: '', style: {} };
-    if (sel.r1 === r && sel.c1 === c) return { className: '', style: { boxShadow: `inset 0 0 0 2px ${SEL}` } };
+  /** Selection look for a NON-stacked cell: anchor = full border; range cells = SEL_FILL + perimeter.
+      Returns a style rather than a class so it shares SEL_FILL with the stacked cells — see SEL_FILL. */
+  const cellSel = (r: number, c: number): CSSProperties => {
+    if (!norm || !sel || r < norm.rmin || r > norm.rmax || c < norm.cmin || c > norm.cmax) return {};
+    if (sel.r1 === r && sel.c1 === c) return { boxShadow: `inset 0 0 0 2px ${SEL}` };
     const p: string[] = [];
     if (r === norm.rmin) p.push(`inset 0 2px 0 0 ${SEL}`);
     if (r === norm.rmax) p.push(`inset 0 -2px 0 0 ${SEL}`);
     if (c === norm.cmin) p.push(`inset 2px 0 0 0 ${SEL}`);
     if (c === norm.cmax) p.push(`inset -2px 0 0 0 ${SEL}`);
-    return { className: 'iv-td-fill', style: { boxShadow: p.join(', ') } };
+    return { backgroundImage: SEL_FILL, boxShadow: p.join(', ') };
   };
   // Copy-source outline (marching-ants): a thin blue perimeter around the copied rectangle.
   const cop = copied ? { rmin: Math.min(copied.r1, copied.r2), rmax: Math.max(copied.r1, copied.r2), cmin: Math.min(copied.c1, copied.c2), cmax: Math.max(copied.c1, copied.c2) } : null;
@@ -2206,6 +2224,7 @@ export default function Interviews() {
           <colgroup>
             <col style={{ width: 32 }} />
             {visibleCols.map((c) => <col key={c.id} style={{ width: W(c) }} />)}
+            {isAdmin && <col style={{ width: 12 }} />}   {/* the delete margin, outside the panel */}
           </colgroup>
           <thead>
             <tr>
@@ -2232,24 +2251,27 @@ export default function Interviews() {
                     onResizeEnd={() => gridRef.current && saveSchema(gridRef.current.columns)} />
                 );
               })}
+              {isAdmin && <th className="iv-rowend-hd" />}
             </tr>
           </thead>
           <tbody>
             {hasFilters && viewRows.length === 0 && (
-              <tr><td className="iv-gutter" /><td colSpan={ncols} className="muted" style={{ padding: '14px 12px', fontSize: '0.85rem' }}>No interviews match the filters.</td></tr>
+              <tr><td className="iv-gutter" /><td colSpan={ncols} className="muted" style={{ padding: '14px 12px', fontSize: '0.85rem' }}>No interviews match the filters.</td>{isAdmin && <td className="iv-rowend" />}</tr>
             )}
             {viewRows.map((row, ri) => (
               <tr key={row.id} data-rid={row.id} className={'iv-row'
+                + (ri % 2 ? ' iv-row--odd' : '')        /* zebra by the row's own index, not :nth-child (the footer/empty row would skew that) */
                 + (row.id === flashRow ? ' iv-row--flash' : '')
                 + (row.id === nextUpId ? ' iv-row--next' : isPast(row) ? ' iv-row--past' : '')}>
-                <td className="iv-gutter" title={`Row ${ri + 1}`}
+                {/* The row's handle: clicking it selects the whole row. Nothing else lives in here now —
+                    the delete button used to share this cell and swallowed the click. */}
+                <td className="iv-gutter" title={`Row ${ri + 1} — click to select the row`}
                     onMouseDown={(e) => {
-                      if (e.button !== 0 || (e.target as HTMLElement).closest('.iv-del')) return;   // ignore the delete button
+                      if (e.button !== 0) return;
                       anchor.current = { r: ri, c: 0 }; dragging.current = false;
                       setSel({ r1: ri, c1: 0, r2: ri, c2: ncols - 1 }); setASub(0); setEditing(null);
                     }}>
                   <span className={'iv-num' + ((ri + 1) % 5 === 0 ? ' iv-num--mark' : '')}>{ri + 1}</span>
-                  {isAdmin && <button className="ghost iv-del" title="Delete row" onClick={() => setConfirmDel(row.id)}>✕</button>}
                 </td>
                 {visibleCols.map((col, c) => {
                   const isAnchorCell = sel?.r1 === ri && sel?.c1 === c;
@@ -2274,8 +2296,8 @@ export default function Interviews() {
                   }
                   const ss = cellSel(ri, c);
                   const ce = copiedEdge(ri, c);
-                  const tdStyle: CSSProperties = { padding: 0, position: 'relative', ...ss.style };
-                  if (ce.length) tdStyle.boxShadow = [ss.style.boxShadow, ...ce].filter(Boolean).join(', ');
+                  const tdStyle: CSSProperties = { padding: 0, position: 'relative', ...ss };
+                  if (ce.length) tdStyle.boxShadow = [ss.boxShadow, ...ce].filter(Boolean).join(', ');
                   const isEditing = !!editing && editing.r === ri && editing.c === c && editing.s === 0;
                   const cval = displayValue(row, col.id);   // Caller falls back to the Team it was handed to
                   // Somebody else is in this cell. The tag only ever showed on STACKED cells, so a plain
@@ -2285,7 +2307,7 @@ export default function Interviews() {
                   const held = heldInfo(row.id, col.id);
                   return (
                     <td key={col.id} ref={isAnchorCell ? anchorTdRef : undefined}
-                        className={(ss.className || '') + (held ? ' iv-locked' : '')}
+                        className={held ? 'iv-locked' : ''}
                         style={held ? { ...tdStyle, ...lockVars(held.color) } : tdStyle}
                         onMouseDown={(e) => selectCell(e, ri, c, 0, false)}
                         onMouseEnter={() => extendTo(ri, c)}
@@ -2299,6 +2321,14 @@ export default function Interviews() {
                     </td>
                   );
                 })}
+                {/* Delete sits AFTER the last column, in a transparent margin outside the panel — the
+                    mirror of the row-number gutter on the left. It only appears on the hovered row. */}
+                {isAdmin && (
+                  <td className="iv-rowend">
+                    <button className="ghost iv-del" title="Delete row"
+                      onClick={(e) => { e.stopPropagation(); setConfirmDel(row.id); }}>✕</button>
+                  </td>
+                )}
               </tr>
             ))}
             {isAdmin && (
@@ -2306,6 +2336,7 @@ export default function Interviews() {
                   title={hasFilters ? 'Add a row (clears the filters, or the new empty row would be filtered out)' : 'Add a row'}>
                 <td className="iv-gutter" style={{ cursor: 'pointer', color: '#9B9B9B' }}>+</td>
                 <td colSpan={ncols} style={{ cursor: 'pointer' }} />
+                <td className="iv-rowend" />
               </tr>
             )}
           </tbody>

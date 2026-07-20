@@ -1,15 +1,14 @@
-"""User management.
+"""User management — ADMIN ONLY.
 
-Admins manage everyone. A team MANAGER manages only their own team: they may create callers (who
-land in their team automatically) and approve/edit them — but never touch another team, change
-anyone's role or team, or create an admin. Every one of those limits is enforced here, server-side;
-the UI only mirrors them.
+Accounts are an admin's business: creating them, setting roles, approving, deleting. A team manager
+runs their team's CALLS (see routers/interviews.py), not the accounts behind them, and reaches none of
+this. Enforced server-side in _access; hiding the tab in the UI is only a courtesy on top.
 """
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from auth import get_current_user, is_manager, require_admin, storage, team_id_of
+from auth import get_current_user, require_admin, storage
 from core import vps1_adapt
 from core.storage import build_password_record
 # detach_team(): a deleted team must not leave its name behind on the calls it was given.
@@ -17,14 +16,6 @@ from routers import interviews
 from schemas import UserUpsertRequest
 
 router = APIRouter(prefix="/api/users", tags=["users"])
-
-# What a manager is allowed to set. Notably absent: roles, team_id, is_admin, parent_admin_id —
-# so a manager can neither escalate a user nor move them out of (or into) their team.
-_MANAGER_FIELDS = {
-    "username", "full_name", "email", "password", "status",
-    "timezone", "country", "telegram", "whatsapp", "discord", "force_password_change",
-}
-
 
 def _sanitize(u: dict) -> dict:
     return {k: v for k, v in u.items() if k not in ("password_hash", "password_salt")}
@@ -34,24 +25,13 @@ def _roles_of(u: dict) -> set[str]:
     return {str(r).strip() for r in (u.get("roles") or [])}
 
 
-def _manager_may_touch(actor: dict, target: dict) -> bool:
-    """A manager may only act on a plain caller inside their own team."""
-    tid = team_id_of(actor)
-    if not tid:
-        return False
-    roles = _roles_of(target)
-    return (
-        str(target.get("team_id", "")).strip() == tid
-        and "caller" in roles
-        and not roles & {"admin", "manager"}
-    )
-
-
 def _access(user: dict = Depends(get_current_user)) -> dict:
-    """Admins and team managers may reach this router."""
-    if user.get("is_admin") or is_manager(user):
+    """Admin only. Accounts are an admin's business — creating them, setting roles, approving,
+    deleting. A team manager runs their team's CALLS (routers/interviews.py), not the accounts behind
+    them. Enforced here rather than by hiding the tab: the tab is a courtesy, this is the door."""
+    if user.get("is_admin"):
         return user
-    raise HTTPException(status_code=403, detail="Admin or team manager only")
+    raise HTTPException(status_code=403, detail="Admin only")
 
 
 def _apply_password(payload: dict) -> dict:
@@ -93,29 +73,20 @@ def _autoteam_for_manager(payload: dict, existing: dict | None = None) -> dict:
 
 @router.get("")
 def list_users(user: dict = Depends(_access)):
-    """Admins see everyone (local, tagged VPS_2 — plus VPS_1's users, tagged VPS_1 and read-only);
-    a manager sees only their own local team."""
+    """Every user: this server's own (tagged VPS_2) plus VPS_1's mirrored ones (tagged VPS_1,
+    read-only). Admin-only — see _access."""
     users = vps1_adapt.tag_local([_sanitize(u) for u in storage.get_users()])
-    if not user.get("is_admin"):
-        tid = team_id_of(user)
-        return [u for u in users if str(u.get("team_id", "")).strip() == tid]
     # VPS_1 users come from the local hourly mirror (core/vps1_sync.py) — a fast DB read.
     remote = [vps1_adapt.user(u) for u in storage.get_vps1_users()]
     return users + remote
 
 
 @router.post("")
-def create_user(body: UserUpsertRequest, user: dict = Depends(_access)):
+def create_user(body: UserUpsertRequest, user: dict = Depends(require_admin)):
+    """Admin only. A manager still reaches this router to see and edit their own team (see _access),
+    but bringing a NEW account into existence is an admin's call — so the New-user button is hidden
+    for them in the UI and the door is shut here, which is the half that actually counts."""
     payload = dict(body.payload)
-
-    if not user.get("is_admin"):                      # manager: force a caller into their own team
-        tid = team_id_of(user)
-        if not tid:
-            raise HTTPException(status_code=400, detail="You are not assigned to a team.")
-        payload = {k: v for k, v in payload.items() if k in _MANAGER_FIELDS}
-        payload["roles"] = ["caller"]
-        payload["team_id"] = tid
-        payload["is_admin"] = False
 
     if not payload.get("id"):
         payload["id"] = storage.make_id("user")
@@ -135,14 +106,7 @@ def update_user(user_id: str, body: UserUpsertRequest, user: dict = Depends(_acc
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
 
-    if not user.get("is_admin"):                      # manager: own team's callers, safe fields only
-        if not _manager_may_touch(user, target):
-            raise HTTPException(status_code=403, detail="You can only manage callers in your own team.")
-        payload = {k: v for k, v in payload.items() if k in _MANAGER_FIELDS}
-        if not payload:
-            return _sanitize(target)
-    else:
-        payload = _autoteam_for_manager(payload, target)   # promoted to manager → mint "<Name> team"
+    payload = _autoteam_for_manager(payload, target)   # promoted to manager → mint "<Name> team"
 
     storage.update_user(user_id, _apply_password(payload))
     return _sanitize(storage.get_user_by_id(user_id) or {"id": user_id})
@@ -150,9 +114,7 @@ def update_user(user_id: str, body: UserUpsertRequest, user: dict = Depends(_acc
 
 @router.delete("/{user_id}")
 def delete_user(user_id: str, user: dict = Depends(require_admin)):
-    """Admin only — a manager can deactivate a caller (status), but not erase the account.
-
-    Deleting a MANAGER takes their team with them. The team was minted for them and is named after them
+    """Deleting a MANAGER takes their team with them. The team was minted for them and is named after them
     ("Hamna" → "Hamna team", see _autoteam_for_manager), so leaving it behind orphans a team with no
     Hamna in it — nobody runs it, yet it keeps appearing in every Caller dropdown and can still be
     assigned calls that will never reach a manager.

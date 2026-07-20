@@ -180,20 +180,18 @@ export default function Users() {
       <div style={{ display: 'flex', alignItems: 'center', marginBottom: '1rem' }}>
         <h1 style={{ margin: 0 }}>{isAdmin ? `Users (${users.length})` : `My team (${users.length})`}</h1>
         <div style={{ flex: 1 }} />
-        <button onClick={() => { setShowForm(!showForm); if (!showForm && !isAdmin) setNewUser((n) => ({ ...n, roles: ['caller'] })); }}>
-          {showForm ? 'Cancel' : (isAdmin ? '+ New User' : '+ New Caller')}
-        </button>
+        {/* Creating an account is admin-only (the API says so too — see create_user). A manager still
+            opens this tab to see and edit their own team, so the tab stays; only this goes. */}
+        {isAdmin && (
+          <button onClick={() => setShowForm(!showForm)}>
+            {showForm ? 'Cancel' : '+ New User'}
+          </button>
+        )}
       </div>
 
       {showForm && (
         <div className="card" style={{ marginBottom: '1rem' }}>
-          <h2 style={{ marginTop: 0 }}>{isAdmin ? 'Create user' : 'Add a caller to your team'}</h2>
-          {!isAdmin && (
-            <p className="muted" style={{ marginTop: 0 }}>
-              They're created as a <strong>Caller</strong> on <strong>your team</strong> — that's enforced by the server,
-              so the role and team aren't yours to choose here.
-            </p>
-          )}
+          <h2 style={{ marginTop: 0 }}>Create user</h2>
           <div className="row">
             <div className="field"><label>Username</label><input value={newUser.username} onChange={(e) => setNewUser({ ...newUser, username: e.target.value })} /></div>
             <div className="field"><label>Full name</label><input value={newUser.full_name} onChange={(e) => setNewUser({ ...newUser, full_name: e.target.value })} /></div>
@@ -202,13 +200,11 @@ export default function Users() {
             <div className="field"><label>Email</label><input value={newUser.email} onChange={(e) => setNewUser({ ...newUser, email: e.target.value })} /></div>
             <div className="field"><label>Password</label><input type="password" value={newUser.password} onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} /></div>
           </div>
-          {isAdmin && (
-            <div className="field">
-              <label>Roles</label>
-              <CheckboxDropdown options={ALL_ROLES} selected={newUser.roles}
-                onChange={(roles) => setNewUser({ ...newUser, roles: roles as Role[] })} placeholder="Select roles" />
-            </div>
-          )}
+          <div className="field">
+            <label>Roles</label>
+            <CheckboxDropdown options={ALL_ROLES} selected={newUser.roles}
+              onChange={(roles) => setNewUser({ ...newUser, roles: roles as Role[] })} placeholder="Select roles" />
+          </div>
           <div className="row">
             <div className="field"><label>Status</label>
               <select value={newUser.status} onChange={(e) => setNewUser({ ...newUser, status: e.target.value })}>
