@@ -11,12 +11,14 @@ type Notif = {
   day_before_enabled: boolean; day_before_hour: number;
   day_of_enabled: boolean; day_of_hour: number;
   creator_enabled: boolean; creator_minutes: number;
+  cbm_enabled: boolean; cbm_minutes: number;
 };
 const NOTIF_DEFAULTS: Notif = {
   lead_enabled: true, lead_minutes: 60,
   day_before_enabled: true, day_before_hour: 19,   // 7pm
   day_of_enabled: true, day_of_hour: 8,            // 8am
   creator_enabled: true, creator_minutes: 90,      // ping whoever booked the call
+  cbm_enabled: true, cbm_minutes: 90,              // ping every call-board manager, like the creator
 };
 const hourName = (h: number) => `${(h % 12) || 12}:00 ${h < 12 ? 'AM' : 'PM'}`;
 
@@ -39,9 +41,9 @@ function Hint({ children }: { children: React.ReactNode }) {
 /** One reminder, as a card: who gets it, when it fires, and what it will actually say. */
 function ReminderCard({ on, onToggle, icon, title, when, to, preview }: {
   on: boolean; onToggle: (v: boolean) => void; icon: string; title: string;
-  when: React.ReactNode; to: 'Caller' | 'Creator'; preview: string;
+  when: React.ReactNode; to: 'Caller' | 'Creator' | 'Board mgr'; preview: string;
 }) {
-  const toColour = to === 'Caller' ? '#3b82f6' : '#a855f7';
+  const toColour = to === 'Caller' ? '#3b82f6' : to === 'Creator' ? '#a855f7' : '#14b8a6';
   return (
     <div style={{
       display: 'flex', alignItems: 'flex-start', gap: 12, padding: '13px 14px', borderRadius: 10,
@@ -265,6 +267,22 @@ export default function Settings() {
                   </>}
                   preview={`Interview you booked — in ${leadLabel(notif.creator_minutes)}`} />
 
+                {/* Same shape as the creator heads-up, but sent to everyone with the Call Board
+                    Manager role, for every scheduled call — they oversee the whole board. */}
+                <ReminderCard
+                  on={notif.cbm_enabled} onToggle={(v) => setN({ cbm_enabled: v })}
+                  icon="📋" title="Heads-up to the call board manager" to="Board mgr"
+                  when={<>
+                    <input type="number" min={5} max={1440} value={notif.cbm_minutes} disabled={!notif.cbm_enabled}
+                      onChange={(e) => setN({ cbm_minutes: parseInt(e.target.value, 10) || 0 })}
+                      style={{ flex: '0 0 auto', width: 82 }} />
+                    <Hint>
+                      minutes before the call — sent to <strong>everyone with the Call Board Manager role</strong>,
+                      for <em>every</em> scheduled call, and it names the caller. Sent <strong>once</strong> per call.
+                    </Hint>
+                  </>}
+                  preview={`Board interview — in ${leadLabel(notif.cbm_minutes)}`} />
+
                 <ReminderCard
                   on={notif.lead_enabled} onToggle={(v) => setN({ lead_enabled: v })}
                   icon="🔔" title="Just before the call" to="Caller"
@@ -316,6 +334,7 @@ export default function Settings() {
                       ...notif,
                       lead_minutes: Math.min(Math.max(notif.lead_minutes || 60, 5), 1440),
                       creator_minutes: Math.min(Math.max(notif.creator_minutes || 90, 5), 1440),
+                      cbm_minutes: Math.min(Math.max(notif.cbm_minutes || 90, 5), 1440),
                     },
                   }, 'Notifications')}
                   disabled={!notifDirty || saveMutation.isPending}>

@@ -11,7 +11,8 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
-import { subscribeLive } from './board-live';
+import { subscribeLive, subscribeLiveState } from './board-live';
+import { stopRinging } from './push';
 import { useToast } from './toast';
 
 export type NotifKind = 'board' | 'reminder';
@@ -72,6 +73,19 @@ export default function NotifCenter() {
     });
   }, [load, toast]);
 
+  // The live socket has NO REPLAY: a `notify` sent while it was down (e.g. during a backend restart)
+  // is lost, and the matching OS push arrives on a SEPARATE path (the push service) — so the ring can
+  // fire while the bell badge sits stale until a manual refresh. Keep the bell honest without one:
+  //   • reload the instant the socket reconnects (catch up on anything missed while it was down),
+  //   • poll on a slow interval as a final safety net (covers a notify that never reached this tab),
+  //   • refresh whenever the panel is opened.
+  useEffect(() => subscribeLiveState((up) => { if (up) void load(); }), [load]);
+  useEffect(() => {
+    const id = window.setInterval(() => { void load(); }, 20000);
+    return () => window.clearInterval(id);
+  }, [load]);
+  useEffect(() => { if (open) void load(); }, [open, load]);
+
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
@@ -80,6 +94,7 @@ export default function NotifCenter() {
   }, [open]);
 
   const markRead = async (ids?: string[], kind?: NotifKind) => {
+    stopRinging();    // acknowledging a reminder here silences the alarm ring — no refresh needed
     try {
       const r = await api.post<{ counts: Counts }>('/api/notifications/read',
         ids ? { ids } : kind ? { kind } : {});

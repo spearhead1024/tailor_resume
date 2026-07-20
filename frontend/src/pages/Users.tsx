@@ -28,6 +28,7 @@ const ALL_ROLES: { value: Role; label: string }[] = [
   { value: 'job_adder', label: 'Job-Adder' },
   { value: 'caller',    label: 'Caller' },
   { value: 'manager',   label: 'Team Manager' },
+  { value: 'call_board_manager', label: 'Call Board Manager' },
 ];
 
 type Team = { id: string; name: string };

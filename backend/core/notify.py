@@ -1,20 +1,24 @@
-"""Interview reminders — Web Push notifications for the caller, driven purely by the schedule.
+"""Interview reminders — schedule-driven Web Push notifications, all hours admin-set in Settings.
 
-Exactly three reminders per interview, in the CALLER's timezone:
-  • 7pm the day before the interview
-  • 8am on the interview day
-  • 1 hour before it starts
+Per interview (times shown on each RECIPIENT's own timezone; all hours/leads are admin-set):
+  • CALLER — three reminders: the day-before digest (default 7pm), the day-of digest (default 8am),
+    and a lead reminder a fixed time before the call (default 60 min).
+  • CREATER — one heads-up before the call (default 90 min), to whoever booked it; names the caller.
+  • CALL BOARD MANAGER — one heads-up before the call (default 90 min) to EVERY user holding the
+    'call_board_manager' role; they oversee the whole board, so this fires for every scheduled call.
+    Modelled on the creater ping (once per call, keyed on the row, so a reschedule never re-pings).
 
-Nothing else notifies: board edits (assignment, time/content changes, chat) deliberately stay silent.
+Board edits (assignment, reassignment, status/content changes, chat) notify separately — see
+core/live.py — and never ring.
 
 A background tick (scheduler_loop → run_due_reminders) scans the board every minute and fires any
 reminder whose moment has arrived. The board is read from the DB (interview_rows). Sends are
 best-effort and never raise into the loop. Reminders are de-duped in data/notif_state.json, keyed by
-row + type + scheduled-time — so each fires once, and changing an interview's time re-arms its
-reminders.
+row + type + scheduled-time — so each fires once, and changing an interview's time re-arms the
+schedule-relative ones.
 
-The 7pm / 8am reminders need the caller's profile timezone; without one, only the 1-hour reminder
-(which is absolute) can fire for them.
+The 7pm / 8am caller digests need the caller's profile timezone; without one, only the lead / creater
+/ board-manager reminders (which are absolute — a fixed offset from the call) can fire.
 """
 from __future__ import annotations
 
@@ -125,13 +129,11 @@ _lock = threading.Lock()
 # back through auth.
 _storage = Storage(DATA_DIR)
 
-# How late a "N minutes before" reminder (caller lead / creator ping) may still fire.
-#
-# It must be generous enough that a call booked at short notice STILL warns the caller — dropping the
-# reminder entirely would be worse than the bug it fixes — but tight enough that a 90-minute creator
-# ping never goes out when the call is nearly starting. With the truthful label below, a late fire
-# says what's actually left ("in 50 minutes"), so it is never a lie either way.
-_LEAD_GRACE = timedelta(minutes=30)
+# A "N minutes before" reminder (caller lead / creater / call-board-manager heads-up) may fire any
+# time from its ideal moment right up until the call actually STARTS — never after. There is no fixed
+# grace cap: a call booked (or rescheduled) at short notice would otherwise miss its window and warn
+# nobody, which is worse than a late fire. The truthful label (_remaining_label) makes a late fire
+# state what's ACTUALLY left ("in 25 minutes"), so it is never misleading either way.
 
 
 
@@ -297,7 +299,25 @@ def _config() -> dict:
     except Exception:
         log.exception("could not read notification settings; using defaults")
     return {"lead_enabled": True, "lead_minutes": 60, "day_before_enabled": True,
-            "day_before_hour": 19, "day_of_enabled": True, "day_of_hour": 8}
+            "day_before_hour": 19, "day_of_enabled": True, "day_of_hour": 8,
+            "creator_enabled": True, "creator_minutes": 90,
+            "cbm_enabled": True, "cbm_minutes": 90}
+
+
+def _call_board_managers() -> list[dict]:
+    """Every approved user holding the 'call_board_manager' role.
+
+    Unlike the caller or creater — each one person on a single call — a call-board manager oversees
+    the WHOLE board, so they get a creater-style heads-up before EVERY scheduled call. Read fresh on
+    each tick, so granting or removing the role takes effect on the next scan. Never raises."""
+    try:
+        from auth import storage   # lazy: avoids an import cycle (auth imports core.*)
+        return [u for u in storage.get_users()
+                if "call_board_manager" in {str(r).strip() for r in (u.get("roles") or [])}
+                and str(u.get("status", "")).strip() == "approved"]
+    except Exception:
+        log.exception("could not read call-board managers; skipping their reminders this tick")
+        return []
 
 
 def _lead_label(minutes: int) -> str:
@@ -337,6 +357,7 @@ def run_due_reminders() -> int:
     cfg = _config()
     lead_min = int(cfg.get("lead_minutes", 60) or 60)
     creator_min = int(cfg.get("creator_minutes", 90) or 90)
+    cbm_min = int(cfg.get("cbm_minutes", 90) or 90)
     h_before = int(cfg.get("day_before_hour", 19))
     h_of = int(cfg.get("day_of_hour", 8))
     with _lock:
@@ -355,20 +376,20 @@ def run_due_reminders() -> int:
         return now < deadline
 
     def claim_at_moment(key: str, target: datetime, sched: datetime) -> bool:
-        """For the "N minutes before" reminders (caller lead + creator ping).
+        """For the "N minutes before" reminders (caller lead + creater + call-board-manager heads-up).
 
-        These must land near their moment. A call booked with less notice than the configured lead
-        has already missed it — firing then announced "in 90 minutes" with far less time left, which
-        is what produced the bogus creator ping. Past the grace window we stay silent.
+        Fires from the ideal moment (`target` = sched − N minutes) up until the call STARTS, then
+        stays silent. No grace cap: a call booked or rescheduled at short notice still warns everyone,
+        just with a truthful "in X minutes" (see _remaining_label) rather than the nominal lead.
 
-        Crucially the key is consumed ONLY when we actually send. A reminder we skipped is not
-        "already sent": if the call is later moved to a time that gives it a real moment again, it
-        must still be able to fire."""
+        Crucially the key is consumed ONLY when we actually send. A reminder we skipped (the call had
+        already started) is not "already sent"; and because the key embeds the scheduled time, moving
+        a call to a new time is a NEW key — so a reschedule always re-arms its heads-up."""
         nonlocal dirty
         if key in sent or now < target:
             return False
-        if (now - target) > _LEAD_GRACE or now >= sched:
-            return False                       # moment missed / call already started → silent, NOT consumed
+        if now >= sched:
+            return False                       # call already started → too late, silent, NOT consumed
         sent.add(key); dirty = True
         return True
 
@@ -398,10 +419,10 @@ def run_due_reminders() -> int:
             creater = c.get("creater")
             if not creater:
                 continue                       # nobody in the Creater cell (or it matched no user)
-            # Keyed on the ROW ALONE — deliberately not on the scheduled time. The creator is the one
-            # who books and reschedules the call, so one heads-up is all they need; re-arming on every
-            # time change is what pinged them twice for the same interview.
-            key = f"{c['row_id']}|creator"
+            # Keyed on row + scheduled time, so moving the call re-arms it: a reschedule sends a fresh
+            # heads-up for the NEW time (the truthful label keeps it honest). It fires at most once per
+            # (row, time), so nudging the SAME time never double-pings — but a real reschedule does.
+            key = f"{c['row_id']}|creator|{c['sched_raw']}"
             if claim_at_moment(key, c["sched"] - timedelta(minutes=creator_min), c["sched"]):
                 try:
                     ctz = str(creater.get("timezone", "")).strip()
@@ -417,6 +438,38 @@ def run_due_reminders() -> int:
                     fired += 1
                 except Exception:
                     log.exception("creator push failed (row %s)", c["row_id"])
+
+    # (1c) the CALL-BOARD MANAGER's heads-up (admin-set, default 90 min before). A call-board manager
+    #      oversees the WHOLE board, so — unlike the creater, who is one person per call — every user
+    #      holding the role gets this before EVERY scheduled call. Keyed on row + manager + time, so a
+    #      reschedule re-arms it (a fresh heads-up for the new time), exactly like the creater ping.
+    #      Skipped for a call this manager is already personally on (its caller or creater): they get a
+    #      call-specific reminder for that one already, and this would just be a second buzz.
+    if cfg.get("cbm_enabled", True):
+        managers = _call_board_managers()
+        for c in calls:
+            caller_uid = str(c["user"]["id"])
+            creater_uid = str((c.get("creater") or {}).get("id", ""))
+            for mgr in managers:
+                mid = str(mgr["id"])
+                if mid == caller_uid or mid == creater_uid:
+                    continue                   # already reminded about this call in another role
+                key = f"{c['row_id']}|cbm|{mid}|{c['sched_raw']}"
+                if claim_at_moment(key, c["sched"] - timedelta(minutes=cbm_min), c["sched"]):
+                    try:
+                        mtz = str(mgr.get("timezone", "")).strip()
+                        body = _call_line(c, mtz)
+                        if c.get("caller"):
+                            body += f" · caller: {c['caller']}"
+                        _deliver(mgr["id"], {
+                            "title": f"Board interview — in {_remaining_label(c['sched'], now)}",
+                            "body": body,
+                            "tag": f"cbm-{c['row_id']}",
+                            "url": "/interviews", "alarm": True,
+                        }, c["row_id"])
+                        fired += 1
+                    except Exception:
+                        log.exception("call-board-manager push failed (row %s, user %s)", c["row_id"], mgr["id"])
 
     # (2) day-before + day-of digests — ONE per caller per day, covering all that day's calls. Both
     #     need the caller's timezone; without one they can't be placed (the lead reminder still works).

@@ -4,7 +4,7 @@ import { closeLive } from './board-live';
 
 const TOKEN_KEY = 'tailorresume.token';
 
-export type Role = 'admin' | 'bidder' | 'job_adder' | 'caller' | 'manager';
+export type Role = 'admin' | 'bidder' | 'job_adder' | 'caller' | 'manager' | 'call_board_manager';
 
 export type User = {
   id: string;

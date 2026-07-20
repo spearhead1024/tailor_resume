@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Navigate, Route, Routes, useLocation, useNavigate, Link } from 'react-router-dom';
 import { hasRole, loadCurrentUser, logout, useAuth, Role, User } from './lib/auth';
 import NotifCenter from './lib/NotifCenter';
+import { initPushSound, syncPushIfGranted } from './lib/push';
 import { ToastProvider } from './lib/toast';
 import Login from './pages/Login';
 import Bid from './pages/Bid';
@@ -43,7 +44,7 @@ const TABS: { path: string; label: string; roles: Role[]; method?: 1 | 2 }[] = [
 
 function roleLabel(roles: Role[]): string {
   if (!roles || roles.length === 0) return '—';
-  const pretty: Partial<Record<Role, string>> = { job_adder: 'Job-Adder', manager: 'Team Manager' };
+  const pretty: Partial<Record<Role, string>> = { job_adder: 'Job-Adder', manager: 'Team Manager', call_board_manager: 'Call Board Manager' };
   return roles.map((r) => pretty[r] ?? (r.charAt(0).toUpperCase() + r.slice(1))).join(' · ');
 }
 
@@ -110,7 +111,16 @@ function LandingRedirect() {
 export default function App() {
   const [bootLoading, setBootLoading] = useState(true);
   useEffect(() => {
-    loadCurrentUser().finally(() => setBootLoading(false));
+    // App-wide, not Interviews-only: the reminder ring must sound wherever the recipient is in the
+    // app (a creater/CBM gets a heads-up while they may be on any page), and every signed-in user
+    // must stay push-subscribed even if they never open the board. initPushSound only binds the
+    // service-worker listener; syncPushIfGranted re-registers silently and only if permission is
+    // already granted (it never prompts). Both are idempotent, so Interviews calling them too is fine.
+    initPushSound();
+    loadCurrentUser().finally(() => {
+      setBootLoading(false);
+      void syncPushIfGranted();
+    });
   }, []);
 
   if (bootLoading) {

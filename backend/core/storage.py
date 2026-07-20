@@ -641,7 +641,10 @@ def _normalize_template(item: dict, *, fallback_index: int = 0) -> dict:
 
 # 'manager' = team manager: runs one caller team (creates/approves that team's callers, and on the
 # interview board may re-assign a call within their team + set Approved/Status/Feedback).
-ALLOWED_ROLES = {'admin', 'bidder', 'job_adder', 'caller', 'manager'}
+# 'call_board_manager' = oversees the whole call board: gets a creater-style heads-up before EVERY
+# scheduled call (see core/notify.py). Roles not listed here are silently stripped on save, so a new
+# role MUST be added here or the Users-page checkbox for it will never persist.
+ALLOWED_ROLES = {'admin', 'bidder', 'job_adder', 'caller', 'manager', 'call_board_manager'}
 
 
 def _normalize_roles(item: dict) -> list[str]:
