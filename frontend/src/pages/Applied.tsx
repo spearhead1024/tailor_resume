@@ -103,9 +103,10 @@ export default function Applied() {
       await api.post('/api/interviews/rows', {
         cells: {
           c_title: r.job_title || '',
+          c_company: r.job_company || '',
           c_account: r.profile_name || '',
           c_resume: `/api/resumes/${r.saved_resume_id}/pdf`,   // downloadable resume link (see ResumeCell)
-          c_jd,   // the row's Index is auto-assigned server-side (see add_row)
+          c_jd,   // Index + status/approved/type defaults are filled server-side (see add_row)
         },
       });
       toast('Added to the Interviews board', 'success');

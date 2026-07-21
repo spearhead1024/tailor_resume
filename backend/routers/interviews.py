@@ -295,6 +295,32 @@ _REQUIRED_COLS = [
 ]
 
 
+# The starting state a brand-new row is given (see _apply_new_row_defaults, used by add_row). Each is
+# a select option that must exist on its column, so the values here are matched against the live option
+# list before use — a mismatch is skipped rather than written, so renaming an option can't strand a row.
+_NEW_ROW_DEFAULTS = {
+    "c_status": "Not Scheduled",
+    "c_approved": "Pending",
+    "c_type": "Intro1",
+}
+
+
+def _apply_new_row_defaults(cells: dict, columns: list[dict]) -> None:
+    """Fill blank status/approved/type on a new row with their defaults — in place. Only touches a cell
+    that is empty AND whose column exists AND still offers that option, so an explicit value always
+    wins and a default can never point at an option that has been renamed away."""
+    by_id = {c["id"]: c for c in columns}
+    for col_id, default in _NEW_ROW_DEFAULTS.items():
+        if str(cells.get(col_id, "") or "").strip():
+            continue                                  # explicit value provided → leave it
+        col = by_id.get(col_id)
+        if not col:
+            continue
+        labels = {str(o.get("label", "")).strip() for o in (col.get("options") or [])}
+        if default in labels:
+            cells[col_id] = default
+
+
 # ── persistence: the board lives in the DB (interview_columns / interview_rows) ──────────────
 # It used to be data/interviews.json — every keystroke rewrote the whole file under a process lock,
 # and a `git pull` overwriting that file mid-write corrupted the board. Now a cell edit is a
@@ -665,6 +691,12 @@ def add_row(body: dict | None = None, user: dict = Depends(_access)):
         nums = [int(n) for r in grid["rows"]
                 if (n := str((r.get("cells") or {}).get("c_index", "")).strip()).isdigit()]
         cells["c_index"] = str((max(nums) + 1) if nums else 1)
+    # Sensible starting state for a fresh call: not yet scheduled, not yet agreed, an Intro as the
+    # first call type. Only fills a BLANK cell — an explicit value (e.g. re-inserting a row on undo)
+    # wins — and only if the column still exists and the option is still valid, so renaming/removing a
+    # select option can never leave a row pointing at a dead value. _NEW_ROW_DEFAULTS keeps these in
+    # one place next to _default_grid, where the option lists live.
+    _apply_new_row_defaults(cells, grid["columns"])
     # an explicit id + position lets the client re-insert a row (undo of a delete / redo of an add)
     rid = str(body2.get("id") or "").strip()
     if not rid or any(r["id"] == rid for r in grid["rows"]):
