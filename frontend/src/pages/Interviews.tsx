@@ -1187,11 +1187,18 @@ function NotifBell() {
     finally { setPerm(notifPermission()); setBusy(false); }
   };
 
-  return perm === 'granted'
-    ? <button className="secondary" disabled={busy} onClick={disable}
-        title="Interview alerts and reminders are ON for this device — click to turn off">🔔 Notifications on</button>
-    : <button className="secondary" disabled={busy} onClick={enable}
-        title="Get interview assignments, time changes and reminders as desktop notifications">🔔 Enable notifications</button>;
+  if (perm === 'granted')
+    return <button className="secondary" disabled={busy} onClick={disable}
+      title="Interview alerts and reminders are ON for this device — click to turn off">🔔 Notifications on</button>;
+  // Blocked: the site CANNOT re-request permission — the browser requires the user to lift it by hand.
+  // So don't offer a dead "Enable" button; say it's blocked and tell them exactly how to fix it.
+  if (perm === 'denied')
+    return <button className="secondary"
+      onClick={() => toast('Notifications are BLOCKED for this site. Click the padlock / ⓘ icon at the left of the address bar → Site settings → Notifications → Allow, then reload this page.', 'error')}
+      title="Your browser has blocked notifications for this site — a website can't undo that. Click the padlock / ⓘ icon in the address bar → Site settings → Notifications → Allow, then reload.">
+      🔔 Notifications blocked — click for how to fix</button>;
+  return <button className="secondary" disabled={busy} onClick={enable}
+    title="Get interview assignments, time changes and reminders as desktop notifications">🔔 Enable notifications</button>;
 }
 
 export default function Interviews() {

@@ -8,7 +8,7 @@
    stop as soon as the notification is clicked or dismissed. */
 
 // Bump this to force every browser onto a new worker. The byte change is what the browser diffs.
-const SW_VERSION = '5-no-ring';
+const SW_VERSION = '8-ring-one-tab';
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
@@ -55,9 +55,24 @@ self.addEventListener('push', (event) => {
   };
   event.waitUntil((async () => {
     await self.registration.showNotification(title, options);
-    // In-app ring disabled by request: a reminder's own OS notification sound (silent:false for
-    // alarms, above) is the only alert — the bell mark never chimes. We still tell pages to STOP on
-    // click/close below, in case an older tab is mid-ring.
+    // A reminder (alarm) RINGS in-app until this system notification is clicked/dismissed (see the
+    // notificationclick / notificationclose handlers below, which post 'stop'), 60s cap. Reliable even
+    // when Windows won't sound a Chrome toast. Board-change / bell-mark notifications carry no alarm,
+    // so they never ring.
+    //
+    // Ring ONE tab only — the focused one, else any visible one, else the first. Posting 'start' to
+    // EVERY open tab (the old behaviour) layered N overlapping chimes when the board was open in
+    // several tabs, which is exactly the "double sound" people with more than one tab heard. 'stop'
+    // still fans out to ALL tabs (notificationclick/close below), so whichever tab is ringing is
+    // silenced no matter where the acknowledgement happens. Preferring the focused/visible tab also
+    // picks the one whose audio is most likely unlocked, so the chime actually plays.
+    if (isAlarm) {
+      const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+      const target = wins.find((c) => c.focused)
+        || wins.find((c) => c.visibilityState === 'visible')
+        || wins[0];
+      if (target) target.postMessage({ type: 'notification-sound', action: 'start' });
+    }
   })());
 });
 

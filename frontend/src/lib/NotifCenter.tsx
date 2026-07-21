@@ -12,7 +12,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
 import { subscribeLive, subscribeLiveState } from './board-live';
-import { stopRinging } from './push';
+import { notifPermission, startRinging, stopRinging } from './push';
 import { useToast } from './toast';
 
 export type NotifKind = 'board' | 'reminder';
@@ -68,6 +68,12 @@ export default function NotifCenter() {
       if (seen.has(key)) return;                     // belt-and-braces against any repeat delivery
       seen.add(key);
       window.setTimeout(() => seen.delete(key), 4000);
+      // Ring for reminders from the in-app socket — but ONLY when OS notifications aren't granted.
+      // When they ARE granted, the service worker rings on the push AND closing the toast stops it;
+      // if we also rang here (a beat later, over the socket) we'd RESTART the ring right after the
+      // user closed the notification — the "I closed it but sound keeps going" bug. So: OS-on → let
+      // the SW own the ring (close stops it); OS-off/blocked → the socket is the only ring path.
+      if (m.kind === 'reminder' && notifPermission() !== 'granted') startRinging();
       toast(`${m.title} — ${m.body}`, m.kind === 'reminder' ? 'info' : 'success');
       void load();
     });

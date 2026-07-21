@@ -120,7 +120,10 @@ if FRONTEND_DIST.exists():
             return JSONResponse({"detail": "Not Found"}, status_code=404)
         target = FRONTEND_DIST / full_path
         if target.is_file() and target.name != "index.html":
-            return FileResponse(str(target))
+            # The service worker must NEVER be cached — a stale sw.js means the browser keeps an old
+            # worker and the user never receives notification/sound fixes. (Hashed /assets/* are safe
+            # to cache: a new build gives them new URLs.)
+            return FileResponse(str(target), headers=(_NO_CACHE if target.name == "sw.js" else None))
         return FileResponse(str(FRONTEND_DIST / "index.html"), headers=_NO_CACHE)
 else:
     @app.get("/")

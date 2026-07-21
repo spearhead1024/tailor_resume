@@ -120,25 +120,50 @@ export async function sendTestPush(): Promise<number> {
 }
 
 /* ── notification ring (alarm-clock style) ───────────────────────────────────
-   The OS plays at most ONE short toast sound, and often has even that muted for Chrome — and a
-   service worker cannot play audio at all. So when the app is open, we ring ourselves: a two-tone
-   chime repeated until the notification is clicked or dismissed (the SW tells us to stop), with a
-   hard cap so it can never ring forever.
-
-   The whole ring pattern is scheduled up-front on the Web Audio timeline rather than driven by
-   setInterval: background tabs throttle timers (down to once a minute), which would break the ring
-   in exactly the case that matters — but the audio thread is never throttled. Closing the context
-   cancels every scheduled beep at once, which is how "stop" is instant.
-
-   Caveat: with every tab closed, only Windows can make a sound — see the notification settings.  */
+   A reminder RINGS a repeated two-tone chime until the system notification is clicked or dismissed
+   (the SW tells us to stop), with a hard 60s cap so it can never ring forever. The bell mark / board
+   changes never ring (they carry no alarm). Why in-app: the OS plays at most one toast sound and
+   often mutes even that for Chrome, and a service worker cannot play audio — so this is the reliable
+   alert. The pattern is scheduled up-front on the Web Audio clock (not setInterval, which background
+   tabs throttle); closing the context cancels every scheduled beep at once, so "stop" is instant.
+   Web Audio needs the page interacted-with once (autoplay). Every tab closed → only the OS sound. */
 const RING_GAP_S = 1.5;      // seconds between rings
 const RING_MAX_S = 60;       // stop after a minute even if never acknowledged
-
 let ringCtx: AudioContext | null = null;
 let ringCap: number | null = null;
+let suppressStartUntil = 0;   // set by stopRinging — see the note there
 
-function startRinging(): void {
-  stopRinging();
+/* Cross-tab stop bus. Only ONE tab is told to ring (the service worker elects it), but the person may
+ * acknowledge from ANY tab — click the toast, open the bell, hit 🔕 Silence, or just click the page in
+ * a different tab. Each of those calls stopRinging() locally; without a bus it would only silence the
+ * tab it ran in, leaving the *other* tab (the one actually ringing) chiming on — the "I closed it but
+ * the sound keeps going" people with several tabs open hear. So a local stop also broadcasts 'stop',
+ * and every tab tears its own ring down on receipt (with the same 2.5s suppress, so a socket notify
+ * racing in behind the close can't restart it). */
+let ringBus: BroadcastChannel | null = null;
+try {
+  ringBus = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('tr-ring') : null;
+  if (ringBus) ringBus.onmessage = (e: MessageEvent) => { if (e.data === 'stop') stopRingingLocal(); };
+} catch { ringBus = null; }
+
+function teardownRing(): void {
+  for (const ev of ['pointerdown', 'keydown']) window.removeEventListener(ev, stopRinging);
+  if (ringCap !== null) { window.clearTimeout(ringCap); ringCap = null; }
+  if (ringCtx) { const c = ringCtx; ringCtx = null; void c.close().catch(() => {}); }
+}
+
+/** Silence THIS tab's ring (and suppress an immediate restart) without re-broadcasting — used when the
+ *  stop arrived over the cross-tab bus, so tabs don't ping-pong 'stop' at each other forever. */
+function stopRingingLocal(): void {
+  suppressStartUntil = Date.now() + 2500;
+  teardownRing();
+}
+
+/** Start the alarm ring. Exported so the in-app notification socket can ring too — that path works
+ *  even when OS/browser notifications are blocked, as long as a tab is open (no push needed). */
+export function startRinging(): void {
+  if (Date.now() < suppressStartUntil) return;   // just stopped → ignore a socket ring racing in behind it
+  teardownRing();
   try {
     const Ctx: typeof AudioContext | undefined =
       window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
@@ -168,24 +193,49 @@ function startRinging(): void {
       beep(1320, at + 0.16, 0.24);
     }
     ringCap = window.setTimeout(stopRinging, RING_MAX_S * 1000 + 500);
+    // Any interaction acknowledges it → silence the ring. Essential when OS notifications are
+    // blocked/off and there is no system notification to close: click anywhere — the toast, the bell,
+    // the page. (With OS notifications ON, closing the toast also stops it via the SW handlers.)
+    for (const ev of ['pointerdown', 'keydown']) window.addEventListener(ev, stopRinging, { once: true });
   } catch { /* audio unavailable — the OS sound is the only fallback */ }
 }
 
-/** Stop the ring immediately (closing the context cancels everything still scheduled). */
+/** Stop the ring immediately AND briefly suppress any restart — so a socket `notify` that arrives a
+ *  beat after you closed the notification can't re-start the sound ("I closed it but it kept ringing").
+ *  Called on OS-notification close/click, any page interaction, bell open, mark-read, and Silence.
+ *  Also fans the stop out to every other tab (see ringBus) so acknowledging in one tab silences the
+ *  tab that is actually ringing. */
 export function stopRinging(): void {
-  if (ringCap !== null) { window.clearTimeout(ringCap); ringCap = null; }
-  if (ringCtx) {
-    const c = ringCtx;
-    ringCtx = null;
-    void c.close().catch(() => {});
-  }
+  stopRingingLocal();
+  try { ringBus?.postMessage('stop'); } catch { /* bus unavailable — local stop still happened */ }
+}
+
+/** Unlock Web Audio on the first user gesture. Browsers keep an AudioContext SUSPENDED until the page
+ *  has been interacted with, so a reminder that fires before any click would ring silently. Creating +
+ *  resuming a throwaway context on the first pointer/key/touch lifts that block for the whole session,
+ *  so every later ring plays. Runs once, then removes its own listeners. */
+let audioPrimed = false;
+function primeAudio(): void {
+  if (audioPrimed) return;
+  audioPrimed = true;
+  for (const ev of ['pointerdown', 'keydown', 'touchstart']) window.removeEventListener(ev, primeAudio);
+  try {
+    const Ctx: typeof AudioContext | undefined =
+      window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Ctx) return;
+    const c = new Ctx();
+    void c.resume().finally(() => { void c.close().catch(() => {}); });
+  } catch { /* ignore — the ring will still try on its own */ }
 }
 
 let soundBound = false;
-/** Listen for the service worker telling us to start/stop the notification ring. */
+/** Listen for the service worker telling us to start/stop the notification ring, and arm audio-unlock. */
 export function initPushSound(): void {
   if (soundBound || !('serviceWorker' in navigator)) return;
   soundBound = true;
+  for (const ev of ['pointerdown', 'keydown', 'touchstart']) {
+    window.addEventListener(ev, primeAudio, { passive: true });
+  }
   navigator.serviceWorker.addEventListener('message', (e: MessageEvent) => {
     const d = e.data as { type?: string; action?: string } | null;
     if (d?.type !== 'notification-sound') return;
