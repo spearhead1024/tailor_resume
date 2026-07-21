@@ -8,7 +8,7 @@
    stop as soon as the notification is clicked or dismissed. */
 
 // Bump this to force every browser onto a new worker. The byte change is what the browser diffs.
-const SW_VERSION = '3-native-style';
+const SW_VERSION = '5-no-ring';
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
@@ -48,12 +48,16 @@ self.addEventListener('push', (event) => {
     body: data.body || '',
     tag: data.tag || undefined,               // same tag replaces an earlier toast instead of stacking
     renotify: !!data.tag,                     // ...but a replacement must still re-alert, not land silently
-    silent: false,                            // never suppress the OS notification sound
+    // Only a scheduled REMINDER (alarm) makes a sound. Board-change / bell-mark notifications are
+    // silent by request — they update the bell quietly and never ring or ding.
+    silent: !isAlarm,
     data: { url: data.url || '/interviews' },
   };
   event.waitUntil((async () => {
     await self.registration.showNotification(title, options);
-    if (isAlarm) await tellPages({ type: 'notification-sound', action: 'start' });   // ring until acknowledged
+    // In-app ring disabled by request: a reminder's own OS notification sound (silent:false for
+    // alarms, above) is the only alert — the bell mark never chimes. We still tell pages to STOP on
+    // click/close below, in case an older tab is mid-ring.
   })());
 });
 

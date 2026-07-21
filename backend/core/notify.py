@@ -129,11 +129,14 @@ _lock = threading.Lock()
 # back through auth.
 _storage = Storage(DATA_DIR)
 
-# A "N minutes before" reminder (caller lead / creater / call-board-manager heads-up) may fire any
-# time from its ideal moment right up until the call actually STARTS — never after. There is no fixed
-# grace cap: a call booked (or rescheduled) at short notice would otherwise miss its window and warn
-# nobody, which is worse than a late fire. The truthful label (_remaining_label) makes a late fire
-# state what's ACTUALLY left ("in 25 minutes"), so it is never misleading either way.
+# Every schedule-relative reminder announces its NOMINAL lead — the value set in Settings → Notifications
+# (caller "in 1 hour", creater / call-board-manager "in 1 hour 30 minutes") — never the exact time left.
+# So each must fire CLOSE to that moment or not at all: once more than _HEADSUP_GRACE has passed since
+# the ideal moment (sched − N minutes) the reminder is skipped. A call booked or rescheduled at shorter
+# notice than a reminder's lead simply doesn't get that reminder — you can't send a "1 hour" (or "1.5
+# hour") notice for a call already nearer than that. The scheduler ticks every 60s, so 10 minutes is
+# ample slack to catch the moment without the announced time ever drifting from the setting.
+_HEADSUP_GRACE = timedelta(minutes=10)
 
 
 
@@ -275,15 +278,24 @@ def _call_line(c: dict, tz_name: str) -> str:
     return line
 
 
-def _digest_payload(rtype: str, calls: list[dict], tz_name: str) -> dict:
-    """One notification covering ALL of a caller's interviews for a given day.
-    `rtype` is 'before@<hour>' (the day-before digest) or 'dayof@<hour>'."""
+def _digest_payload(rtype: str, calls: list[dict], tz_name: str, recipient_id: str) -> dict:
+    """One notification covering ALL of a day's interviews for one recipient.
+
+    Recipient is either the caller (their own calls) or their team manager (the whole team's calls
+    that day). When the recipient is NOT the caller of a given line — i.e. a manager's digest — the
+    line names whose call it is. `rtype` is 'before@<hour>' (day-before) or 'dayof@<hour>'."""
     when = "tomorrow" if rtype.startswith("before@") else "today"
     n = len(calls)
+    lines = []
+    for c in calls:
+        line = _call_line(c, tz_name)
+        if str(recipient_id) != str(c["user"]["id"]) and c.get("caller"):
+            line += f" · {c['caller']}"          # whose call it is (only shown in a manager's digest)
+        lines.append(line)
     return {
         "title": f"{n} interview{'' if n == 1 else 's'} {when}",
-        "body": "\n".join(_call_line(c, tz_name) for c in calls),
-        "tag": f"{rtype}-{calls[0]['user']['id']}",
+        "body": "\n".join(lines),
+        "tag": f"{rtype}-{recipient_id}",
         "url": "/interviews", "alarm": True,
     }
 
@@ -317,6 +329,32 @@ def _call_board_managers() -> list[dict]:
                 and str(u.get("status", "")).strip() == "approved"]
     except Exception:
         log.exception("could not read call-board managers; skipping their reminders this tick")
+        return []
+
+
+def _team_managers_of(user: dict) -> list[dict]:
+    """The manager(s) of a caller's team — kept on their team's calls alongside the caller.
+
+    A team manager runs one caller team, so they get the same TEAM-level reminders as their callers
+    (the caller lead and the daily digest) — but scoped to their own team, never the whole board.
+    Empty when the caller is on no team, or the team has no manager. An admin who happens to sit on
+    the team is not treated as its manager here — admins have their own, wider view. Read fresh each
+    tick, so moving a caller between teams takes effect on the next scan. Never raises."""
+    try:
+        tid = str((user or {}).get("team_id", "")).strip()
+        if not tid:
+            return []
+        from auth import storage   # lazy: avoids an import cycle (auth imports core.*)
+        out = []
+        for u in storage.get_users():
+            if str(u.get("team_id", "")).strip() != tid:
+                continue
+            roles = {str(r).strip() for r in (u.get("roles") or [])}
+            if "manager" in roles and "admin" not in roles and str(u.get("status", "")).strip() == "approved":
+                out.append(u)
+        return out
+    except Exception:
+        log.exception("could not read team managers; skipping their team reminders this tick")
         return []
 
 
@@ -357,7 +395,7 @@ def run_due_reminders() -> int:
     cfg = _config()
     lead_min = int(cfg.get("lead_minutes", 60) or 60)
     creator_min = int(cfg.get("creator_minutes", 90) or 90)
-    cbm_min = int(cfg.get("cbm_minutes", 90) or 90)
+    cbm_min = int(cfg.get("cbm_minutes", 90) or 90)     # the call-board manager has its OWN lead (Settings)
     h_before = int(cfg.get("day_before_hour", 19))
     h_of = int(cfg.get("day_of_hour", 8))
     with _lock:
@@ -375,41 +413,54 @@ def run_due_reminders() -> int:
         sent.add(key); dirty = True
         return now < deadline
 
-    def claim_at_moment(key: str, target: datetime, sched: datetime) -> bool:
+    def claim_at_moment(key: str, target: datetime, sched: datetime, grace: "timedelta | None" = None) -> bool:
         """For the "N minutes before" reminders (caller lead + creater + call-board-manager heads-up).
 
         Fires from the ideal moment (`target` = sched − N minutes) up until the call STARTS, then
-        stays silent. No grace cap: a call booked or rescheduled at short notice still warns everyone,
-        just with a truthful "in X minutes" (see _remaining_label) rather than the nominal lead.
+        stays silent. `grace`, when given, ALSO caps how late it may fire: once more than `grace` has
+        passed since `target` it is skipped. Every reminder passes _HEADSUP_GRACE, because each
+        announces its NOMINAL lead ("in 1 hour", "in 1 hour 30 minutes") — so it must land near that
+        moment or not go out at all, rather than announce a lead the call is already nearer than.
 
-        Crucially the key is consumed ONLY when we actually send. A reminder we skipped (the call had
-        already started) is not "already sent"; and because the key embeds the scheduled time, moving
-        a call to a new time is a NEW key — so a reschedule always re-arms its heads-up."""
+        Crucially the key is consumed ONLY when we actually send. A reminder we skipped (call already
+        started, or past its grace) is not "already sent"; and because the key embeds the scheduled
+        time, moving a call to a new time is a NEW key — so a reschedule always re-arms it."""
         nonlocal dirty
         if key in sent or now < target:
             return False
         if now >= sched:
             return False                       # call already started → too late, silent, NOT consumed
+        if grace is not None and (now - target) > grace:
+            return False                       # too late to be THIS lead (e.g. a 1.5h heads-up gone stale) → skip
         sent.add(key); dirty = True
         return True
 
-    # (1) the lead reminder (admin-set, default 60 min before) — one per call. Keyed on the sched AND
-    #     the lead, so changing either the interview time or the setting re-arms it. Meaningful right
-    #     up until the interview actually starts.
+    # (1) the lead reminder (admin-set, default 60 min before). Goes to the assigned caller AND that
+    #     caller's team manager — a team-level heads-up. Keyed on sched + lead + RECIPIENT, so each is
+    #     tracked (and re-armed on reschedule) independently, and changing the time or the setting
+    #     re-arms it. Meaningful right up until the interview actually starts. The manager's copy is on
+    #     the manager's own clock and names the caller so they know who is covering it.
     if cfg.get("lead_enabled", True):
         for c in calls:
-            key = f"{c['row_id']}|lead{lead_min}m|{c['sched_raw']}"
-            if claim_at_moment(key, c["sched"] - timedelta(minutes=lead_min), c["sched"]):
-                try:
-                    _deliver(c["user"]["id"], {
-                        "title": f"Interview in {_remaining_label(c['sched'], now)}",
-                        "body": _call_line(c, c["tz"]),
-                        "tag": f"lead-{c['row_id']}",
-                        "url": "/interviews", "alarm": True,
-                    }, c["row_id"])
-                    fired += 1
-                except Exception:
-                    log.exception("lead push failed (row %s)", c["row_id"])
+            caller = c["user"]
+            recipients = [caller] + [m for m in _team_managers_of(caller) if str(m["id"]) != str(caller["id"])]
+            for r in recipients:
+                key = f"{c['row_id']}|lead{lead_min}m|{c['sched_raw']}|{r['id']}"
+                if claim_at_moment(key, c["sched"] - timedelta(minutes=lead_min), c["sched"], _HEADSUP_GRACE):
+                    try:
+                        rtz = str(r.get("timezone", "")).strip() or c["tz"]
+                        body = _call_line(c, rtz)
+                        if str(r["id"]) != str(caller["id"]) and c.get("caller"):
+                            body += f" · caller: {c['caller']}"      # the manager needs to know who's on it
+                        _deliver(r["id"], {
+                            "title": f"Interview in {_lead_label(lead_min)}",
+                            "body": body,
+                            "tag": f"lead-{c['row_id']}",
+                            "url": "/interviews", "alarm": True,
+                        }, c["row_id"])
+                        fired += 1
+                    except Exception:
+                        log.exception("lead push failed (row %s, user %s)", c["row_id"], r["id"])
 
     # (1b) the CREATER's own heads-up (admin-set, default 90 min before) — goes to whoever booked the
     #      call, not the caller, and names the caller so they know who's covering it. Times are shown
@@ -423,14 +474,14 @@ def run_due_reminders() -> int:
             # heads-up for the NEW time (the truthful label keeps it honest). It fires at most once per
             # (row, time), so nudging the SAME time never double-pings — but a real reschedule does.
             key = f"{c['row_id']}|creator|{c['sched_raw']}"
-            if claim_at_moment(key, c["sched"] - timedelta(minutes=creator_min), c["sched"]):
+            if claim_at_moment(key, c["sched"] - timedelta(minutes=creator_min), c["sched"], _HEADSUP_GRACE):
                 try:
                     ctz = str(creater.get("timezone", "")).strip()
                     body = _call_line(c, ctz)
                     if c.get("caller"):
                         body += f" · caller: {c['caller']}"
                     _deliver(creater["id"], {
-                        "title": f"Interview you booked — in {_remaining_label(c['sched'], now)}",
+                        "title": f"Interview you booked — in {_lead_label(creator_min)}",
                         "body": body,
                         "tag": f"creator-{c['row_id']}",
                         "url": "/interviews", "alarm": True,
@@ -439,12 +490,12 @@ def run_due_reminders() -> int:
                 except Exception:
                     log.exception("creator push failed (row %s)", c["row_id"])
 
-    # (1c) the CALL-BOARD MANAGER's heads-up (admin-set, default 90 min before). A call-board manager
-    #      oversees the WHOLE board, so — unlike the creater, who is one person per call — every user
-    #      holding the role gets this before EVERY scheduled call. Keyed on row + manager + time, so a
-    #      reschedule re-arms it (a fresh heads-up for the new time), exactly like the creater ping.
-    #      Skipped for a call this manager is already personally on (its caller or creater): they get a
-    #      call-specific reminder for that one already, and this would just be a second buzz.
+    # (1c) the CALL-BOARD MANAGER's heads-up, shaped like the creater's but with its OWN admin-set lead
+    #      (`cbm_minutes`, Settings → Notifications; defaults to 90 = the creater's). A call-board
+    #      manager oversees the WHOLE board, so — unlike the creater, who is one person per call — every
+    #      user holding the role gets it before EVERY scheduled call. Keyed on row + manager + time, so a
+    #      reschedule re-arms it, exactly like the creater ping. Skipped for a call this manager is
+    #      already personally on (its caller or creater): they get a call-specific reminder already.
     if cfg.get("cbm_enabled", True):
         managers = _call_board_managers()
         for c in calls:
@@ -455,14 +506,14 @@ def run_due_reminders() -> int:
                 if mid == caller_uid or mid == creater_uid:
                     continue                   # already reminded about this call in another role
                 key = f"{c['row_id']}|cbm|{mid}|{c['sched_raw']}"
-                if claim_at_moment(key, c["sched"] - timedelta(minutes=cbm_min), c["sched"]):
+                if claim_at_moment(key, c["sched"] - timedelta(minutes=cbm_min), c["sched"], _HEADSUP_GRACE):
                     try:
                         mtz = str(mgr.get("timezone", "")).strip()
                         body = _call_line(c, mtz)
                         if c.get("caller"):
                             body += f" · caller: {c['caller']}"
                         _deliver(mgr["id"], {
-                            "title": f"Board interview — in {_remaining_label(c['sched'], now)}",
+                            "title": f"Board interview — in {_lead_label(cbm_min)}",
                             "body": body,
                             "tag": f"cbm-{c['row_id']}",
                             "url": "/interviews", "alarm": True,
@@ -471,21 +522,30 @@ def run_due_reminders() -> int:
                     except Exception:
                         log.exception("call-board-manager push failed (row %s, user %s)", c["row_id"], mgr["id"])
 
-    # (2) day-before + day-of digests — ONE per caller per day, covering all that day's calls. Both
-    #     need the caller's timezone; without one they can't be placed (the lead reminder still works).
+    # (2) day-before + day-of digests — ONE per RECIPIENT per day. Recipients: the caller (their own
+    #     calls) and each of their team managers (the whole team's calls that day). Each digest is
+    #     placed in the RECIPIENT's own timezone; a recipient without one is skipped (their per-call
+    #     lead still works). rtz_of remembers each recipient's tz so it is dated and built on their clock.
     groups: dict[tuple[str, object], list[dict]] = {}
+    rtz_of: dict[str, str] = {}
     for c in calls:
-        if not c["tz"] or ZoneInfo is None:
-            continue
-        try:
-            day = c["sched"].astimezone(ZoneInfo(c["tz"])).date()
-        except Exception:
-            continue
-        groups.setdefault((c["user"]["id"], day), []).append(c)
+        caller = c["user"]
+        recipients = [caller] + [m for m in _team_managers_of(caller) if str(m["id"]) != str(caller["id"])]
+        for r in recipients:
+            rtz = str(r.get("timezone", "")).strip()
+            if not rtz or ZoneInfo is None:
+                continue
+            try:
+                day = c["sched"].astimezone(ZoneInfo(rtz)).date()
+            except Exception:
+                continue
+            rid = str(r["id"])
+            rtz_of[rid] = rtz
+            groups.setdefault((rid, day), []).append(c)
 
     for (uid, day), group in groups.items():
         group.sort(key=lambda c: c["sched"])
-        tz_name = group[0]["tz"]
+        tz_name = rtz_of[uid]
         try:
             tz = ZoneInfo(tz_name)
             prev = day - timedelta(days=1)
@@ -504,10 +564,10 @@ def run_due_reminders() -> int:
         except Exception:
             continue
         for rtype, (target, deadline) in targets.items():
-            key = f"{uid}|{day.isoformat()}|{rtype}"      # one digest per caller per day per type
+            key = f"{uid}|{day.isoformat()}|{rtype}"      # one digest per recipient per day per type
             if claim(key, target, deadline):
                 try:
-                    _deliver(uid, _digest_payload(rtype, group, tz_name))
+                    _deliver(uid, _digest_payload(rtype, group, tz_name, uid))
                     fired += 1
                 except Exception:
                     log.exception("%s digest push failed (user %s, %s)", rtype, uid, day)
@@ -520,8 +580,48 @@ def run_due_reminders() -> int:
     return fired
 
 
+_sched_lock_handle = None   # kept open for the process's lifetime, so the OS lock is held
+
+
+def _become_sole_scheduler() -> bool:
+    """Win a cross-process lock so only ONE process ever runs the reminder scheduler.
+
+    uvicorn runs as a parent+child pair here (and a sloppy restart can leave extra instances). If each
+    ran the startup scheduler thread, EVERY reminder would fire once per process — the exact "twice in
+    the bell, rings twice" bug. The in-process threading lock can't stop that; this takes an OS-level
+    exclusive lock on data/scheduler.lock, held for the process's lifetime (the OS frees it on exit).
+    The first process to reach here wins and schedules; any other backs off and never fires. Never
+    raises — on any error it assumes it did NOT win, so at worst a tick is skipped, never doubled."""
+    global _sched_lock_handle
+    fh = None
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        fh = open(DATA_DIR / "scheduler.lock", "a+")
+        fh.seek(0)
+        try:
+            import msvcrt                                       # Windows
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        except ImportError:
+            import fcntl                                        # POSIX
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _sched_lock_handle = fh                                # keep the handle → keep the lock
+        return True
+    except Exception:
+        if fh is not None:
+            try: fh.close()
+            except Exception: pass
+        return False
+
+
 def scheduler_loop(interval_s: int = 60) -> None:
-    """Blocking loop for a background thread: run reminders every `interval_s` seconds, forever."""
+    """Blocking loop for a background thread: run reminders every `interval_s` seconds, forever.
+
+    Only the process that wins the single-scheduler lock actually runs; any other returns at once, so
+    a reminder is never fired (or rung, or filed in the bell) twice."""
+    if not _become_sole_scheduler():
+        log.info("Another process already holds the reminder-scheduler lock — not starting a second "
+                 "scheduler here (prevents double-fired reminders).")
+        return
     log.info("Interview reminder scheduler started (every %ss)", interval_s)
     while True:
         try:

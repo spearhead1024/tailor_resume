@@ -11,14 +11,14 @@ type Notif = {
   day_before_enabled: boolean; day_before_hour: number;
   day_of_enabled: boolean; day_of_hour: number;
   creator_enabled: boolean; creator_minutes: number;
-  cbm_enabled: boolean; cbm_minutes: number;
+  cbm_enabled: boolean; cbm_minutes: number;   // call board manager has its own lead, like the creater
 };
 const NOTIF_DEFAULTS: Notif = {
   lead_enabled: true, lead_minutes: 60,
   day_before_enabled: true, day_before_hour: 19,   // 7pm
   day_of_enabled: true, day_of_hour: 8,            // 8am
   creator_enabled: true, creator_minutes: 90,      // ping whoever booked the call
-  cbm_enabled: true, cbm_minutes: 90,              // ping every call-board manager, like the creator
+  cbm_enabled: true, cbm_minutes: 90,              // ping every call-board manager (own lead, default 90)
 };
 const hourName = (h: number) => `${(h % 12) || 12}:00 ${h < 12 ? 'AM' : 'PM'}`;
 
@@ -267,8 +267,8 @@ export default function Settings() {
                   </>}
                   preview={`Interview you booked — in ${leadLabel(notif.creator_minutes)}`} />
 
-                {/* Same shape as the creator heads-up, but sent to everyone with the Call Board
-                    Manager role, for every scheduled call — they oversee the whole board. */}
+                {/* Its own admin-set lead (cbm_minutes), like the creater's. Sent to everyone with the
+                    Call Board Manager role, for every scheduled call — they oversee the whole board. */}
                 <ReminderCard
                   on={notif.cbm_enabled} onToggle={(v) => setN({ cbm_enabled: v })}
                   icon="📋" title="Heads-up to the call board manager" to="Board mgr"

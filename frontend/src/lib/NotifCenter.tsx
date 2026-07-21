@@ -84,7 +84,10 @@ export default function NotifCenter() {
     const id = window.setInterval(() => { void load(); }, 20000);
     return () => window.clearInterval(id);
   }, [load]);
-  useEffect(() => { if (open) void load(); }, [open, load]);
+  // Opening the bell to check it IS acknowledging the alarm — silence the ring (no sound just for
+  // looking at your notifications). Marking one read does the same (see markRead). The bell itself,
+  // its badge and the sync toast never make any sound; only the notification's arrival does.
+  useEffect(() => { if (open) { void load(); stopRinging(); } }, [open, load]);
 
   useEffect(() => {
     if (!open) return;
@@ -146,6 +149,12 @@ export default function NotifCenter() {
             borderBottom: '1px solid var(--border)' }}>
             <strong style={{ fontSize: '0.9rem' }}>Notifications</strong>
             <span style={{ flex: 1 }} />
+            {/* An always-available, unmistakable "stop the alarm" — opening the bell already silences
+                it, but this also stops a ring that started while the bell was already open. */}
+            <button className="ghost" title="Silence the alarm sound" style={{ fontSize: '0.74rem', padding: '2px 7px' }}
+              onClick={() => stopRinging()}>
+              🔕 Silence
+            </button>
             {badge > 0 && (
               <button className="ghost" style={{ fontSize: '0.74rem', padding: '2px 7px' }}
                 onClick={() => markRead(undefined, tab || undefined)}>
