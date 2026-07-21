@@ -94,12 +94,18 @@ export default function Applied() {
   async function scheduleInterview(r: Row) {
     try {
       const jd = await api.get<JobDetail>(`/api/resumes/${r.saved_resume_id}/job`).catch(() => null);
+      // Put the job link at the TOP of the Job Description so it travels with the row — the caller can
+      // open the posting straight from the board without hunting for it. Prefer the row's own link,
+      // fall back to the detail lookup. Skip it cleanly if there's no link.
+      const link = (r.job_link || jd?.link || '').trim();
+      const desc = (jd?.description || '').trim();
+      const c_jd = [link && `Job link: ${link}`, desc].filter(Boolean).join('\n\n');
       await api.post('/api/interviews/rows', {
         cells: {
           c_title: r.job_title || '',
           c_account: r.profile_name || '',
           c_resume: `/api/resumes/${r.saved_resume_id}/pdf`,   // downloadable resume link (see ResumeCell)
-          c_jd: (jd?.description || '').trim(),
+          c_jd,   // the row's Index is auto-assigned server-side (see add_row)
         },
       });
       toast('Added to the Interviews board', 'success');

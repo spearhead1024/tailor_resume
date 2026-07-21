@@ -17,6 +17,20 @@ from schemas import UserUpsertRequest
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
+try:                                              # validate a timezone against the IANA database
+    from zoneinfo import available_timezones
+    _VALID_TZS = available_timezones()
+except Exception:                                 # pragma: no cover — pre-3.9 / missing tzdata
+    _VALID_TZS = set()
+
+
+def _validate_timezone(payload: dict) -> None:
+    """An admin can change a user's timezone here — but a garbage value silently breaks that user's
+    calendar (their hours are wall-clock in this zone), so reject anything not in the IANA database."""
+    tz = str(payload.get("timezone", "")).strip()
+    if tz and _VALID_TZS and tz not in _VALID_TZS:
+        raise HTTPException(status_code=400, detail="Invalid time zone")
+
 def _sanitize(u: dict) -> dict:
     return {k: v for k, v in u.items() if k not in ("password_hash", "password_salt")}
 
@@ -106,10 +120,19 @@ def update_user(user_id: str, body: UserUpsertRequest, user: dict = Depends(_acc
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
 
+    _validate_timezone(payload)
     payload = _autoteam_for_manager(payload, target)   # promoted to manager → mint "<Name> team"
 
     storage.update_user(user_id, _apply_password(payload))
-    return _sanitize(storage.get_user_by_id(user_id) or {"id": user_id})
+    updated = storage.get_user_by_id(user_id) or {"id": user_id}
+
+    # A timezone (or name) change moves this person on everyone else's calendar — the board caches the
+    # roster, so tell open boards to re-read it, exactly like the self-service /auth/me path does.
+    if {"timezone", "full_name"} & set(payload):
+        from core.live import on_roster_changed
+        on_roster_changed(updated)
+
+    return _sanitize(updated)
 
 
 @router.delete("/{user_id}")

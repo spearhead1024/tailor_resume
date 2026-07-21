@@ -657,6 +657,14 @@ def add_row(body: dict | None = None, user: dict = Depends(_access)):
     # delete) keeps its original date rather than being back-dated to the moment it was restored.
     if "c_created" in valid and not str(cells.get("c_created", "") or "").strip():
         cells["c_created"] = datetime.now(timezone.utc).isoformat()
+    # Index — the running call number. Auto-assign the next one so a row added ANY way (the Schedule
+    # button, the API, a seed) gets a number, not a blank cell. `max(existing numeric) + 1`, so it
+    # never collides even after deletes. An explicit value is respected (undo of a delete keeps its
+    # original number). Legacy non-numeric indexes (e.g. "5_304_311") are simply ignored by the max.
+    if "c_index" in valid and not str(cells.get("c_index", "") or "").strip():
+        nums = [int(n) for r in grid["rows"]
+                if (n := str((r.get("cells") or {}).get("c_index", "")).strip()).isdigit()]
+        cells["c_index"] = str((max(nums) + 1) if nums else 1)
     # an explicit id + position lets the client re-insert a row (undo of a delete / redo of an add)
     rid = str(body2.get("id") or "").strip()
     if not rid or any(r["id"] == rid for r in grid["rows"]):

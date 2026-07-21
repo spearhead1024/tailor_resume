@@ -4,6 +4,7 @@ import { api } from '../api/client';
 import { useToast } from '../lib/toast';
 import { Role, useAuth } from '../lib/auth';
 import SourceBadge from '../lib/SourceBadge';
+import { TimezonePicker } from '../lib/TimezonePicker';
 
 function fmtWhen(iso?: string): string {
   const s = (iso || '').trim();
@@ -432,7 +433,15 @@ export default function Users() {
                     <div className="u-detail-grid">
                       <Field label="Email" value={u.email} />
                       <Field label="Country" value={u.country} />
-                      <Field label="Time zone" value={u.timezone} />
+                      {/* Admins can change a local user's time zone here — VPS_1 users stay read-only
+                          (their account lives on VPS_1). The picker writes straight through the same
+                          update path as roles/status. */}
+                      <Field label="Time zone" value={
+                        remote
+                          ? (u.timezone || undefined)
+                          : <TimezonePicker value={u.timezone || ''}
+                              onChange={(tz) => { if (tz !== (u.timezone || '')) updateMutation.mutate({ id: u.id, payload: { timezone: tz } }); }} />
+                      } />
                       <Field label="Telegram" value={u.telegram} />
                       <Field label="WhatsApp" value={u.whatsapp} />
                       <Field label="Discord" value={u.discord} />
