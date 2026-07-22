@@ -442,6 +442,15 @@ export default function Users() {
                           : <TimezonePicker value={u.timezone || ''}
                               onChange={(tz) => { if (tz !== (u.timezone || '')) updateMutation.mutate({ id: u.id, payload: { timezone: tz } }); }} />
                       } />
+                      {/* Per-user reminder lead time — an admin can tune it for anyone. Blank = the app
+                          default. Saved on blur so we don't PATCH on every keystroke. */}
+                      <Field label="Reminder (min before)" value={
+                        remote
+                          ? (u.reminder_lead_minutes || undefined)
+                          : <input type="number" min={5} max={1440} step={5} style={{ maxWidth: 110 }}
+                              defaultValue={u.reminder_lead_minutes || ''} placeholder="default"
+                              onBlur={(e) => { const n = Number(e.target.value) || 0; if (n !== (u.reminder_lead_minutes || 0)) updateMutation.mutate({ id: u.id, payload: { reminder_lead_minutes: n } }); }} />
+                      } />
                       <Field label="Telegram" value={u.telegram} />
                       <Field label="WhatsApp" value={u.whatsapp} />
                       <Field label="Discord" value={u.discord} />

@@ -445,15 +445,20 @@ def run_due_reminders() -> int:
             caller = c["user"]
             recipients = [caller] + [m for m in _team_managers_of(caller) if str(m["id"]) != str(caller["id"])]
             for r in recipients:
-                key = f"{c['row_id']}|lead{lead_min}m|{c['sched_raw']}|{r['id']}"
-                if claim_at_moment(key, c["sched"] - timedelta(minutes=lead_min), c["sched"], _HEADSUP_GRACE):
+                # Each recipient's OWN lead time wins — a caller may want 30 min, an admin 10. Their
+                # reminder_lead_minutes overrides the app default; 0 means "use the default". The key
+                # and the fire moment both use this per-person value, so two recipients on the SAME call
+                # are reminded at their own times, tracked separately.
+                r_lead = int(r.get("reminder_lead_minutes") or 0) or lead_min
+                key = f"{c['row_id']}|lead{r_lead}m|{c['sched_raw']}|{r['id']}"
+                if claim_at_moment(key, c["sched"] - timedelta(minutes=r_lead), c["sched"], _HEADSUP_GRACE):
                     try:
                         rtz = str(r.get("timezone", "")).strip() or c["tz"]
                         body = _call_line(c, rtz)
                         if str(r["id"]) != str(caller["id"]) and c.get("caller"):
                             body += f" · caller: {c['caller']}"      # the manager needs to know who's on it
                         _deliver(r["id"], {
-                            "title": f"Interview in {_lead_label(lead_min)}",
+                            "title": f"Interview in {_lead_label(r_lead)}",
                             "body": body,
                             "tag": f"lead-{c['row_id']}",
                             "url": "/interviews", "alarm": True,

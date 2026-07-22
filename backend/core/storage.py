@@ -750,6 +750,18 @@ def _normalize_days_off(raw: Any) -> list[str]:
     return sorted(out)
 
 
+def _clamp_lead(raw: Any) -> int:
+    """A per-user reminder lead time in minutes. 0 (or junk) → 0, meaning "use the app default"; any
+    real value is clamped to the same 5–1440 window the global notifications.lead_minutes uses."""
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    if n <= 0:
+        return 0
+    return max(5, min(1440, n))
+
+
 def _normalize_user(item: dict) -> dict:
     roles = _normalize_roles(item)
     return {
@@ -794,6 +806,10 @@ def _normalize_user(item: dict) -> dict:
         'discord': str(item.get('discord', '')).strip(),
         'emergency_contacts': str(item.get('emergency_contacts', '')),
         'timezone': str(item.get('timezone', '')).strip(),        # IANA zone, e.g. "Europe/Bucharest"
+        # How many minutes before a call THIS person wants the "Interview in …" heads-up. A per-user
+        # override of the app-wide notifications.lead_minutes: one caller may want 30, an admin 10. 0
+        # means "use the app default". Clamped to the same 5–1440 window as the global setting.
+        'reminder_lead_minutes': _clamp_lead(item.get('reminder_lead_minutes')),
         # Per-user keyboard-shortcut overrides for the Chrome extension card
         # ({action_id: single_key}). Validated at the API layer.
         'shortcuts': {

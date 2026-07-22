@@ -129,6 +129,9 @@ def update_me(body: dict = Body(...), user: dict = Depends(get_current_user)):
     patch: dict = {k: str(body.get(k, "")).strip() for k in _PROFILE_FIELDS if k in body}
     patch.update({k: str(body.get(k, "")) for k in _PROFILE_TEXTAREAS if k in body})
     patch.update({k: body[k] for k in _PROFILE_STRUCTS if k in body})
+    # Reminder lead time is an int, not a string — pass it straight through; storage clamps it.
+    if "reminder_lead_minutes" in body:
+        patch["reminder_lead_minutes"] = body["reminder_lead_minutes"]
     # Saving the availability form is the ONLY moment we can tell a real schedule from the default one
     # the normalizer invents for everybody. Record it here, or the board can never distinguish "works
     # 09:00–18:00" from "has never opened this page".

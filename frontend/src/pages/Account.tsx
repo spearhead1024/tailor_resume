@@ -29,6 +29,7 @@ export default function Account() {
 
   const [pw, setPw] = useState({ current: '', next: '', confirm: '' });
   const [pwSaving, setPwSaving] = useState(false);
+  const [lead, setLead] = useState('');    // reminder lead minutes — '' means "use the app default"
 
 
   useEffect(() => {
@@ -39,6 +40,7 @@ export default function Account() {
       emergency_contacts: user.emergency_contacts || '',
     });
     setTz(user.timezone || '');
+    setLead(user.reminder_lead_minutes ? String(user.reminder_lead_minutes) : '');
   }, [user]);
 
   if (!user) return <div><span className="spinner" /> Loading…</div>;
@@ -49,7 +51,8 @@ export default function Account() {
   const save = async () => {
     setSaving(true);
     try {
-      await api.patch('/api/auth/me', { ...form, timezone: tz });
+      // '' → 0 = fall back to the app default; a number = this person's own lead time.
+      await api.patch('/api/auth/me', { ...form, timezone: tz, reminder_lead_minutes: Number(lead) || 0 });
       await loadCurrentUser();
       toast('Profile saved', 'success');
     } catch (e: any) {
@@ -139,6 +142,20 @@ export default function Account() {
               <span className="link" style={{ fontSize: '0.78rem', display: 'inline-block', marginTop: 4, cursor: 'pointer' }}
                 onClick={() => setTz(BROWSER_TZ)}>Use my detected zone ({tzDisplay(BROWSER_TZ)})</span>
             )}
+          </div>
+        </div>
+        <div className="row">
+          <div className="field">
+            <label>Interview reminder</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <input type="number" min={5} max={1440} step={5} style={{ maxWidth: 120 }}
+                value={lead} placeholder="default"
+                onChange={(e) => setLead(e.target.value)} />
+              <span className="muted" style={{ fontSize: '0.85rem' }}>minutes before the call</span>
+            </div>
+            <span className="muted" style={{ fontSize: '0.78rem', display: 'inline-block', marginTop: 4 }}>
+              How far ahead you're alerted. Leave blank to use the team default. (5–1440)
+            </span>
           </div>
         </div>
         <div className="field">
