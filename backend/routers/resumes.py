@@ -74,6 +74,25 @@ def _check_profile_access(user: dict, profile_id: str) -> None:
         raise HTTPException(status_code=403, detail="Forbidden")
 
 
+def _resume_on_visible_call(user: dict, resume_id: str) -> bool:
+    """Does an interview this user may SEE reference this resume?
+
+    The Schedule button puts the resume link (/api/resumes/<id>/pdf) on the board's Resume cell, so the
+    caller assigned to that call has to be able to open it — but they are NOT assigned the profile (a
+    caller makes the call, they don't own the persona), so _check_profile_access alone 403s them. This
+    grants access strictly through a call they can already see: no wider than the board itself.
+    """
+    from routers.interviews import _visibility
+    can_see = _visibility(user)
+    needle = f"/api/resumes/{resume_id}/pdf"
+    for row in storage.get_interview_rows():
+        if not can_see(row):
+            continue
+        if str((row.get("cells") or {}).get("c_resume", "")).strip() == needle:
+            return True
+    return False
+
+
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -1270,7 +1289,13 @@ def get_resume_pdf(resume_id: str, user: dict = Depends(get_current_user)):
     record = storage.get_generated_resume_by_id(resume_id) if hasattr(storage, "get_generated_resume_by_id") else None
     if not record:
         raise HTTPException(status_code=404, detail="Resume not found")
-    _check_profile_access(user, record.get("profile_id", ""))
+    # Admin, or a bidder assigned this profile — OR a caller/manager for whom this resume sits on a
+    # call they can see (the Schedule button links it onto the board). Without that last clause the
+    # assigned caller can't open the very resume they're calling about.
+    if not has_role(user, "admin") \
+            and record.get("profile_id", "") not in (user.get("assigned_profile_ids") or []) \
+            and not _resume_on_visible_call(user, resume_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
 
     cache_file = PDF_CACHE_DIR / f"{resume_id}.pdf"
     if cache_file.exists() and cache_file.stat().st_size > 0:
