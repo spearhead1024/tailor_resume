@@ -268,3 +268,48 @@ def on_row_changed(row_id: str, before: dict, after: dict, actor: dict) -> None:
             })
     except Exception:
         log.exception("live notify failed for row %s", row_id)
+
+
+def on_feedback_added(row_id: str, cells: dict, actor: dict, text: str) -> None:
+    """A caller, team member, or team manager posted in the Chat & Feedback thread — tell whoever is
+    responsible for the call: the row's Creater, and every Call Board Manager (they oversee the whole
+    board, so every reply matters to them, not just ones on rows they created). Admin-authored messages
+    do NOT trigger this — an admin posting isn't "a reply somebody needs to follow up on" the way a
+    caller's is. Board-type notification: filed + toasted, but never rings (see core/notify.py for the
+    alarm-carrying reminders). Never raises — a notification must never break a chat post."""
+    try:
+        actor_roles = {str(r).strip() for r in (actor or {}).get("roles", [])}
+        if "admin" in actor_roles:
+            return
+        cells = cells or {}
+        actor_id = str((actor or {}).get("id", ""))
+        who = _actor_name(actor)
+        name = _title(cells)
+
+        creator = _resolve(str(cells.get("c_creater", "")).strip())
+        audience: set[str] = {creator["id"]} if creator else set()
+        for u in _users():
+            roles = {str(r).strip() for r in (u.get("roles") or [])}
+            if "call_board_manager" in roles and str(u.get("status", "")).strip() == "approved":
+                audience.add(u["id"])
+        audience.discard(actor_id)          # never yourself
+        if not audience:
+            return
+
+        preview = text.strip() or "📷 Image attached"
+        if len(preview) > 160:
+            preview = preview[:157] + "…"
+        title = f"{who} replied on {name}"
+
+        inbox.add(audience, "board", title, preview, row_id=row_id, frm=who)
+        hub.broadcast_soon({"type": "notify", "kind": "board", "title": title, "body": preview,
+                            "row_id": row_id, "from": who}, audience)
+        # No `alarm`: a chat reply is news, not an imminent interview, and must not ring.
+        _push_soon(audience, {
+            "title": title, "body": preview,
+            "tag": f"feedback-{row_id}",     # a later reply to the same call replaces the old banner
+            "url": "/interviews",
+            "row_id": row_id,
+        })
+    except Exception:
+        log.exception("feedback notify failed for row %s", row_id)

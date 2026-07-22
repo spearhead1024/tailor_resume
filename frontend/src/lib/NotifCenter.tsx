@@ -74,7 +74,11 @@ export default function NotifCenter() {
       // user closed the notification — the "I closed it but sound keeps going" bug. So: OS-on → let
       // the SW own the ring (close stops it); OS-off/blocked → the socket is the only ring path.
       if (m.kind === 'reminder' && notifPermission() !== 'granted') startRinging();
-      toast(`${m.title} — ${m.body}`, m.kind === 'reminder' ? 'info' : 'success');
+      // A reminder is announced by SOUND alone (by request) — no in-app toast pop-up. It's still
+      // filed in the bell (load() below) for anyone who wants to look. Board-change notifications
+      // (assignment, feedback replies, …) are unaffected — those still toast, since they carry no
+      // sound of their own and would otherwise go unnoticed until the bell is next opened.
+      if (m.kind !== 'reminder') toast(`${m.title} — ${m.body}`, 'success');
       void load();
     });
   }, [load, toast]);

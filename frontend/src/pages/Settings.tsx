@@ -5,21 +5,32 @@ import { useToast } from '../lib/toast';
 
 type SubTab = 'general' | 'notifications' | 'prompt' | 'domains' | 'titles' | 'companies';
 
-/* Interview reminder settings. Every time here is on the CALLER's clock (their profile timezone). */
+/* Interview reminder settings. Every time here is on the CALLER's clock (their profile timezone),
+   except the creater/CBM heads-ups, which are on THEIR OWN clock (they're the recipient). */
 type Notif = {
   lead_enabled: boolean; lead_minutes: number;
   day_before_enabled: boolean; day_before_hour: number;
   day_of_enabled: boolean; day_of_hour: number;
-  creator_enabled: boolean; creator_minutes: number;
-  cbm_enabled: boolean; cbm_minutes: number;   // call board manager has its own lead, like the creater
+  // Creater / call-board-manager heads-ups can each fire at SEVERAL lead times (e.g. 90 min AND
+  // 30 min before) — admin adds/removes entries here. Every notification-time setting in the app
+  // lives on this page; there is deliberately no per-account override anywhere else.
+  creator_enabled: boolean; creator_minutes_list: number[];
+  cbm_enabled: boolean; cbm_minutes_list: number[];
 };
 const NOTIF_DEFAULTS: Notif = {
   lead_enabled: true, lead_minutes: 60,
   day_before_enabled: true, day_before_hour: 19,   // 7pm
   day_of_enabled: true, day_of_hour: 8,            // 8am
-  creator_enabled: true, creator_minutes: 90,      // ping whoever booked the call
-  cbm_enabled: true, cbm_minutes: 90,              // ping every call-board manager (own lead, default 90)
+  creator_enabled: true, creator_minutes_list: [90],   // ping whoever booked the call
+  cbm_enabled: true, cbm_minutes_list: [90],           // ping every call-board manager
 };
+/** Clamp/de-dupe/sort a list of lead-time minutes; empty or all-junk falls back to the default so a
+    role can never end up silently un-configured (enabled but with nothing to fire). */
+function cleanMinutesList(values: number[], fallback: number[]): number[] {
+  const out = Array.from(new Set(values.map((n) => Math.min(Math.max(Math.round(n) || 0, 5), 1440)).filter((n) => n >= 5)));
+  out.sort((a, b) => a - b);
+  return out.length ? out : fallback;
+}
 const hourName = (h: number) => `${(h % 12) || 12}:00 ${h < 12 ? 'AM' : 'PM'}`;
 
 /** Mirrors the server's wording, so the previews below show exactly what will be pushed. */
@@ -38,11 +49,14 @@ function Hint({ children }: { children: React.ReactNode }) {
   return <span className="muted" style={{ flex: '1 1 240px', minWidth: 150, fontSize: '0.82rem', lineHeight: 1.5 }}>{children}</span>;
 }
 
-/** One reminder, as a card: who gets it, when it fires, and what it will actually say. */
-function ReminderCard({ on, onToggle, icon, title, when, to, preview }: {
+/** One reminder, as a card: who gets it, when it fires, and what it will actually say. `preview` is
+    one string, or several — a role with multiple configured lead times (creater/CBM) shows one
+    preview line per time, so it's clear each fires as its own separate notification. */
+function ReminderCard({ on, onToggle, icon, title, when, to, preview, note }: {
   on: boolean; onToggle: (v: boolean) => void; icon: string; title: string;
-  when: React.ReactNode; to: 'Caller' | 'Creator' | 'Board mgr'; preview: string;
+  when: React.ReactNode; to: 'Caller' | 'Creator' | 'Board mgr'; preview: string | string[]; note?: React.ReactNode;
 }) {
+  const previews = Array.isArray(preview) ? preview : [preview];
   const toColour = to === 'Caller' ? '#3b82f6' : to === 'Creator' ? '#a855f7' : '#14b8a6';
   return (
     <div style={{
@@ -66,10 +80,54 @@ function ReminderCard({ on, onToggle, icon, title, when, to, preview }: {
           }}>{to}</span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 7 }}>{when}</div>
-        <div className="muted" style={{ fontSize: '0.78rem', marginTop: 8, fontStyle: 'italic' }}>
-          🔔 “{preview}”
+        {note && <div className="muted" style={{ fontSize: '0.78rem', marginTop: 6 }}>{note}</div>}
+        <div style={{ marginTop: 8 }}>
+          {previews.map((p, i) => (
+            <div key={i} className="muted" style={{ fontSize: '0.78rem', fontStyle: 'italic' }}>🔔 “{p}”</div>
+          ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Chips of configured lead times (e.g. "1 hour 30 minutes ✕") plus an inline "+ Add" field. Used for
+    the creater/CBM heads-ups, which — unlike the caller's single lead — can fire at several times. */
+function MinutesListEditor({ values, onChange, disabled }: {
+  values: number[]; onChange: (next: number[]) => void; disabled?: boolean;
+}) {
+  const [draft, setDraft] = useState('');
+  const add = () => {
+    const n = parseInt(draft, 10);
+    if (!n || n < 5 || n > 1440) return;
+    const next = Math.min(Math.max(n, 5), 1440);
+    if (!values.includes(next)) onChange([...values, next].sort((a, b) => a - b));
+    setDraft('');
+  };
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+      {values.length === 0 && <span className="muted" style={{ fontSize: '0.78rem' }}>No times set</span>}
+      {values.map((n) => (
+        <span key={n} style={{
+          display: 'inline-flex', alignItems: 'center', gap: 5, padding: '3px 6px 3px 10px', borderRadius: 999,
+          background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', fontSize: '0.8rem',
+        }}>
+          {leadLabel(n)}
+          <button type="button" disabled={disabled} title="Remove this time"
+            onClick={() => onChange(values.filter((v) => v !== n))}
+            style={{ border: 'none', background: 'none', cursor: disabled ? 'default' : 'pointer', opacity: 0.6, padding: '0 2px', fontSize: '0.78rem', lineHeight: 1 }}>
+            ✕
+          </button>
+        </span>
+      ))}
+      <input type="number" min={5} max={1440} placeholder="min" disabled={disabled} value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }}
+        style={{ flex: '0 0 auto', width: 66 }} />
+      <button type="button" className="secondary" disabled={disabled || !draft} onClick={add}
+        style={{ padding: '2px 10px', fontSize: '0.78rem' }}>
+        + Add
+      </button>
     </div>
   );
 }
@@ -238,13 +296,23 @@ export default function Settings() {
               <strong>recipient's own timezone</strong> — the caller's, or the creator's — never yours.
             </p>
 
-            <div className="card" style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginBottom: 12,
+            <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12,
               background: 'rgba(59,130,246,0.07)', border: '1px solid rgba(59,130,246,0.28)' }}>
-              <span style={{ fontSize: '1rem' }}>ℹ️</span>
-              <span style={{ fontSize: '0.85rem' }}>
-                Only interviews whose <strong>Status is “Scheduled”</strong> ever notify. The moment a call becomes
-                Done, Closed, On-hold, Not Done — anything else — it goes silent on its own.
-              </span>
+              <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                <span style={{ fontSize: '1rem' }}>ℹ️</span>
+                <span style={{ fontSize: '0.85rem' }}>
+                  Only interviews whose <strong>Status is “Scheduled”</strong> ever notify. The moment a call becomes
+                  Done, Closed, On-hold, Not Done — anything else — it goes silent on its own.
+                </span>
+              </div>
+              <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                <span style={{ fontSize: '1rem' }}>✅</span>
+                <span style={{ fontSize: '0.85rem' }}>
+                  The <strong>Creator</strong> and <strong>Board mgr</strong> heads-ups additionally require{' '}
+                  <strong>Approved is “Confirmed”</strong> — a call still Pending or Rejected doesn't page them yet.
+                  The <strong>Caller</strong>'s reminder and the daily summary are not affected by Approved.
+                </span>
+              </div>
             </div>
 
             <div className="card">
@@ -252,36 +320,29 @@ export default function Settings() {
                 Before the call
               </label>
               <div style={{ display: 'grid', gap: 8, marginTop: 10 }}>
-                {/* Creator first: its 90-minute heads-up fires BEFORE the caller's 60-minute one. */}
+                {/* Creator first: its heads-up(s) fire BEFORE the caller's single lead. Admin can add
+                    several times — each fires as its own independent reminder. */}
                 <ReminderCard
                   on={notif.creator_enabled} onToggle={(v) => setN({ creator_enabled: v })}
                   icon="🗓️" title="Heads-up to whoever booked it" to="Creator"
-                  when={<>
-                    <input type="number" min={5} max={1440} value={notif.creator_minutes} disabled={!notif.creator_enabled}
-                      onChange={(e) => setN({ creator_minutes: parseInt(e.target.value, 10) || 0 })}
-                      style={{ flex: '0 0 auto', width: 82 }} />
-                    <Hint>
-                      minutes before the call — sent to the <strong>Creater</strong>, and it names the caller.
-                      Sent <strong>once</strong>, even if you reschedule.
-                    </Hint>
-                  </>}
-                  preview={`Interview you booked — in ${leadLabel(notif.creator_minutes)}`} />
+                  when={<MinutesListEditor values={notif.creator_minutes_list} disabled={!notif.creator_enabled}
+                    onChange={(v) => setN({ creator_minutes_list: v })} />}
+                  note={<>Each time above — minutes before the call — sent to the <strong>Creater</strong>, and it
+                    names the caller. Sent <strong>once per time</strong>, even if you reschedule. Requires
+                    Approved: Confirmed.</>}
+                  preview={notif.creator_minutes_list.map((m) => `Interview you booked — in ${leadLabel(m)}`)} />
 
-                {/* Its own admin-set lead (cbm_minutes), like the creater's. Sent to everyone with the
+                {/* Its own admin-configured lead times, like the creater's. Sent to everyone with the
                     Call Board Manager role, for every scheduled call — they oversee the whole board. */}
                 <ReminderCard
                   on={notif.cbm_enabled} onToggle={(v) => setN({ cbm_enabled: v })}
                   icon="📋" title="Heads-up to the call board manager" to="Board mgr"
-                  when={<>
-                    <input type="number" min={5} max={1440} value={notif.cbm_minutes} disabled={!notif.cbm_enabled}
-                      onChange={(e) => setN({ cbm_minutes: parseInt(e.target.value, 10) || 0 })}
-                      style={{ flex: '0 0 auto', width: 82 }} />
-                    <Hint>
-                      minutes before the call — sent to <strong>everyone with the Call Board Manager role</strong>,
-                      for <em>every</em> scheduled call, and it names the caller. Sent <strong>once</strong> per call.
-                    </Hint>
-                  </>}
-                  preview={`Board interview — in ${leadLabel(notif.cbm_minutes)}`} />
+                  when={<MinutesListEditor values={notif.cbm_minutes_list} disabled={!notif.cbm_enabled}
+                    onChange={(v) => setN({ cbm_minutes_list: v })} />}
+                  note={<>Each time above — minutes before the call — sent to <strong>everyone with the Call Board
+                    Manager role</strong>, for <em>every</em> scheduled call, and it names the caller. Sent{' '}
+                    <strong>once per time</strong> per call. Requires Approved: Confirmed.</>}
+                  preview={notif.cbm_minutes_list.map((m) => `Board interview — in ${leadLabel(m)}`)} />
 
                 <ReminderCard
                   on={notif.lead_enabled} onToggle={(v) => setN({ lead_enabled: v })}
@@ -333,8 +394,8 @@ export default function Settings() {
                     notifications: {
                       ...notif,
                       lead_minutes: Math.min(Math.max(notif.lead_minutes || 60, 5), 1440),
-                      creator_minutes: Math.min(Math.max(notif.creator_minutes || 90, 5), 1440),
-                      cbm_minutes: Math.min(Math.max(notif.cbm_minutes || 90, 5), 1440),
+                      creator_minutes_list: cleanMinutesList(notif.creator_minutes_list, [90]),
+                      cbm_minutes_list: cleanMinutesList(notif.cbm_minutes_list, [90]),
                     },
                   }, 'Notifications')}
                   disabled={!notifDirty || saveMutation.isPending}>

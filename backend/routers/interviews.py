@@ -883,7 +883,7 @@ def append_chat(row_id: str, body: dict, user: dict = Depends(_access)):
         raise HTTPException(status_code=400, detail="Empty message")
     if len(text) > 20000:
         raise HTTPException(status_code=400, detail="Message too long")
-    _owned_row_or_404(row_id, user)
+    row = _owned_row_or_404(row_id, user)
     msg = {
         "id": _new_id("m"),
         "author": (user.get("full_name") or user.get("username") or "").strip(),
@@ -891,7 +891,9 @@ def append_chat(row_id: str, body: dict, user: dict = Depends(_access)):
         "at": datetime.now(timezone.utc).isoformat(),
         "text": text,
     }
-    return {"messages": _append_msg(row_id, user, msg)}
+    out = _append_msg(row_id, user, msg)
+    live_notify.on_feedback_added(row_id, row.get("cells") or {}, user, text)
+    return {"messages": out}
 
 
 @router.delete("/rows/{row_id}/chat/{msg_id}")
@@ -931,19 +933,22 @@ async def append_chat_image(row_id: str, file: UploadFile = File(...), text: str
     content = await file.read()
     if len(content) > 8 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Image too large (max 8 MB)")
-    _owned_row_or_404(row_id, user)
+    row = _owned_row_or_404(row_id, user)
     _CHAT_IMG_DIR.mkdir(parents=True, exist_ok=True)
     name = f"{_new_id('img')}{_IMG_EXT[file.content_type]}"
     (_CHAT_IMG_DIR / name).write_bytes(content)
+    caption = str(text or "").strip()
     msg = {
         "id": _new_id("m"),
         "author": (user.get("full_name") or user.get("username") or "").strip(),
         "avatar": str(user.get("avatar_url", "")).strip(),
         "at": datetime.now(timezone.utc).isoformat(),
-        "text": str(text or "").strip(),
+        "text": caption,
         "image": f"/api/interviews/chat-image/{name}",
     }
-    return {"messages": _append_msg(row_id, user, msg)}
+    out = _append_msg(row_id, user, msg)
+    live_notify.on_feedback_added(row_id, row.get("cells") or {}, user, caption)
+    return {"messages": out}
 
 
 @router.get("/chat-image/{name}")

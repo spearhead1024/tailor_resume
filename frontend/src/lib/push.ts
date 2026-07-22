@@ -131,6 +131,7 @@ const RING_GAP_S = 1.5;      // seconds between rings
 const RING_MAX_S = 60;       // stop after a minute even if never acknowledged
 let ringCtx: AudioContext | null = null;
 let ringCap: number | null = null;
+let ringPoll: number | null = null;
 let suppressStartUntil = 0;   // set by stopRinging — see the note there
 
 /* Cross-tab stop bus. Only ONE tab is told to ring (the service worker elects it), but the person may
@@ -149,6 +150,7 @@ try {
 function teardownRing(): void {
   for (const ev of ['pointerdown', 'keydown']) window.removeEventListener(ev, stopRinging);
   if (ringCap !== null) { window.clearTimeout(ringCap); ringCap = null; }
+  if (ringPoll !== null) { window.clearInterval(ringPoll); ringPoll = null; }
   if (ringCtx) { const c = ringCtx; ringCtx = null; void c.close().catch(() => {}); }
 }
 
@@ -160,8 +162,16 @@ function stopRingingLocal(): void {
 }
 
 /** Start the alarm ring. Exported so the in-app notification socket can ring too — that path works
- *  even when OS/browser notifications are blocked, as long as a tab is open (no push needed). */
-export function startRinging(): void {
+ *  even when OS/browser notifications are blocked, as long as a tab is open (no push needed).
+ *
+ *  `tag` (present only for the OS-push path — the socket path has no system notification to check)
+ *  arms an ACTIVE poll: every few seconds, ask the service worker whether that notification is still
+ *  showing. `notificationclose` is not reliable on Windows once a toast has auto-collapsed into the
+ *  Action Center — dismissing it from there often never reaches the service worker, so a ring relying
+ *  on that event alone just played out its full RING_MAX_S cap regardless of when you actually closed
+ *  it (the "sound keeps going for exactly a minute" report). Polling catches every dismissal path —
+ *  click, X, swipe, Action-Center clear, auto-expiry — within a few seconds of it actually happening. */
+export function startRinging(tag?: string): void {
   if (Date.now() < suppressStartUntil) return;   // just stopped → ignore a socket ring racing in behind it
   teardownRing();
   try {
@@ -197,6 +207,11 @@ export function startRinging(): void {
     // blocked/off and there is no system notification to close: click anywhere — the toast, the bell,
     // the page. (With OS notifications ON, closing the toast also stops it via the SW handlers.)
     for (const ev of ['pointerdown', 'keydown']) window.addEventListener(ev, stopRinging, { once: true });
+    if (tag && navigator.serviceWorker?.controller) {
+      ringPoll = window.setInterval(() => {
+        navigator.serviceWorker.controller?.postMessage({ type: 'check-ring', tag });
+      }, 3000);
+    }
   } catch { /* audio unavailable — the OS sound is the only fallback */ }
 }
 
@@ -237,9 +252,9 @@ export function initPushSound(): void {
     window.addEventListener(ev, primeAudio, { passive: true });
   }
   navigator.serviceWorker.addEventListener('message', (e: MessageEvent) => {
-    const d = e.data as { type?: string; action?: string } | null;
+    const d = e.data as { type?: string; action?: string; tag?: string } | null;
     if (d?.type !== 'notification-sound') return;
     if (d.action === 'stop') stopRinging();
-    else startRinging();
+    else startRinging(d.tag);
   });
 }

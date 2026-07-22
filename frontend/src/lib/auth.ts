@@ -30,7 +30,6 @@ export type User = {
   discord?: string;
   emergency_contacts?: string;
   timezone?: string;
-  reminder_lead_minutes?: number;   // per-user interview-reminder lead time; 0/absent = app default
 };
 
 export function hasRole(user: User | null, ...roles: Role[]): boolean {

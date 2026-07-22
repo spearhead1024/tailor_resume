@@ -8,12 +8,25 @@
    stop as soon as the notification is clicked or dismissed. */
 
 // Bump this to force every browser onto a new worker. The byte change is what the browser diffs.
-const SW_VERSION = '8-ring-one-tab';
+const SW_VERSION = '9-active-close-poll';
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
 self.addEventListener('message', (e) => {
-  if (e.data && e.data.type === 'version') e.source && e.source.postMessage({ type: 'sw-version', version: SW_VERSION });
+  if (e.data && e.data.type === 'version') { e.source && e.source.postMessage({ type: 'sw-version', version: SW_VERSION }); return; }
+  // The ringing page asks "is this notification still showing?" every few seconds while it rings —
+  // see push.ts. `notificationclose` is NOT reliable on Windows once a toast has auto-collapsed into
+  // the Action Center: dismissing it from there often never reaches this service worker at all, so a
+  // ring that depended on that event alone just played out its full 60s hard cap regardless of when
+  // the person actually closed it ("sound keeps going for exactly 1 minute" was this — the cap, not a
+  // delay). Actively checking getNotifications() catches EVERY dismissal path — banner click, X,
+  // swipe, Action-Center clear, auto-expiry — the moment it happens, not just the ones that fire an event.
+  if (e.data && e.data.type === 'check-ring' && e.data.tag) {
+    e.waitUntil((async () => {
+      const still = await self.registration.getNotifications({ tag: e.data.tag });
+      if (still.length === 0 && e.source) e.source.postMessage({ type: 'notification-sound', action: 'stop' });
+    })());
+  }
 });
 
 async function tellPages(msg) {
@@ -71,7 +84,7 @@ self.addEventListener('push', (event) => {
       const target = wins.find((c) => c.focused)
         || wins.find((c) => c.visibilityState === 'visible')
         || wins[0];
-      if (target) target.postMessage({ type: 'notification-sound', action: 'start' });
+      if (target) target.postMessage({ type: 'notification-sound', action: 'start', tag: data.tag || '' });
     }
   })());
 });

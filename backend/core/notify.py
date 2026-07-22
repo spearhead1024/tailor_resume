@@ -2,23 +2,33 @@
 
 Per interview (times shown on each RECIPIENT's own timezone; all hours/leads are admin-set):
   • CALLER — three reminders: the day-before digest (default 7pm), the day-of digest (default 8am),
-    and a lead reminder a fixed time before the call (default 60 min).
-  • CREATER — one heads-up before the call (default 90 min), to whoever booked it; names the caller.
-  • CALL BOARD MANAGER — one heads-up before the call (default 90 min) to EVERY user holding the
-    'call_board_manager' role; they oversee the whole board, so this fires for every scheduled call.
-    Modelled on the creater ping (once per call, keyed on the row, so a reschedule never re-pings).
+    and a lead reminder a fixed time before the call (default 60 min). ONE app-wide lead time —
+    no per-user override (there used to be one; removed so every notification-time setting lives in
+    exactly one place: Settings → Notifications).
+  • CREATER — a heads-up before the call to whoever booked it, at EVERY lead time an admin has
+    configured (Settings → Notifications holds a LIST — e.g. a 90-min AND a 30-min heads-up can both
+    fire); names the caller. Only fires once the row's Approved cell is exactly "Confirmed".
+  • CALL BOARD MANAGER — the same shape as the creater's heads-up (its own admin-configured list of
+    lead times) to EVERY user holding the 'call_board_manager' role, for every scheduled call they
+    aren't already personally on. Also gated on Approved: Confirmed.
 
-Board edits (assignment, reassignment, status/content changes, chat) notify separately — see
-core/live.py — and never ring.
+Board edits (assignment, reassignment, status/content changes, chat/feedback replies) notify
+separately — see core/live.py — and never ring.
 
 A background tick (scheduler_loop → run_due_reminders) scans the board every minute and fires any
 reminder whose moment has arrived. The board is read from the DB (interview_rows). Sends are
 best-effort and never raise into the loop. Reminders are de-duped in data/notif_state.json, keyed by
-row + type + scheduled-time — so each fires once, and changing an interview's time re-arms the
+row + type + lead + scheduled-time — so each fires once, and changing an interview's time re-arms the
 schedule-relative ones.
 
 The 7pm / 8am caller digests need the caller's profile timezone; without one, only the lead / creater
 / board-manager reminders (which are absolute — a fixed offset from the call) can fire.
+
+Creater/CBM reminders additionally require Approved == "Confirmed" — a call still Pending or Rejected
+isn't settled enough to be worth a heads-up to whoever booked it or oversees the board. This gate is
+scoped to creater/CBM ONLY: the caller's own lead reminder and the daily digests are unaffected and
+still fire on Status == "Scheduled" alone (see NOTIFY_STATUS) — a caller/team-manager hears about a
+call the moment it's booked, same as always.
 """
 from __future__ import annotations
 
@@ -261,37 +271,64 @@ def _upcoming(now: datetime) -> list[dict]:
             "sched": sched_utc, "sched_raw": sched_raw, "title": _title_of(cells),
             "index": str(cells.get("c_index", "") or "").strip(),      # the call number
             "who": str(cells.get("c_client", "") or "").strip(),       # Interviewer(role) — who they speak to
+            "company": str(cells.get("c_company", "") or "").strip(),  # Company Info — shown to the caller
             "caller": caller_id,                                       # shown to the creater
             "creater": _resolve_person(creater_name) if creater_name else None,
+            # Whether the call is actually agreed — the creater/CBM heads-up requires this to be
+            # exactly "Confirmed" (see run_due_reminders); the caller/team-manager lead does not.
+            "approved": str(cells.get("c_approved", "") or "").strip(),
         })
     return out
 
 
 def _call_line(c: dict, tz_name: str) -> str:
-    """One call, as a caller needs to see it at a glance:
-         "#4  1:30 PM — Senior Software Engineer · with Robert James (HR manager)"
-    Call number and interviewer are dropped when the board leaves them blank."""
+    """One call, as the CALLER (or team member) making it needs to see it at a glance — enough to know
+    which job this is without opening the board:
+         "#4  1:30 PM — Acme Corp · Senior Software Engineer · with Robert James (HR manager)"
+    Call number, company and interviewer are dropped when the board leaves them blank."""
     head = f"#{c['index']}  " if c["index"] else ""
-    line = f"{head}{_fmt_time(c['sched'], tz_name)} — {c['title']}"
+    parts = [p for p in (c.get("company"), c["title"]) if p]
+    line = f"{head}{_fmt_time(c['sched'], tz_name)} — {' · '.join(parts)}"
     if c["who"]:
         line += f" · with {c['who']}"
+    return line
+
+
+def _creator_cbm_line(c: dict, tz_name: str) -> str:
+    """One call, for the CREATER/CALL-BOARD-MANAGER heads-up — just enough to know which call is
+    coming up and who is covering it. They aren't on the call, so the job details (company, position)
+    aren't theirs to need; the board has those if they want them.
+         "#4  1:30 PM — caller: John Doe" """
+    head = f"#{c['index']}  " if c["index"] else ""
+    line = f"{head}{_fmt_time(c['sched'], tz_name)}"
+    if c.get("caller"):
+        line += f" — caller: {c['caller']}"
+    return line
+
+
+def _manager_line(c: dict, tz_name: str) -> str:
+    """One call, for a TEAM MANAGER's reminder about a call that isn't their own — just enough to know
+    which call and who on their team is covering it.
+         "#4  1:30 PM — John Doe" """
+    head = f"#{c['index']}  " if c["index"] else ""
+    line = f"{head}{_fmt_time(c['sched'], tz_name)}"
+    if c.get("caller"):
+        line += f" — {c['caller']}"
     return line
 
 
 def _digest_payload(rtype: str, calls: list[dict], tz_name: str, recipient_id: str) -> dict:
     """One notification covering ALL of a day's interviews for one recipient.
 
-    Recipient is either the caller (their own calls) or their team manager (the whole team's calls
-    that day). When the recipient is NOT the caller of a given line — i.e. a manager's digest — the
-    line names whose call it is. `rtype` is 'before@<hour>' (day-before) or 'dayof@<hour>'."""
+    Recipient is either the caller (their own calls — full call_line, company + position) or their
+    team manager (the whole team's calls that day — the terser manager_line, just who's covering each
+    one). `rtype` is 'before@<hour>' (day-before) or 'dayof@<hour>'."""
     when = "tomorrow" if rtype.startswith("before@") else "today"
     n = len(calls)
-    lines = []
-    for c in calls:
-        line = _call_line(c, tz_name)
-        if str(recipient_id) != str(c["user"]["id"]) and c.get("caller"):
-            line += f" · {c['caller']}"          # whose call it is (only shown in a manager's digest)
-        lines.append(line)
+    lines = [
+        _manager_line(c, tz_name) if str(recipient_id) != str(c["user"]["id"]) else _call_line(c, tz_name)
+        for c in calls
+    ]
     return {
         "title": f"{n} interview{'' if n == 1 else 's'} {when}",
         "body": "\n".join(lines),
@@ -300,20 +337,56 @@ def _digest_payload(rtype: str, calls: list[dict], tz_name: str, recipient_id: s
     }
 
 
+_CONFIG_DEFAULTS = {"lead_enabled": True, "lead_minutes": 60, "day_before_enabled": True,
+                    "day_before_hour": 19, "day_of_enabled": True, "day_of_hour": 8,
+                    "creator_enabled": True, "cbm_enabled": True}
+
+
+def _minutes_list(cfg: dict, list_key: str, legacy_key: str, default: list[int]) -> list[int]:
+    """A sorted, de-duped, clamped (5–1440 min) list of lead times — the creater/CBM heads-up can now
+    fire at SEVERAL admin-configured times (e.g. 90 min AND 30 min before), not just one.
+
+    Reads the new list-shaped setting (`list_key`); falls back to the old single-number setting
+    (`legacy_key`, from before admin could add more than one) so an already-configured lead survives
+    the upgrade instead of silently reverting to the default; falls back to `default` if neither is
+    set. Junk entries are dropped rather than raising, so one bad value can't break every reminder."""
+    raw = cfg.get(list_key)
+    if isinstance(raw, list) and raw:
+        vals: set[int] = set()
+        for v in raw:
+            try:
+                n = int(v)
+            except (TypeError, ValueError):
+                continue
+            if n > 0:
+                vals.add(max(5, min(1440, n)))
+        if vals:
+            return sorted(vals)
+    try:
+        n = int(cfg.get(legacy_key))
+        if n > 0:
+            return [max(5, min(1440, n))]
+    except (TypeError, ValueError):
+        pass
+    return list(default)
+
+
 def _config() -> dict:
     """Admin-set reminder settings (Settings → Notifications). Falls back to the defaults if the
-    settings row can't be read, so the scheduler always has usable values."""
+    settings row can't be read (or a key is missing), so the scheduler always has usable values."""
     try:
         from auth import storage
         cfg = storage.get_app_settings().get("notifications")
-        if isinstance(cfg, dict) and cfg:
-            return cfg
+        if not isinstance(cfg, dict):
+            cfg = {}
     except Exception:
         log.exception("could not read notification settings; using defaults")
-    return {"lead_enabled": True, "lead_minutes": 60, "day_before_enabled": True,
-            "day_before_hour": 19, "day_of_enabled": True, "day_of_hour": 8,
-            "creator_enabled": True, "creator_minutes": 90,
-            "cbm_enabled": True, "cbm_minutes": 90}
+        cfg = {}
+    return {
+        **_CONFIG_DEFAULTS, **cfg,
+        "creator_minutes_list": _minutes_list(cfg, "creator_minutes_list", "creator_minutes", [90]),
+        "cbm_minutes_list": _minutes_list(cfg, "cbm_minutes_list", "cbm_minutes", [90]),
+    }
 
 
 def _call_board_managers() -> list[dict]:
@@ -394,8 +467,6 @@ def run_due_reminders() -> int:
     calls = _upcoming(now)
     cfg = _config()
     lead_min = int(cfg.get("lead_minutes", 60) or 60)
-    creator_min = int(cfg.get("creator_minutes", 90) or 90)
-    cbm_min = int(cfg.get("cbm_minutes", 90) or 90)     # the call-board manager has its OWN lead (Settings)
     h_before = int(cfg.get("day_before_hour", 19))
     h_of = int(cfg.get("day_of_hour", 8))
     with _lock:
@@ -445,20 +516,16 @@ def run_due_reminders() -> int:
             caller = c["user"]
             recipients = [caller] + [m for m in _team_managers_of(caller) if str(m["id"]) != str(caller["id"])]
             for r in recipients:
-                # Each recipient's OWN lead time wins — a caller may want 30 min, an admin 10. Their
-                # reminder_lead_minutes overrides the app default; 0 means "use the default". The key
-                # and the fire moment both use this per-person value, so two recipients on the SAME call
-                # are reminded at their own times, tracked separately.
-                r_lead = int(r.get("reminder_lead_minutes") or 0) or lead_min
-                key = f"{c['row_id']}|lead{r_lead}m|{c['sched_raw']}|{r['id']}"
-                if claim_at_moment(key, c["sched"] - timedelta(minutes=r_lead), c["sched"], _HEADSUP_GRACE):
+                key = f"{c['row_id']}|lead{lead_min}m|{c['sched_raw']}|{r['id']}"
+                if claim_at_moment(key, c["sched"] - timedelta(minutes=lead_min), c["sched"], _HEADSUP_GRACE):
                     try:
                         rtz = str(r.get("timezone", "")).strip() or c["tz"]
-                        body = _call_line(c, rtz)
-                        if str(r["id"]) != str(caller["id"]) and c.get("caller"):
-                            body += f" · caller: {c['caller']}"      # the manager needs to know who's on it
+                        # The caller gets the full picture (company + position) — they're the one on
+                        # the call. Their team manager only needs to know which call and who's on it.
+                        is_mgr = str(r["id"]) != str(caller["id"])
+                        body = _manager_line(c, rtz) if is_mgr else _call_line(c, rtz)
                         _deliver(r["id"], {
-                            "title": f"Interview in {_lead_label(r_lead)}",
+                            "title": f"Interview in {_lead_label(lead_min)}",
                             "body": body,
                             "tag": f"lead-{c['row_id']}",
                             "url": "/interviews", "alarm": True,
@@ -467,65 +534,71 @@ def run_due_reminders() -> int:
                     except Exception:
                         log.exception("lead push failed (row %s, user %s)", c["row_id"], r["id"])
 
-    # (1b) the CREATER's own heads-up (admin-set, default 90 min before) — goes to whoever booked the
-    #      call, not the caller, and names the caller so they know who's covering it. Times are shown
-    #      on the CREATER's clock, since it's their reminder.
+    # (1b) the CREATER's own heads-up — goes to whoever booked the call, not the caller, and names the
+    #      caller so they know who's covering it. Times are shown on the CREATER's clock, since it's
+    #      their reminder. Admin can configure SEVERAL lead times (Settings → Notifications,
+    #      creator_minutes_list — e.g. a 90-min AND a 30-min heads-up), each firing independently.
+    #      Only fires once the row is Approved: Confirmed — a call still Pending/Rejected isn't settled
+    #      enough to be worth a heads-up. Scoped to creater/CBM only; the caller's lead above is unaffected.
     if cfg.get("creator_enabled", True):
         for c in calls:
             creater = c.get("creater")
             if not creater:
                 continue                       # nobody in the Creater cell (or it matched no user)
-            # Keyed on row + scheduled time, so moving the call re-arms it: a reschedule sends a fresh
-            # heads-up for the NEW time (the truthful label keeps it honest). It fires at most once per
-            # (row, time), so nudging the SAME time never double-pings — but a real reschedule does.
-            key = f"{c['row_id']}|creator|{c['sched_raw']}"
-            if claim_at_moment(key, c["sched"] - timedelta(minutes=creator_min), c["sched"], _HEADSUP_GRACE):
-                try:
-                    ctz = str(creater.get("timezone", "")).strip()
-                    body = _call_line(c, ctz)
-                    if c.get("caller"):
-                        body += f" · caller: {c['caller']}"
-                    _deliver(creater["id"], {
-                        "title": f"Interview you booked — in {_lead_label(creator_min)}",
-                        "body": body,
-                        "tag": f"creator-{c['row_id']}",
-                        "url": "/interviews", "alarm": True,
-                    }, c["row_id"])
-                    fired += 1
-                except Exception:
-                    log.exception("creator push failed (row %s)", c["row_id"])
+            if str(c.get("approved", "")).strip().lower() != "confirmed":
+                continue                        # not yet Approved: Confirmed → too soon to remind
+            for lead in cfg["creator_minutes_list"]:
+                # Keyed on row + lead + scheduled time, so moving the call re-arms it: a reschedule
+                # sends a fresh heads-up for the NEW time. It fires at most once per (row, lead, time),
+                # so nudging the SAME time never double-pings — but a real reschedule does. The lead is
+                # in the key (and the tag) so several configured times each track and notify separately.
+                key = f"{c['row_id']}|creator|{lead}m|{c['sched_raw']}"
+                if claim_at_moment(key, c["sched"] - timedelta(minutes=lead), c["sched"], _HEADSUP_GRACE):
+                    try:
+                        ctz = str(creater.get("timezone", "")).strip()
+                        body = _creator_cbm_line(c, ctz)
+                        _deliver(creater["id"], {
+                            "title": f"Interview you booked — in {_lead_label(lead)}",
+                            "body": body,
+                            "tag": f"creator-{c['row_id']}-{lead}",
+                            "url": "/interviews", "alarm": True,
+                        }, c["row_id"])
+                        fired += 1
+                    except Exception:
+                        log.exception("creator push failed (row %s)", c["row_id"])
 
-    # (1c) the CALL-BOARD MANAGER's heads-up, shaped like the creater's but with its OWN admin-set lead
-    #      (`cbm_minutes`, Settings → Notifications; defaults to 90 = the creater's). A call-board
-    #      manager oversees the WHOLE board, so — unlike the creater, who is one person per call — every
-    #      user holding the role gets it before EVERY scheduled call. Keyed on row + manager + time, so a
-    #      reschedule re-arms it, exactly like the creater ping. Skipped for a call this manager is
-    #      already personally on (its caller or creater): they get a call-specific reminder already.
+    # (1c) the CALL-BOARD MANAGER's heads-up, shaped like the creater's: its OWN admin-configured list
+    #      of lead times (`cbm_minutes_list`, Settings → Notifications), independent of the creater's.
+    #      A call-board manager oversees the WHOLE board, so — unlike the creater, who is one person
+    #      per call — every user holding the role gets it before EVERY scheduled call. Same Approved:
+    #      Confirmed gate as the creater's. Skipped for a call this manager is already personally on
+    #      (its caller or creater): they get a call-specific reminder already.
     if cfg.get("cbm_enabled", True):
         managers = _call_board_managers()
         for c in calls:
+            if str(c.get("approved", "")).strip().lower() != "confirmed":
+                continue                        # not yet Approved: Confirmed → too soon to remind
             caller_uid = str(c["user"]["id"])
             creater_uid = str((c.get("creater") or {}).get("id", ""))
             for mgr in managers:
                 mid = str(mgr["id"])
                 if mid == caller_uid or mid == creater_uid:
                     continue                   # already reminded about this call in another role
-                key = f"{c['row_id']}|cbm|{mid}|{c['sched_raw']}"
-                if claim_at_moment(key, c["sched"] - timedelta(minutes=cbm_min), c["sched"], _HEADSUP_GRACE):
-                    try:
-                        mtz = str(mgr.get("timezone", "")).strip()
-                        body = _call_line(c, mtz)
-                        if c.get("caller"):
-                            body += f" · caller: {c['caller']}"
-                        _deliver(mgr["id"], {
-                            "title": f"Board interview — in {_lead_label(cbm_min)}",
-                            "body": body,
-                            "tag": f"cbm-{c['row_id']}",
-                            "url": "/interviews", "alarm": True,
-                        }, c["row_id"])
-                        fired += 1
-                    except Exception:
-                        log.exception("call-board-manager push failed (row %s, user %s)", c["row_id"], mgr["id"])
+                for lead in cfg["cbm_minutes_list"]:
+                    key = f"{c['row_id']}|cbm|{mid}|{lead}m|{c['sched_raw']}"
+                    if claim_at_moment(key, c["sched"] - timedelta(minutes=lead), c["sched"], _HEADSUP_GRACE):
+                        try:
+                            mtz = str(mgr.get("timezone", "")).strip()
+                            body = _creator_cbm_line(c, mtz)
+                            _deliver(mgr["id"], {
+                                "title": f"Board interview — in {_lead_label(lead)}",
+                                "body": body,
+                                "tag": f"cbm-{c['row_id']}-{lead}",
+                                "url": "/interviews", "alarm": True,
+                            }, c["row_id"])
+                            fired += 1
+                        except Exception:
+                            log.exception("call-board-manager push failed (row %s, user %s)", c["row_id"], mgr["id"])
 
     # (2) day-before + day-of digests — ONE per RECIPIENT per day. Recipients: the caller (their own
     #     calls) and each of their team managers (the whole team's calls that day). Each digest is
