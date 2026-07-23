@@ -111,6 +111,9 @@ _PROFILE_TEXTAREAS = ("emergency_contacts",)
 # Structured — a dict / list, so they must NOT be stringified on the way through. Storage validates
 # and clamps them (bad times → the 09:00–18:00 default; bad dates → dropped).
 _PROFILE_STRUCTS = ("availability", "daily_meetings", "days_off")
+# This person's OWN creater/call-board-manager reminder lead times (Account page → "Reminder times").
+# Self-service only — nobody else may set these for you; storage clamps/de-dupes/sorts them.
+_PROFILE_LEAD_LISTS = ("creator_lead_minutes_list", "cbm_lead_minutes_list")
 # Changing any of these changes what OTHER people's calendars draw for you, so they have to be told.
 # full_name is in here because the board identifies a Caller by that name.
 _ROSTER_FIELDS = {"timezone", "availability", "availability_set", "daily_meetings", "days_off", "full_name"}
@@ -129,6 +132,7 @@ def update_me(body: dict = Body(...), user: dict = Depends(get_current_user)):
     patch: dict = {k: str(body.get(k, "")).strip() for k in _PROFILE_FIELDS if k in body}
     patch.update({k: str(body.get(k, "")) for k in _PROFILE_TEXTAREAS if k in body})
     patch.update({k: body[k] for k in _PROFILE_STRUCTS if k in body})
+    patch.update({k: body[k] for k in _PROFILE_LEAD_LISTS if k in body and isinstance(body[k], list)})
     # Saving the availability form is the ONLY moment we can tell a real schedule from the default one
     # the normalizer invents for everybody. Record it here, or the board can never distinguish "works
     # 09:00–18:00" from "has never opened this page".

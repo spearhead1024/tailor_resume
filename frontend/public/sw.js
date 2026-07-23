@@ -8,7 +8,7 @@
    stop as soon as the notification is clicked or dismissed. */
 
 // Bump this to force every browser onto a new worker. The byte change is what the browser diffs.
-const SW_VERSION = '9-active-close-poll';
+const SW_VERSION = '10-require-interaction';
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
@@ -48,15 +48,16 @@ self.addEventListener('push', (event) => {
   //
   // Chrome only hands a notification to the Windows Action Center if it can render it there. The
   // moment you ask for something Windows toasts cannot do, Chrome silently draws its OWN styled
-  // popup instead — which no longer looks like a system notification. The three that trigger that
-  // fallback, and are therefore all absent here:
-  //     actions            — buttons on the toast
-  //     image              — a large inline picture
-  //     requireInteraction — pinning it on screen indefinitely
-  // Keeping the payload to what Windows natively supports is the whole trick.
-  //
-  // An alarm is still distinguished — it RINGS until acknowledged (see below) and, being a real
-  // system notification, it persists in the Action Center rather than vanishing for good.
+  // popup instead — which no longer looks like a system notification. Two of the three things that
+  // trigger that fallback stay absent here:
+  //     actions  — buttons on the toast
+  //     image    — a large inline picture
+  // requireInteraction is the THIRD, and it's now turned back on for alarms specifically (below) — by
+  // request: a reminder should sit on screen until you close it, like the system Clock app's own
+  // alarms, not quietly slide into the Action Center after a few seconds ("shows and hides" was the
+  // complaint). If your Chrome build still falls back to its own styled popup for a requireInteraction
+  // toast rather than the native Windows one, that's the tradeoff — persistence over native chrome.
+  // Board-change / bell-mark notifications are untouched: brief, native-style, never pinned.
   const options = {
     body: data.body || '',
     tag: data.tag || undefined,               // same tag replaces an earlier toast instead of stacking
@@ -64,6 +65,8 @@ self.addEventListener('push', (event) => {
     // Only a scheduled REMINDER (alarm) makes a sound. Board-change / bell-mark notifications are
     // silent by request — they update the bell quietly and never ring or ding.
     silent: !isAlarm,
+    // Stay on screen until closed/clicked — only for alarms; a board-change toast still auto-clears.
+    requireInteraction: isAlarm,
     data: { url: data.url || '/interviews' },
   };
   event.waitUntil((async () => {

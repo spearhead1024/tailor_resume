@@ -9,8 +9,12 @@ The rules, as asked for:
   manager assigns a caller          → the caller AND the creator
   a call is handed to a TEAM        → the team's manager AND every member
   a team caller is assigned         → the manager AND the creator
+  a Call Board Manager edits a call → the caller (as above) AND the row's Creater
+  the Creater edits their own call  → the caller (as above) AND every Call Board Manager
 
-The actor is never notified about their own action.
+The actor is never notified about their own action — so a Call Board Manager who is also the row's
+own Creater (or a Creater who also holds the CBM role) editing their own call triggers neither of the
+two rules above for themselves; only other people in those roles are told.
 
 Audience is computed from the row as it looks AFTER the change, plus the previous cells, so a
 re-assignment can still reach the person who just lost the call. Everything is best-effort: a
@@ -74,6 +78,14 @@ def _team_people(team_name: str) -> tuple[set[str], set[str]]:
         if "caller" in roles:
             members.add(u["id"])
     return mgrs, members
+
+
+def _call_board_manager_ids() -> set[str]:
+    """Every approved user holding the 'call_board_manager' role — they oversee the WHOLE board, so a
+    content change on ANY call is theirs to know about, not just the ones they created."""
+    return {u["id"] for u in _users()
+            if "call_board_manager" in {str(r).strip() for r in (u.get("roles") or [])}
+            and str(u.get("status", "")).strip() == "approved"}
 
 
 def roster_audience(user: dict) -> set[str]:
@@ -224,11 +236,22 @@ def on_row_changed(row_id: str, before: dict, after: dict, actor: dict) -> None:
 
         # the creator/admin changed the details of a call somebody already holds
         touched = [k for k in _CONTENT_CELLS if str(after.get(k, "")) != str(before.get(k, ""))]
-        if touched and not (is_caller or is_manager) and new_caller and not caller_changed:
-            cu = _resolve(new_caller)
-            if cu:
-                what = "the time" if "c_sched" in touched else "the details"
-                add({cu["id"]}, "Interview updated", f"{who} changed {what} of {name}")
+        if touched and not (is_caller or is_manager):
+            what = "the time" if "c_sched" in touched else "the details"
+            if new_caller and not caller_changed:
+                cu = _resolve(new_caller)
+                if cu:
+                    add({cu["id"]}, "Interview updated", f"{who} changed {what} of {name}")
+            # A Call Board Manager editing a call is news to whoever booked it — a CBM isn't
+            # otherwise in the loop on a row they didn't create. No-ops when the CBM IS the row's
+            # own creater: add() already excludes the actor from their own audience.
+            if "call_board_manager" in actor_roles and creator_ids:
+                add(creator_ids, "Interview updated", f"{who} changed {what} of {name}")
+            # The row's OWN creater editing their own call is news to every Call Board Manager —
+            # they oversee the whole board, so this matters even though they didn't create it.
+            # No-ops for a creater who is also a CBM, same reasoning as above.
+            if creator_ids and actor_id in creator_ids:
+                add(_call_board_manager_ids(), "Interview updated", f"{who} changed {what} of {name}")
 
         # ── then the supervisory ones (creator / team manager) ─────────────────
         if caller_changed:

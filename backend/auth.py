@@ -1,6 +1,8 @@
 """JWT auth helpers and FastAPI dependencies."""
 from __future__ import annotations
 
+import os
+import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -11,11 +13,36 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from core.devices import DeviceStore
 from core.storage import Storage, verify_password
 
-JWT_SECRET = "TAILORRESUME_JWT_SECRET_2026"
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+# The HMAC key every session/snooze JWT is signed with. Used to be a short string hardcoded in source
+# (and therefore committed to git — anyone who could read the repo could forge a valid token for any
+# user) that also tripped PyJWT's InsecureKeyLengthWarning (RFC 7518 §3.2 wants >= 32 bytes for
+# HS256). Generated once (48 random bytes, well over that minimum) and persisted outside git, the same
+# pattern core/push.py already uses for the VAPID key. PUSH_VAPID_PRIVATE_KEY_FILE-style override via
+# TR_JWT_SECRET_FILE for a deploy that wants the file to live elsewhere / survive a redeploy in a
+# mounted volume. Losing this file (or it changing) invalidates every existing session — a one-time
+# sign-out for everyone, not something to regenerate casually.
+_JWT_SECRET_FILE = Path(os.environ.get("TR_JWT_SECRET_FILE", "").strip() or (DATA_DIR / "jwt_secret.txt"))
+
+
+def _load_or_create_jwt_secret() -> str:
+    try:
+        existing = _JWT_SECRET_FILE.read_text(encoding="utf-8").strip()
+        if len(existing) >= 32:
+            return existing
+    except FileNotFoundError:
+        pass
+    secret = secrets.token_urlsafe(48)
+    _JWT_SECRET_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _JWT_SECRET_FILE.write_text(secret, encoding="utf-8")
+    return secret
+
+
+JWT_SECRET = _load_or_create_jwt_secret()
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRES_DAYS = 30
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 storage = Storage(DATA_DIR)
 devices = DeviceStore(DATA_DIR / "app.db")
 

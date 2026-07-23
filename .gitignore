@@ -19,6 +19,8 @@ data/extension/keys/
 data/vapid_private.pem
 data/push_subscriptions.json
 data/notif_state.json
+# JWT signing key — a SECRET; anyone with it can forge a valid session token for any user.
+data/jwt_secret.txt
 
 # ── Runtime data — NEVER commit ────────────────────────────────────────────
 # A live SQLite DB committed mid-write is a torn snapshot (corrupt), and a pull

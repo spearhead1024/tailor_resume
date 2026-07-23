@@ -1,16 +1,18 @@
-"""Interview reminders — schedule-driven Web Push notifications, all hours admin-set in Settings.
+"""Interview reminders — schedule-driven Web Push notifications.
 
-Per interview (times shown on each RECIPIENT's own timezone; all hours/leads are admin-set):
+Per interview (times shown on each RECIPIENT's own timezone):
   • CALLER — three reminders: the day-before digest (default 7pm), the day-of digest (default 8am),
-    and a lead reminder a fixed time before the call (default 60 min). ONE app-wide lead time —
-    no per-user override (there used to be one; removed so every notification-time setting lives in
-    exactly one place: Settings → Notifications).
-  • CREATER — a heads-up before the call to whoever booked it, at EVERY lead time an admin has
-    configured (Settings → Notifications holds a LIST — e.g. a 90-min AND a 30-min heads-up can both
-    fire); names the caller. Only fires once the row's Approved cell is exactly "Confirmed".
-  • CALL BOARD MANAGER — the same shape as the creater's heads-up (its own admin-configured list of
-    lead times) to EVERY user holding the 'call_board_manager' role, for every scheduled call they
-    aren't already personally on. Also gated on Approved: Confirmed.
+    and a lead reminder a fixed time before the call (default 60 min). ONE app-wide lead time, admin-set
+    in Settings → Notifications — no per-user override for this one.
+  • CREATER — a heads-up before the call to whoever booked it, at EVERY lead time THAT PERSON has
+    configured on their own Account page (a list — e.g. a 90-min AND a 30-min heads-up can both fire);
+    names the caller. Only fires once the row's Approved cell is exactly "Confirmed". Whether the
+    feature runs at all is a global admin switch (Settings → Notifications); WHEN it fires is each
+    creater's own choice — a shared app-wide time used to mean one admin's preference silently became
+    every other admin's too.
+  • CALL BOARD MANAGER — the same shape as the creater's heads-up (EACH manager's own configured list
+    of lead times, on their own Account page) to EVERY user holding the 'call_board_manager' role, for
+    every scheduled call they aren't already personally on. Also gated on Approved: Confirmed.
 
 Board edits (assignment, reassignment, status/content changes, chat/feedback replies) notify
 separately — see core/live.py — and never ring.
@@ -274,6 +276,8 @@ def _upcoming(now: datetime) -> list[dict]:
             "company": str(cells.get("c_company", "") or "").strip(),  # Company Info — shown to the caller
             "caller": caller_id,                                       # shown to the creater
             "creater": _resolve_person(creater_name) if creater_name else None,
+            "creater_name": creater_name,                              # raw cell text — shown to the CBM,
+                                                                        # independent of whether it resolved
             # Whether the call is actually agreed — the creater/CBM heads-up requires this to be
             # exactly "Confirmed" (see run_due_reminders); the caller/team-manager lead does not.
             "approved": str(cells.get("c_approved", "") or "").strip(),
@@ -342,38 +346,21 @@ _CONFIG_DEFAULTS = {"lead_enabled": True, "lead_minutes": 60, "day_before_enable
                     "creator_enabled": True, "cbm_enabled": True}
 
 
-def _minutes_list(cfg: dict, list_key: str, legacy_key: str, default: list[int]) -> list[int]:
-    """A sorted, de-duped, clamped (5–1440 min) list of lead times — the creater/CBM heads-up can now
-    fire at SEVERAL admin-configured times (e.g. 90 min AND 30 min before), not just one.
-
-    Reads the new list-shaped setting (`list_key`); falls back to the old single-number setting
-    (`legacy_key`, from before admin could add more than one) so an already-configured lead survives
-    the upgrade instead of silently reverting to the default; falls back to `default` if neither is
-    set. Junk entries are dropped rather than raising, so one bad value can't break every reminder."""
-    raw = cfg.get(list_key)
-    if isinstance(raw, list) and raw:
-        vals: set[int] = set()
-        for v in raw:
-            try:
-                n = int(v)
-            except (TypeError, ValueError):
-                continue
-            if n > 0:
-                vals.add(max(5, min(1440, n)))
-        if vals:
-            return sorted(vals)
-    try:
-        n = int(cfg.get(legacy_key))
-        if n > 0:
-            return [max(5, min(1440, n))]
-    except (TypeError, ValueError):
-        pass
-    return list(default)
+def _person_lead_minutes(user: dict, field: str, default: list[int]) -> list[int]:
+    """A specific person's OWN configured lead times (Account page → "Reminder times"), not a shared
+    app-wide value — see storage._normalize_minutes_list, which already clamped/de-duped/sorted this
+    on save. Empty (nobody has set anything) falls back to `default` so a newly-made admin or CBM still
+    gets a sensible heads-up out of the box instead of silently none."""
+    vals = user.get(field)
+    return list(vals) if isinstance(vals, list) and vals else list(default)
 
 
 def _config() -> dict:
     """Admin-set reminder settings (Settings → Notifications). Falls back to the defaults if the
-    settings row can't be read (or a key is missing), so the scheduler always has usable values."""
+    settings row can't be read (or a key is missing), so the scheduler always has usable values.
+
+    creator_enabled/cbm_enabled are whole-feature switches here; WHEN each fires is per-person (see
+    _person_lead_minutes) — there is deliberately no app-wide creator/CBM time anymore."""
     try:
         from auth import storage
         cfg = storage.get_app_settings().get("notifications")
@@ -382,11 +369,7 @@ def _config() -> dict:
     except Exception:
         log.exception("could not read notification settings; using defaults")
         cfg = {}
-    return {
-        **_CONFIG_DEFAULTS, **cfg,
-        "creator_minutes_list": _minutes_list(cfg, "creator_minutes_list", "creator_minutes", [90]),
-        "cbm_minutes_list": _minutes_list(cfg, "cbm_minutes_list", "cbm_minutes", [90]),
-    }
+    return {**_CONFIG_DEFAULTS, **cfg}
 
 
 def _call_board_managers() -> list[dict]:
@@ -536,10 +519,10 @@ def run_due_reminders() -> int:
 
     # (1b) the CREATER's own heads-up — goes to whoever booked the call, not the caller, and names the
     #      caller so they know who's covering it. Times are shown on the CREATER's clock, since it's
-    #      their reminder. Admin can configure SEVERAL lead times (Settings → Notifications,
-    #      creator_minutes_list — e.g. a 90-min AND a 30-min heads-up), each firing independently.
-    #      Only fires once the row is Approved: Confirmed — a call still Pending/Rejected isn't settled
-    #      enough to be worth a heads-up. Scoped to creater/CBM only; the caller's lead above is unaffected.
+    #      their reminder. The CREATER configures their OWN several lead times (their Account page,
+    #      creator_lead_minutes_list — e.g. a 90-min AND a 30-min heads-up), each firing independently;
+    #      creator_enabled here is just the whole-feature admin switch. Only fires once the row is
+    #      Approved: Confirmed. Scoped to creater/CBM only; the caller's lead above is unaffected.
     if cfg.get("creator_enabled", True):
         for c in calls:
             creater = c.get("creater")
@@ -547,7 +530,7 @@ def run_due_reminders() -> int:
                 continue                       # nobody in the Creater cell (or it matched no user)
             if str(c.get("approved", "")).strip().lower() != "confirmed":
                 continue                        # not yet Approved: Confirmed → too soon to remind
-            for lead in cfg["creator_minutes_list"]:
+            for lead in _person_lead_minutes(creater, "creator_lead_minutes_list", [90]):
                 # Keyed on row + lead + scheduled time, so moving the call re-arms it: a reschedule
                 # sends a fresh heads-up for the NEW time. It fires at most once per (row, lead, time),
                 # so nudging the SAME time never double-pings — but a real reschedule does. The lead is
@@ -567,8 +550,8 @@ def run_due_reminders() -> int:
                     except Exception:
                         log.exception("creator push failed (row %s)", c["row_id"])
 
-    # (1c) the CALL-BOARD MANAGER's heads-up, shaped like the creater's: its OWN admin-configured list
-    #      of lead times (`cbm_minutes_list`, Settings → Notifications), independent of the creater's.
+    # (1c) the CALL-BOARD MANAGER's heads-up, shaped like the creater's: each manager's OWN configured
+    #      list of lead times (their Account page), independent of every other CBM's and the creater's.
     #      A call-board manager oversees the WHOLE board, so — unlike the creater, who is one person
     #      per call — every user holding the role gets it before EVERY scheduled call. Same Approved:
     #      Confirmed gate as the creater's. Skipped for a call this manager is already personally on
@@ -584,14 +567,19 @@ def run_due_reminders() -> int:
                 mid = str(mgr["id"])
                 if mid == caller_uid or mid == creater_uid:
                     continue                   # already reminded about this call in another role
-                for lead in cfg["cbm_minutes_list"]:
+                for lead in _person_lead_minutes(mgr, "cbm_lead_minutes_list", [90]):
                     key = f"{c['row_id']}|cbm|{mid}|{lead}m|{c['sched_raw']}"
                     if claim_at_moment(key, c["sched"] - timedelta(minutes=lead), c["sched"], _HEADSUP_GRACE):
                         try:
                             mtz = str(mgr.get("timezone", "")).strip()
                             body = _creator_cbm_line(c, mtz)
+                            # Names whose CALL this is (the Creater who booked it) right in the title —
+                            # a CBM oversees the whole board, so at a glance they need to know who
+                            # booked it, not just that some call is coming. The caller (who's actually
+                            # on the call) is already named in the body, one line down.
+                            creater_display = c.get("creater_name") or "someone"
                             _deliver(mgr["id"], {
-                                "title": f"Board interview — in {_lead_label(lead)}",
+                                "title": f"Board interview — {creater_display} — in {_lead_label(lead)}",
                                 "body": body,
                                 "tag": f"cbm-{c['row_id']}-{lead}",
                                 "url": "/interviews", "alarm": True,

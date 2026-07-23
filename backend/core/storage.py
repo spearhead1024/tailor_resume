@@ -351,22 +351,22 @@ def _default_settings() -> dict:
         # Rolling deadline (hours): how long a job stays in the Resumes queue,
         # and how long a generated resume stays in the Apply queue.
         'job_deadline_hours': 12,
-        # Interview reminder push notifications. Hours are on the CALLER's clock (the creater/CBM
-        # heads-ups are on their OWN clock — they're the recipient). Only interviews whose Status is
-        # "Scheduled" ever notify; the creater/CBM heads-ups additionally require Approved: Confirmed.
+        # Interview reminder push notifications. Hours are on the CALLER's clock. Only interviews whose
+        # Status is "Scheduled" ever notify; the creater/CBM heads-ups additionally require Approved:
+        # Confirmed. creator_enabled/cbm_enabled are whole-feature admin switches; WHEN each actually
+        # fires is each person's OWN lead-time list, set on their own Account page (see
+        # creator_lead_minutes_list/cbm_lead_minutes_list on the user record, below) — deliberately NOT
+        # part of this app-wide blob, so one person's preference can never silently become everyone's.
         'notifications': {
             'lead_enabled': True,
             'lead_minutes': 60,        # "Interview in 1 hour" — set 30 for half an hour, etc. App-wide;
-                                        # no per-user override (removed — every notification-time
-                                        # setting lives here, and nowhere else).
+                                        # no per-user override for THIS one (the caller's own lead).
             'day_before_enabled': True,
             'day_before_hour': 19,     # 7pm the day before: "N interviews tomorrow"
             'day_of_enabled': True,
             'day_of_hour': 8,          # 8am on the day:     "N interviews today"
-            'creator_enabled': True,   # ping the row's Creater ahead of the call
-            'creator_minutes_list': [90],   # can hold SEVERAL lead times — each fires independently
-            'cbm_enabled': True,       # ping every Call Board Manager ahead of EVERY scheduled call
-            'cbm_minutes_list': [90],
+            'creator_enabled': True,   # ping the row's Creater ahead of the call, at THEIR OWN times
+            'cbm_enabled': True,       # ping every Call Board Manager, at EACH of THEIR OWN times
         },
     }
 
@@ -394,32 +394,6 @@ def _normalize_notifications(raw: Any) -> dict:
             return v
         return str(v).strip().lower() not in ('', '0', 'false', 'no', 'off')
 
-    def _minutes_list(list_key: str, legacy_key: str, default: list) -> list:
-        """A sorted, de-duped, clamped (5-1440 min) list — the creater/CBM heads-up can fire at
-        SEVERAL admin-configured times. Falls back to the old single-number field (`legacy_key`, from
-        before the multi-time UI) so an already-configured lead survives the upgrade; falls back to
-        `default` if neither is set."""
-        raw_list = src.get(list_key)
-        if isinstance(raw_list, list) and raw_list:
-            vals = set()
-            for v in raw_list:
-                try:
-                    n = int(v)
-                except (TypeError, ValueError):
-                    continue
-                if n > 0:
-                    vals.add(min(max(n, 5), 1440))
-            if vals:
-                return sorted(vals)
-        legacy = src.get(legacy_key)
-        try:
-            n = int(legacy)
-            if n > 0:
-                return [min(max(n, 5), 1440)]
-        except (TypeError, ValueError):
-            pass
-        return list(default)
-
     return {
         'lead_enabled': _bool('lead_enabled'),
         'lead_minutes': _int('lead_minutes', 5, 1440),      # 5 minutes – 24 hours before the call
@@ -428,9 +402,7 @@ def _normalize_notifications(raw: Any) -> dict:
         'day_of_enabled': _bool('day_of_enabled'),
         'day_of_hour': _int('day_of_hour', 0, 23),
         'creator_enabled': _bool('creator_enabled'),
-        'creator_minutes_list': _minutes_list('creator_minutes_list', 'creator_minutes', [90]),
         'cbm_enabled': _bool('cbm_enabled'),
-        'cbm_minutes_list': _minutes_list('cbm_minutes_list', 'cbm_minutes', [90]),
     }
 
 
@@ -768,6 +740,25 @@ def _normalize_daily_meetings(raw: Any, legacy: Any = None) -> list[dict]:
     return sorted(items, key=lambda m: m['start'])[:MAX_MEETINGS]
 
 
+def _normalize_minutes_list(raw: Any) -> list[int]:
+    """A person's OWN reminder lead times (minutes before the call), sorted/de-duped/clamped to
+    5-1440, capped to a sane count. Empty (the default — nobody has set anything yet) means "use the
+    system default" — see core/notify.py. These are per-person on purpose: the creater/call-board-
+    manager heads-up used to be one app-wide time, so one admin's preference silently became every
+    other admin's and every CBM's too. Each person now owns their own list."""
+    if not isinstance(raw, list):
+        return []
+    out: set[int] = set()
+    for v in raw:
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            out.add(max(5, min(1440, n)))
+    return sorted(out)[:10]
+
+
 def _normalize_days_off(raw: Any) -> list[str]:
     """Specific dates the person cannot work, as sorted, de-duped YYYY-MM-DD strings."""
     if not isinstance(raw, list):
@@ -827,6 +818,12 @@ def _normalize_user(item: dict) -> dict:
         'discord': str(item.get('discord', '')).strip(),
         'emergency_contacts': str(item.get('emergency_contacts', '')),
         'timezone': str(item.get('timezone', '')).strip(),        # IANA zone, e.g. "Europe/Bucharest"
+        # This person's OWN creater / call-board-manager heads-up lead times — set on their own
+        # Account page (routers/auth.py update_me), never by anyone else. Empty = system default (see
+        # core/notify.py). Meaningful only for someone who is ever a Creater (an admin) or holds the
+        # call_board_manager role, but harmless to store on anyone.
+        'creator_lead_minutes_list': _normalize_minutes_list(item.get('creator_lead_minutes_list')),
+        'cbm_lead_minutes_list': _normalize_minutes_list(item.get('cbm_lead_minutes_list')),
         # Per-user keyboard-shortcut overrides for the Chrome extension card
         # ({action_id: single_key}). Validated at the API layer.
         'shortcuts': {

@@ -2,46 +2,35 @@ import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useToast } from '../lib/toast';
+import { useAuth, loadCurrentUser, hasRole } from '../lib/auth';
+import { leadLabel, MinutesListEditor, cleanMinutesList } from '../lib/minutesList';
 
 type SubTab = 'general' | 'notifications' | 'prompt' | 'domains' | 'titles' | 'companies';
 
-/* Interview reminder settings. Every time here is on the CALLER's clock (their profile timezone),
-   except the creater/CBM heads-ups, which are on THEIR OWN clock (they're the recipient). */
+/* Interview reminder settings. Every time here is on the CALLER's clock (their profile timezone).
+   The creater/CBM heads-ups are enabled/disabled here (a global kill-switch for the whole feature,
+   admin-set, saved via /api/settings), but WHEN each fires is each person's OWN choice — the chip
+   editors further down save the SIGNED-IN admin's own creator_lead_minutes_list/cbm_lead_minutes_list
+   via /api/auth/me, not the shared settings blob. A single shared time here used to mean one admin's
+   preference silently became every admin's and every CBM's — not what anyone wants when several
+   people hold those roles. NOTE: this page is admin-only (RoleGate), so a call-board manager who is
+   NOT also an admin cannot reach this editor at all and is stuck on the system default (90 min) — the
+   info card below says so. */
 type Notif = {
   lead_enabled: boolean; lead_minutes: number;
   day_before_enabled: boolean; day_before_hour: number;
   day_of_enabled: boolean; day_of_hour: number;
-  // Creater / call-board-manager heads-ups can each fire at SEVERAL lead times (e.g. 90 min AND
-  // 30 min before) — admin adds/removes entries here. Every notification-time setting in the app
-  // lives on this page; there is deliberately no per-account override anywhere else.
-  creator_enabled: boolean; creator_minutes_list: number[];
-  cbm_enabled: boolean; cbm_minutes_list: number[];
+  creator_enabled: boolean;
+  cbm_enabled: boolean;
 };
 const NOTIF_DEFAULTS: Notif = {
   lead_enabled: true, lead_minutes: 60,
   day_before_enabled: true, day_before_hour: 19,   // 7pm
   day_of_enabled: true, day_of_hour: 8,            // 8am
-  creator_enabled: true, creator_minutes_list: [90],   // ping whoever booked the call
-  cbm_enabled: true, cbm_minutes_list: [90],           // ping every call-board manager
+  creator_enabled: true,   // ping whoever booked the call, at THEIR OWN configured times
+  cbm_enabled: true,       // ping every call-board manager, at EACH of THEIR OWN configured times
 };
-/** Clamp/de-dupe/sort a list of lead-time minutes; empty or all-junk falls back to the default so a
-    role can never end up silently un-configured (enabled but with nothing to fire). */
-function cleanMinutesList(values: number[], fallback: number[]): number[] {
-  const out = Array.from(new Set(values.map((n) => Math.min(Math.max(Math.round(n) || 0, 5), 1440)).filter((n) => n >= 5)));
-  out.sort((a, b) => a - b);
-  return out.length ? out : fallback;
-}
 const hourName = (h: number) => `${(h % 12) || 12}:00 ${h < 12 ? 'AM' : 'PM'}`;
-
-/** Mirrors the server's wording, so the previews below show exactly what will be pushed. */
-function leadLabel(minutes: number): string {
-  const n = Math.max(1, Math.round(minutes || 0));
-  const h = Math.floor(n / 60), m = n % 60;
-  const parts: string[] = [];
-  if (h) parts.push(`${h} hour${h === 1 ? '' : 's'}`);
-  if (m) parts.push(`${m} minute${m === 1 ? '' : 's'}`);
-  return parts.join(' ');
-}
 
 /** The explanatory text beside a control. Given its own flex basis so it wraps as a paragraph
     instead of being squeezed into a one-word-per-line column. */
@@ -91,47 +80,6 @@ function ReminderCard({ on, onToggle, icon, title, when, to, preview, note }: {
   );
 }
 
-/** Chips of configured lead times (e.g. "1 hour 30 minutes ✕") plus an inline "+ Add" field. Used for
-    the creater/CBM heads-ups, which — unlike the caller's single lead — can fire at several times. */
-function MinutesListEditor({ values, onChange, disabled }: {
-  values: number[]; onChange: (next: number[]) => void; disabled?: boolean;
-}) {
-  const [draft, setDraft] = useState('');
-  const add = () => {
-    const n = parseInt(draft, 10);
-    if (!n || n < 5 || n > 1440) return;
-    const next = Math.min(Math.max(n, 5), 1440);
-    if (!values.includes(next)) onChange([...values, next].sort((a, b) => a - b));
-    setDraft('');
-  };
-  return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
-      {values.length === 0 && <span className="muted" style={{ fontSize: '0.78rem' }}>No times set</span>}
-      {values.map((n) => (
-        <span key={n} style={{
-          display: 'inline-flex', alignItems: 'center', gap: 5, padding: '3px 6px 3px 10px', borderRadius: 999,
-          background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', fontSize: '0.8rem',
-        }}>
-          {leadLabel(n)}
-          <button type="button" disabled={disabled} title="Remove this time"
-            onClick={() => onChange(values.filter((v) => v !== n))}
-            style={{ border: 'none', background: 'none', cursor: disabled ? 'default' : 'pointer', opacity: 0.6, padding: '0 2px', fontSize: '0.78rem', lineHeight: 1 }}>
-            ✕
-          </button>
-        </span>
-      ))}
-      <input type="number" min={5} max={1440} placeholder="min" disabled={disabled} value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }}
-        style={{ flex: '0 0 auto', width: 66 }} />
-      <button type="button" className="secondary" disabled={disabled || !draft} onClick={add}
-        style={{ padding: '2px 10px', fontSize: '0.78rem' }}>
-        + Add
-      </button>
-    </div>
-  );
-}
-
 function toLines(arr: any): string {
   return Array.isArray(arr) ? arr.join('\n') : '';
 }
@@ -142,6 +90,7 @@ function parseList(text: string): string[] {
 export default function Settings() {
   const qc = useQueryClient();
   const toast = useToast();
+  const { user } = useAuth();
   const { data, isLoading } = useQuery({
     queryKey: ['settings'],
     queryFn: () => api.get<any>('/api/settings'),
@@ -167,6 +116,14 @@ export default function Settings() {
   const [notif, setNotif] = useState<Notif>(NOTIF_DEFAULTS);
   const [notifDirty, setNotifDirty] = useState(false);
 
+  // The SIGNED-IN admin's own creator/CBM reminder times — per-person data (core/storage.py on the
+  // user record), saved via /api/auth/me, NOT part of the app-wide settings blob above. Separate
+  // dirty/save state on purpose: an unrelated save path from the rest of this tab.
+  const [creatorMins, setCreatorMins] = useState<number[]>([]);
+  const [cbmMins, setCbmMins] = useState<number[]>([]);
+  const [remindersDirty, setRemindersDirty] = useState(false);
+  const [remindersSaving, setRemindersSaving] = useState(false);
+
   useEffect(() => {
     if (data) {
       setDeadline(String(data.job_deadline_hours ?? 12)); setDeadlineDirty(false);
@@ -177,6 +134,31 @@ export default function Settings() {
       setNotif({ ...NOTIF_DEFAULTS, ...(data.notifications || {}) }); setNotifDirty(false);
     }
   }, [data]);
+
+  useEffect(() => {
+    if (!user) return;
+    setCreatorMins(user.creator_lead_minutes_list || []);
+    setCbmMins(user.cbm_lead_minutes_list || []);
+    setRemindersDirty(false);
+  }, [user]);
+
+  // An empty list is a legitimate, intentional choice — "use the system default" — so the fallback
+  // passed to cleanMinutesList is [] (not e.g. [90]): clearing every chip and saving must actually
+  // persist as empty, not silently snap back to a non-empty default.
+  const saveReminders = async () => {
+    setRemindersSaving(true);
+    try {
+      await api.patch('/api/auth/me', {
+        creator_lead_minutes_list: cleanMinutesList(creatorMins, []),
+        cbm_lead_minutes_list: cleanMinutesList(cbmMins, []),
+      });
+      await loadCurrentUser();
+      setRemindersDirty(false);
+      toast('Your reminder times saved', 'success');
+    } catch (e: any) {
+      toast(e?.response?.data?.detail || 'Failed to save reminder times', 'error');
+    } finally { setRemindersSaving(false); }
+  };
 
   const saveMutation = useMutation({
     mutationFn: ({ payload }: { payload: any; what: string }) => api.put('/api/settings', { payload }),
@@ -313,6 +295,15 @@ export default function Settings() {
                   The <strong>Caller</strong>'s reminder and the daily summary are not affected by Approved.
                 </span>
               </div>
+              <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                <span style={{ fontSize: '1rem' }}>👤</span>
+                <span style={{ fontSize: '0.85rem' }}>
+                  <strong>Creator</strong>/<strong>Board mgr</strong> lead times below are <strong>per person</strong> —
+                  they save for <em>you</em>, the signed-in admin, not for everyone. Because this page is admin-only,
+                  a Call Board Manager who isn't also an admin can't reach it and stays on the 90-minute default —
+                  give them the admin role too if they need to set their own time.
+                </span>
+              </div>
             </div>
 
             <div className="card">
@@ -320,29 +311,40 @@ export default function Settings() {
                 Before the call
               </label>
               <div style={{ display: 'grid', gap: 8, marginTop: 10 }}>
-                {/* Creator first: its heads-up(s) fire BEFORE the caller's single lead. Admin can add
-                    several times — each fires as its own independent reminder. */}
+                {/* Creator/CBM heads-ups: the toggle above is a whole-feature kill switch, admin-controlled
+                    and saved with the rest of this tab. The TIME chips below are different — they save
+                    THE SIGNED-IN ADMIN's own creator_lead_minutes_list/cbm_lead_minutes_list (via
+                    saveReminders → /api/auth/me), not the shared settings blob. A single shared time here
+                    used to mean one person's preference silently became everyone else's. */}
                 <ReminderCard
                   on={notif.creator_enabled} onToggle={(v) => setN({ creator_enabled: v })}
                   icon="🗓️" title="Heads-up to whoever booked it" to="Creator"
-                  when={<MinutesListEditor values={notif.creator_minutes_list} disabled={!notif.creator_enabled}
-                    onChange={(v) => setN({ creator_minutes_list: v })} />}
-                  note={<>Each time above — minutes before the call — sent to the <strong>Creater</strong>, and it
-                    names the caller. Sent <strong>once per time</strong>, even if you reschedule. Requires
-                    Approved: Confirmed.</>}
-                  preview={notif.creator_minutes_list.map((m) => `Interview you booked — in ${leadLabel(m)}`)} />
+                  when={<MinutesListEditor values={creatorMins} disabled={!notif.creator_enabled}
+                    onChange={(v) => { setCreatorMins(v); setRemindersDirty(true); }} />}
+                  note={<>Your <strong>own</strong> times — Creater is always the signed-in admin who books the call.
+                    Names the caller. Sent <strong>once per time</strong>, even if you reschedule.
+                    Requires Approved: Confirmed.</>}
+                  preview={creatorMins.map((m) => `Interview you booked — in ${leadLabel(m)}`)} />
 
-                {/* Its own admin-configured lead times, like the creater's. Sent to everyone with the
-                    Call Board Manager role, for every scheduled call — they oversee the whole board. */}
-                <ReminderCard
-                  on={notif.cbm_enabled} onToggle={(v) => setN({ cbm_enabled: v })}
-                  icon="📋" title="Heads-up to the call board manager" to="Board mgr"
-                  when={<MinutesListEditor values={notif.cbm_minutes_list} disabled={!notif.cbm_enabled}
-                    onChange={(v) => setN({ cbm_minutes_list: v })} />}
-                  note={<>Each time above — minutes before the call — sent to <strong>everyone with the Call Board
-                    Manager role</strong>, for <em>every</em> scheduled call, and it names the caller. Sent{' '}
-                    <strong>once per time</strong> per call. Requires Approved: Confirmed.</>}
-                  preview={notif.cbm_minutes_list.map((m) => `Board interview — in ${leadLabel(m)}`)} />
+                {hasRole(user, 'call_board_manager') ? (
+                  <ReminderCard
+                    on={notif.cbm_enabled} onToggle={(v) => setN({ cbm_enabled: v })}
+                    icon="📋" title="Heads-up to the call board manager" to="Board mgr"
+                    when={<MinutesListEditor values={cbmMins} disabled={!notif.cbm_enabled}
+                      onChange={(v) => { setCbmMins(v); setRemindersDirty(true); }} />}
+                    note={<>Your <strong>own</strong> times, as a Call Board Manager. Sent for <em>every</em>
+                      scheduled call, and it names the caller. Sent <strong>once per time</strong> per call.
+                      Requires Approved: Confirmed.</>}
+                    preview={cbmMins.map((m) => `Board interview — <creater> — in ${leadLabel(m)}`)} />
+                ) : (
+                  <ReminderCard
+                    on={notif.cbm_enabled} onToggle={(v) => setN({ cbm_enabled: v })}
+                    icon="📋" title="Heads-up to the call board manager" to="Board mgr"
+                    when={<Hint>on — you aren't a Call Board Manager, so there's nothing of yours to set here;
+                      each CBM sets their own time when they're signed in.</Hint>}
+                    note="Sent to everyone with the Call Board Manager role, for every scheduled call. Requires Approved: Confirmed."
+                    preview="Board interview — <creater> — in …" />
+                )}
 
                 <ReminderCard
                   on={notif.lead_enabled} onToggle={(v) => setN({ lead_enabled: v })}
@@ -389,23 +391,35 @@ export default function Settings() {
               </div>
 
               <div style={{ display: 'flex', gap: 8, marginTop: 16, alignItems: 'center' }}>
+                {/* ONE save button for the whole tab, even though it writes to two different places:
+                    the toggles/hours above go to /api/settings (notifDirty), the Creator/CBM time chips
+                    go to /api/auth/me — YOUR OWN times (remindersDirty). Two separate save buttons here
+                    used to mean adding a time chip left THIS button disabled (its dirty flag hadn't
+                    moved) while a second, easy-to-miss button elsewhere was the one that had lit up —
+                    "I added a time and the save button stayed disabled". One button, one dirty flag. */}
                 <button
-                  onClick={() => save({
-                    notifications: {
-                      ...notif,
-                      lead_minutes: Math.min(Math.max(notif.lead_minutes || 60, 5), 1440),
-                      creator_minutes_list: cleanMinutesList(notif.creator_minutes_list, [90]),
-                      cbm_minutes_list: cleanMinutesList(notif.cbm_minutes_list, [90]),
-                    },
-                  }, 'Notifications')}
-                  disabled={!notifDirty || saveMutation.isPending}>
-                  {saveMutation.isPending ? <span className="spinner" /> : 'Save notifications'}
+                  onClick={async () => {
+                    if (remindersDirty) await saveReminders();
+                    if (notifDirty) save({
+                      notifications: {
+                        ...notif,
+                        lead_minutes: Math.min(Math.max(notif.lead_minutes || 60, 5), 1440),
+                      },
+                    }, 'Notifications');
+                  }}
+                  disabled={(!notifDirty && !remindersDirty) || saveMutation.isPending || remindersSaving}>
+                  {(saveMutation.isPending || remindersSaving) ? <span className="spinner" /> : 'Save notifications'}
                 </button>
-                <button className="secondary" disabled={!notifDirty || saveMutation.isPending}
-                  onClick={() => { setNotif({ ...NOTIF_DEFAULTS, ...(data?.notifications || {}) }); setNotifDirty(false); }}>
+                <button className="secondary" disabled={(!notifDirty && !remindersDirty) || saveMutation.isPending || remindersSaving}
+                  onClick={() => {
+                    setNotif({ ...NOTIF_DEFAULTS, ...(data?.notifications || {}) }); setNotifDirty(false);
+                    setCreatorMins(user?.creator_lead_minutes_list || []);
+                    setCbmMins(user?.cbm_lead_minutes_list || []);
+                    setRemindersDirty(false);
+                  }}>
                   Discard changes
                 </button>
-                {notifDirty && <span className="muted" style={{ fontSize: '0.82rem' }}>Unsaved changes</span>}
+                {(notifDirty || remindersDirty) && <span className="muted" style={{ fontSize: '0.82rem' }}>Unsaved changes</span>}
               </div>
               <p className="muted" style={{ fontSize: '0.8rem', marginTop: 12, marginBottom: 0 }}>
                 A reminder always states the time that is <strong>actually</strong> left, so it can never announce

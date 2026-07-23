@@ -30,6 +30,11 @@ export type User = {
   discord?: string;
   emergency_contacts?: string;
   timezone?: string;
+  // This person's OWN interview-reminder heads-up lead times (minutes before the call) — set on their
+  // own Account page, never by anyone else. Empty/absent = the system default applies. Meaningful only
+  // if they're ever a Creater (an admin) or hold the call_board_manager role, but harmless otherwise.
+  creator_lead_minutes_list?: number[];
+  cbm_lead_minutes_list?: number[];
 };
 
 export function hasRole(user: User | null, ...roles: Role[]): boolean {

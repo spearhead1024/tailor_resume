@@ -56,7 +56,6 @@ export default function Account() {
     } finally { setSaving(false); }
   };
 
-
   const onPickAvatar = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
