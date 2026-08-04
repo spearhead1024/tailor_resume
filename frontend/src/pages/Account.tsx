@@ -81,6 +81,15 @@ export default function Account() {
     }
   };
 
+  // Same reason as the Users tab: the CV endpoint is auth-gated, so fetch it as a blob (token injected
+  // by api.raw) and open the object URL — a plain <a href> would navigate without the token → 401.
+  const openCv = async () => {
+    try {
+      const res = await api.raw.get(`/api/auth/users/${user.id}/resume`, { responseType: 'blob' });
+      window.open(URL.createObjectURL(res.data as Blob), '_blank', 'noopener');
+    } catch { toast('Failed to open CV', 'error'); }
+  };
+
   const removeCv = async () => {
     setCvBusy(true);
     try {
@@ -195,7 +204,8 @@ export default function Account() {
               <input ref={cvRef} type="file" accept=".pdf,.docx" style={{ display: 'none' }} onChange={onPickCv} />
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                 {user.uploaded_resume?.filename
-                  ? <a className="link" href={`/api/auth/users/${user.id}/resume`} target="_blank" rel="noreferrer">{user.uploaded_resume.filename}</a>
+                  ? <button className="link" style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}
+                      onClick={openCv}>{user.uploaded_resume.filename}</button>
                   : <span className="muted">No CV uploaded</span>}
                 <button className="secondary" disabled={cvBusy} onClick={() => cvRef.current?.click()}>
                   {cvBusy ? <span className="spinner" /> : (user.uploaded_resume?.filename ? 'Replace' : 'Upload')}

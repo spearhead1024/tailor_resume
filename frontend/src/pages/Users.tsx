@@ -195,6 +195,22 @@ export default function Users() {
     onError: (e: any) => toast(e?.response?.data?.detail || 'Failed to remove CV', 'error'),
   });
 
+  // Open a CV. The download endpoint is auth-gated (admin/self), but a plain <a href> navigates WITHOUT
+  // the token (it lives in localStorage, not a cookie) → 401. So fetch it as a blob through api.raw
+  // (which injects the Bearer header) and open the object URL, the same way the Applied tab opens PDFs.
+  const openCv = async (id: string) => {
+    try {
+      const res = await api.raw.get(`/api/auth/users/${id}/resume`, { responseType: 'blob' });
+      const blob = res.data as Blob;
+      if (!blob || blob.size === 0) throw new Error('empty');
+      window.open(URL.createObjectURL(blob), '_blank', 'noopener');
+    } catch (e: any) {
+      let msg = 'Failed to open CV';
+      try { msg = JSON.parse(await e?.response?.data?.text())?.detail || msg; } catch { /* */ }
+      toast(msg, 'error');
+    }
+  };
+
   const deleteMutation = useMutation({
     mutationFn: (id: string) => api.delete(`/api/users/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['users'] }),
@@ -416,10 +432,13 @@ export default function Users() {
         {/* The caller sub-tab is about who can take a call, so it swaps the two bidder-oriented columns
             (Bid method / Assigned profiles) for what matters there: their tech skills and CV. */}
         <thead><tr>
-          {/* Every caller is a VPS_2 account, so the source badge is noise there — drop the column. */}
+          {/* Caller view drops Source (all callers are VPS_2) and Name/Email (check them in the
+              dropdown), and gives Tech skills a wider column since it's the point of this view. */}
           {!callerView && <th>Source</th>}
-          <th>Username</th><th>Name</th><th>Email</th><th>Roles</th><th>Team</th>
-          <th>{callerView ? 'Tech skills' : 'Bid method'}</th>
+          <th>Username</th>
+          {!callerView && <><th>Name</th><th>Email</th></>}
+          <th>Roles</th><th>Team</th>
+          <th style={callerView ? { minWidth: 280 } : undefined}>{callerView ? 'Tech skills' : 'Bid method'}</th>
           <th>Status</th>
           <th>{callerView ? 'Resume' : 'Assigned profiles'}</th>
           <th></th>
@@ -433,8 +452,7 @@ export default function Users() {
                 <button className="ghost u-expand" title="Full profile" onClick={() => setExpanded(expanded === u.id ? null : u.id)}>{expanded === u.id ? '▾' : '▸'}</button>
                 {u.username}
               </td>
-              <td>{u.full_name}</td>
-              <td>{u.email}</td>
+              {!callerView && <><td>{u.full_name}</td><td>{u.email}</td></>}
               <td>{remote
                 ? <span className="muted">{(u.roles || []).join(', ') || '—'}</span>
                 : <CheckboxDropdown options={ALL_ROLES} selected={u.roles || []}
@@ -476,7 +494,8 @@ export default function Users() {
               <td>
                 {callerView
                   ? (u.uploaded_resume?.filename
-                      ? <a className="link" href={`/api/auth/users/${u.id}/resume`} target="_blank" rel="noreferrer" title={u.uploaded_resume.filename}>📄 CV</a>
+                      ? <button className="link" style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}
+                          title={u.uploaded_resume.filename} onClick={() => openCv(u.id)}>📄 CV</button>
                       : <span className="muted">—</span>)
                   : remote ? <span className="muted">—</span> : (
                     <CheckboxDropdown
@@ -498,7 +517,7 @@ export default function Users() {
             </tr>
             {expanded === u.id && (
               <tr className="u-detail-row">
-                <td colSpan={callerView ? 9 : 10}>
+                <td colSpan={callerView ? 7 : 10}>
                   <div className="u-detail">
                     <div className="u-detail-hd">
                       {u.avatar_url
@@ -554,7 +573,8 @@ export default function Users() {
                         <Field label="CV / Resume" value={
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                             {u.uploaded_resume?.filename
-                              ? <a className="link" href={`/api/auth/users/${u.id}/resume`} target="_blank" rel="noreferrer">{u.uploaded_resume.filename}</a>
+                              ? <button className="link" style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}
+                                  onClick={() => openCv(u.id)}>{u.uploaded_resume.filename}</button>
                               : <span className="muted">No CV</span>}
                             {/* Admin may upload/replace a caller's CV (PDF/DOCX); VPS_1 users are read-only. */}
                             {!remote && isAdmin && (<>
