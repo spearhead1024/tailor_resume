@@ -210,6 +210,7 @@ export default function Users() {
     return list;
   })();
   const profileNames = (ids?: string[]) => (ids || []).map((id) => profiles.find((p: any) => p.id === id)?.name || id).join(', ');
+  const callerView = roleFilter === 'caller';   // the caller sub-tab swaps two columns for tech + CV
 
   return (
     <div>
@@ -396,7 +397,15 @@ export default function Users() {
         <div className="card"><span className="muted">No users with this role.</span></div>
       ) : (
       <table>
-        <thead><tr><th>Source</th><th>Username</th><th>Name</th><th>Email</th><th>Roles</th><th>Team</th><th>Bid method</th><th>Status</th><th>Assigned profiles</th><th></th></tr></thead>
+        {/* The caller sub-tab is about who can take a call, so it swaps the two bidder-oriented columns
+            (Bid method / Assigned profiles) for what matters there: their tech skills and CV. */}
+        <thead><tr>
+          <th>Source</th><th>Username</th><th>Name</th><th>Email</th><th>Roles</th><th>Team</th>
+          <th>{callerView ? 'Tech skills' : 'Bid method'}</th>
+          <th>Status</th>
+          <th>{callerView ? 'Resume' : 'Assigned profiles'}</th>
+          <th></th>
+        </tr></thead>
         <tbody>
           {filtered.map((u) => { const remote = u.source === 'VPS_1'; return (
             <Fragment key={u.id}>
@@ -426,14 +435,18 @@ export default function Users() {
                 ) : <span className="muted">—</span>}
               </td>
               <td>
-                {!remote && (u.roles || []).includes('bidder') ? (
-                  <select value={u.bid_method ?? 2}
-                    onChange={(e) => updateMutation.mutate({ id: u.id, payload: { bid_method: Number(e.target.value) } })}
-                    disabled={updateMutation.isPending} title="Which bidding workflow this bidder sees">
-                    <option value={1}>Method 1 · Resumes + Apply</option>
-                    <option value={2}>Method 2 · Bid</option>
-                  </select>
-                ) : <span className="muted">—</span>}
+                {callerView
+                  ? (u.tech_stacks || []).length
+                      ? <span title={(u.tech_stacks || []).join(', ')}>{(u.tech_stacks || []).join(', ')}</span>
+                      : <span className="muted">—</span>
+                  : !remote && (u.roles || []).includes('bidder') ? (
+                    <select value={u.bid_method ?? 2}
+                      onChange={(e) => updateMutation.mutate({ id: u.id, payload: { bid_method: Number(e.target.value) } })}
+                      disabled={updateMutation.isPending} title="Which bidding workflow this bidder sees">
+                      <option value={1}>Method 1 · Resumes + Apply</option>
+                      <option value={2}>Method 2 · Bid</option>
+                    </select>
+                  ) : <span className="muted">—</span>}
               </td>
               <td>
                 {remote
@@ -443,15 +456,19 @@ export default function Users() {
                     </select>}
               </td>
               <td>
-                {remote ? <span className="muted">—</span> : (
-                <CheckboxDropdown
-                  options={profiles.map((p: any) => ({ value: p.id, label: p.name }))}
-                  selected={u.assigned_profile_ids || []}
-                  onChange={(ids) => updateMutation.mutate({ id: u.id, payload: { assigned_profile_ids: ids } })}
-                  disabled={updateMutation.isPending}
-                  placeholder="No profiles"
-                  summary={(labels) => (labels.length > 2 ? `${labels.length} profiles` : labels.join(', '))}
-                />)}
+                {callerView
+                  ? (u.uploaded_resume?.filename
+                      ? <a className="link" href={`/api/auth/users/${u.id}/resume`} target="_blank" rel="noreferrer" title={u.uploaded_resume.filename}>📄 CV</a>
+                      : <span className="muted">—</span>)
+                  : remote ? <span className="muted">—</span> : (
+                    <CheckboxDropdown
+                      options={profiles.map((p: any) => ({ value: p.id, label: p.name }))}
+                      selected={u.assigned_profile_ids || []}
+                      onChange={(ids) => updateMutation.mutate({ id: u.id, payload: { assigned_profile_ids: ids } })}
+                      disabled={updateMutation.isPending}
+                      placeholder="No profiles"
+                      summary={(labels) => (labels.length > 2 ? `${labels.length} profiles` : labels.join(', '))}
+                    />)}
               </td>
               <td>
                 {remote
