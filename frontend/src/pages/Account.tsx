@@ -26,6 +26,9 @@ export default function Account() {
   const [tz, setTz] = useState('');
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [tech, setTech] = useState('');          // tech stacks as a comma-separated string (edit form)
+  const [cvBusy, setCvBusy] = useState(false);
+  const cvRef = useRef<HTMLInputElement>(null);
 
   const [pw, setPw] = useState({ current: '', next: '', confirm: '' });
   const [pwSaving, setPwSaving] = useState(false);
@@ -38,22 +41,54 @@ export default function Account() {
       emergency_contacts: user.emergency_contacts || '',
     });
     setTz(user.timezone || '');
+    setTech((user.tech_stacks || []).join(', '));
   }, [user]);
 
   if (!user) return <div><span className="spinner" /> Loading…</div>;
 
+  const isCaller = (user.roles || []).includes('caller');   // CV + tech stacks are a caller thing
   const set = (k: keyof ProfileForm, v: string) => setForm((f) => ({ ...f, [k]: v }));
 
 
   const save = async () => {
     setSaving(true);
     try {
-      await api.patch('/api/auth/me', { ...form, timezone: tz });
+      const tech_stacks = tech.split(',').map((s) => s.trim()).filter(Boolean);
+      await api.patch('/api/auth/me', { ...form, timezone: tz, tech_stacks });
       await loadCurrentUser();
       toast('Profile saved', 'success');
     } catch (e: any) {
       toast(e?.response?.data?.detail || 'Failed to save profile', 'error');
     } finally { setSaving(false); }
+  };
+
+  const onPickCv = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setCvBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      await api.raw.post('/api/auth/me/resume', fd);
+      await loadCurrentUser();
+      toast('CV uploaded', 'success');
+    } catch (err: any) {
+      const d = err?.response?.data;
+      toast((d && (d.detail || d)) || 'Failed to upload CV', 'error');
+    } finally {
+      setCvBusy(false);
+      if (cvRef.current) cvRef.current.value = '';
+    }
+  };
+
+  const removeCv = async () => {
+    setCvBusy(true);
+    try {
+      await api.raw.delete('/api/auth/me/resume');
+      await loadCurrentUser();
+      toast('CV removed', 'success');
+    } catch { toast('Failed to remove CV', 'error'); }
+    finally { setCvBusy(false); }
   };
 
   const onPickAvatar = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -144,6 +179,36 @@ export default function Account() {
           <textarea rows={3} value={form.emergency_contacts} onChange={(e) => set('emergency_contacts', e.target.value)}
             placeholder="Name · relationship · phone (one per line)" />
         </div>
+
+        {/* Callers: their own CV + tech stacks. Only admins see these (Users tab). */}
+        {isCaller && (
+          <>
+            <div className="field">
+              <label>Tech stacks</label>
+              <input value={tech} onChange={(e) => setTech(e.target.value)} placeholder="e.g. React, Node.js, Go, AWS" />
+              <span className="muted" style={{ fontSize: '0.78rem', display: 'inline-block', marginTop: 4 }}>
+                Comma-separated. Saved with the button below.
+              </span>
+            </div>
+            <div className="field">
+              <label>CV / Resume (PDF or DOCX)</label>
+              <input ref={cvRef} type="file" accept=".pdf,.docx" style={{ display: 'none' }} onChange={onPickCv} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                {user.uploaded_resume?.filename
+                  ? <a className="link" href={`/api/auth/users/${user.id}/resume`} target="_blank" rel="noreferrer">{user.uploaded_resume.filename}</a>
+                  : <span className="muted">No CV uploaded</span>}
+                <button className="secondary" disabled={cvBusy} onClick={() => cvRef.current?.click()}>
+                  {cvBusy ? <span className="spinner" /> : (user.uploaded_resume?.filename ? 'Replace' : 'Upload')}
+                </button>
+                {user.uploaded_resume?.filename && (
+                  <button className="ghost danger" disabled={cvBusy} onClick={removeCv}>Remove</button>
+                )}
+                <span className="muted" style={{ fontSize: '0.78rem' }}>PDF/DOCX, ≤ 10 MB</span>
+              </div>
+            </div>
+          </>
+        )}
+
         <button onClick={save} disabled={saving}>{saving ? <span className="spinner" /> : 'Save profile'}</button>
       </div>
 

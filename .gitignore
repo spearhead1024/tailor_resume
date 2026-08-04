@@ -34,6 +34,7 @@ data/avatars/
 data/chat_images/
 data/screenshots/
 data/profile_resumes/
+data/user_resumes/
 data/logs/
 data/notif_state.json*
 data/_dbrecovery/

@@ -818,6 +818,10 @@ def _normalize_user(item: dict) -> dict:
         'discord': str(item.get('discord', '')).strip(),
         'emergency_contacts': str(item.get('emergency_contacts', '')),
         'timezone': str(item.get('timezone', '')).strip(),        # IANA zone, e.g. "Europe/Bucharest"
+        # A caller's own CV (PDF/DOCX) and their tech stacks, set on their Account page. Only admins
+        # see them (Users tab). Reuses the same shapes as a profile's uploaded_resume / tech_stacks.
+        'uploaded_resume': _normalize_uploaded_resume(item.get('uploaded_resume', {})),
+        'tech_stacks': [str(s).strip() for s in (item.get('tech_stacks') or []) if str(s).strip()],
         # This person's OWN creater / call-board-manager heads-up lead times — set on their own
         # Account page (routers/auth.py update_me), never by anyone else. Empty = system default (see
         # core/notify.py). Meaningful only for someone who is ever a Creater (an admin) or holds the

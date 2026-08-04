@@ -102,15 +102,22 @@ def me(user: dict = Depends(get_current_user)):
 
 
 # ─── Self-service account profile (the "Profile" page) ───────────────────────
-_AVATAR_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "avatars"
+_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
+_AVATAR_DIR = _DATA_DIR / "avatars"
 _AVATAR_DIR.mkdir(parents=True, exist_ok=True)
 _AVATAR_EXT = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif"}
+
+# A caller's own CV, kept per user under data/user_resumes/<id>/. PDF and DOCX only.
+_RESUME_DIR = _DATA_DIR / "user_resumes"
+_RESUME_EXT = {".pdf", ".docx"}
+_RESUME_MIME = {".pdf": "application/pdf",
+                ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
 _PROFILE_FIELDS = ("full_name", "email", "country", "telegram", "whatsapp", "discord", "timezone")
 # Free text — kept verbatim (newlines matter).
 _PROFILE_TEXTAREAS = ("emergency_contacts",)
 # Structured — a dict / list, so they must NOT be stringified on the way through. Storage validates
 # and clamps them (bad times → the 09:00–18:00 default; bad dates → dropped).
-_PROFILE_STRUCTS = ("availability", "daily_meetings", "days_off")
+_PROFILE_STRUCTS = ("availability", "daily_meetings", "days_off", "tech_stacks")
 # This person's OWN creater/call-board-manager reminder lead times (Account page → "Reminder times").
 # Self-service only — nobody else may set these for you; storage clamps/de-dupes/sorts them.
 _PROFILE_LEAD_LISTS = ("creator_lead_minutes_list", "cbm_lead_minutes_list")
@@ -188,6 +195,74 @@ def get_avatar(user_id: str):
     path = matches[0]
     mime = {".png": "image/png", ".jpg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif"}.get(path.suffix, "application/octet-stream")
     return FileResponse(str(path), media_type=mime)
+
+
+# ─── Caller CV (own resume) ──────────────────────────────────────────────────
+@router.post("/me/resume")
+async def upload_my_resume(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
+    """Upload/replace the current user's own CV (PDF or DOCX, ≤ 10 MB). Only the user sets it; only
+    the user and admins can read it back (see get_user_resume)."""
+    fname = (file.filename or "").strip()
+    ext = Path(fname).suffix.lower()
+    if ext not in _RESUME_EXT:
+        raise HTTPException(status_code=400, detail="CV must be a PDF or DOCX file.")
+    data = await file.read()
+    if len(data) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="CV too large — max 10 MB.")
+
+    uid = user["id"]
+    target_dir = _RESUME_DIR / uid
+    # One CV per user: clear any prior file (the extension may change) before writing the new one.
+    if target_dir.exists():
+        for old in target_dir.iterdir():
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / f"cv{ext}"
+    target_path.write_bytes(data)
+
+    meta = {
+        "filename": fname or f"cv{ext}",
+        "content_type": file.content_type or _RESUME_MIME.get(ext, "application/octet-stream"),
+        "size_bytes": len(data),
+        "path": str(target_path),
+        "relative_path": str(target_path.relative_to(_DATA_DIR.parent)),
+        "uploaded_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+    }
+    storage.update_user(uid, {"uploaded_resume": meta})
+    return {"uploaded_resume": meta}
+
+
+@router.delete("/me/resume")
+def delete_my_resume(user: dict = Depends(get_current_user)):
+    """Remove the current user's CV."""
+    uid = user["id"]
+    target_dir = _RESUME_DIR / uid
+    if target_dir.exists():
+        for old in target_dir.iterdir():
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    storage.update_user(uid, {"uploaded_resume": {}})
+    return {"ok": True}
+
+
+@router.get("/users/{user_id}/resume")
+def get_user_resume(user_id: str, user: dict = Depends(get_current_user)):
+    """Stream a user's CV. Readable by the user themselves or an admin — nobody else (a caller's CV is
+    private; only admins review them in the Users tab)."""
+    if not user.get("is_admin") and str(user.get("id")) != str(user_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    target = storage.get_user_by_id(user_id) or {}
+    meta = target.get("uploaded_resume") or {}
+    path = Path(str(meta.get("path", "")).strip())
+    if not meta or not path.is_file():
+        raise HTTPException(status_code=404, detail="No CV on file")
+    mime = _RESUME_MIME.get(path.suffix.lower(), "application/octet-stream")
+    return FileResponse(str(path), media_type=mime, filename=str(meta.get("filename") or path.name))
 
 
 # ─── Keyboard-shortcut bindings (Chrome extension card) ──────────────────────

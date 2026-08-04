@@ -23,6 +23,26 @@ function Field({ label, value }: { label: string; value?: React.ReactNode }) {
   );
 }
 
+/** An inline-editable field: a labelled input that commits on blur when the value actually changed.
+ *  Used by admins in the Users detail panel to edit any of a user's plain-text fields in place. */
+function EditField({ label, value, onSave, type = 'text', placeholder }: {
+  label: string; value: string; onSave: (v: string) => void; type?: string; placeholder?: string;
+}) {
+  const [v, setV] = useState(value);
+  useEffect(() => { setV(value); }, [value]);   // re-seed when the query refreshes
+  return (
+    <div className="u-field">
+      <div className="u-field-lbl">{label}</div>
+      <div className="u-field-val">
+        <input type={type} value={v} placeholder={placeholder} style={{ width: '100%' }}
+          onChange={(e) => setV(e.target.value)}
+          onBlur={() => { if (v !== value) onSave(v); }}
+          onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }} />
+      </div>
+    </div>
+  );
+}
+
 const ALL_ROLES: { value: Role; label: string }[] = [
   { value: 'admin',     label: 'Admin' },
   { value: 'bidder',    label: 'Bidder' },
@@ -131,6 +151,8 @@ export default function Users() {
     onError: (e: any) => toast(e?.response?.data?.detail || 'Failed to delete team', 'error'),
   });
   const [expanded, setExpanded] = useState<string | null>(null);       // user whose full profile is open (admin-only view)
+  const [pwFor, setPwFor] = useState<Record<string, string>>({});       // per-user "set new password" input
+  const [techQuery, setTechQuery] = useState('');                       // caller sub-tab: filter by tech stack
   const [newUser, setNewUser] = useState<{
     username: string; full_name: string; email: string; password: string;
     roles: Role[]; status: string;
@@ -172,9 +194,21 @@ export default function Users() {
   const inRole = (u: any, role: Role) => (u.roles || []).includes(role) && (role === 'admin' || !(u.roles || []).includes('admin'));
   const roleCount = (role: Role) => users.filter((u: any) => inRole(u, role)).length;
   const noRoleCount = users.filter((u: any) => !(u.roles || []).length).length;
-  const filtered = (roleFilter === 'all' || roleFilter === 'teams')
-    ? users
-    : users.filter((u: any) => inRole(u, roleFilter));
+  const filtered = (() => {
+    let list = (roleFilter === 'all' || roleFilter === 'teams')
+      ? users
+      : users.filter((u: any) => inRole(u, roleFilter));
+    // Caller sub-tab: narrow by tech stack. Every search term must match some stack (AND), each term a
+    // case-insensitive substring — so "react node" finds callers who have both.
+    if (roleFilter === 'caller' && techQuery.trim()) {
+      const terms = techQuery.toLowerCase().split(/[,\s]+/).filter(Boolean);
+      list = list.filter((u: any) => {
+        const stacks = (u.tech_stacks || []).map((s: string) => s.toLowerCase());
+        return terms.every((t) => stacks.some((s: string) => s.includes(t)));
+      });
+    }
+    return list;
+  })();
   const profileNames = (ids?: string[]) => (ids || []).map((id) => profiles.find((p: any) => p.id === id)?.name || id).join(', ');
 
   return (
@@ -240,6 +274,16 @@ export default function Users() {
         ))}
         {noRoleCount > 0 && <span className="muted" style={{ fontSize: '0.78rem', marginLeft: 4 }}>· {noRoleCount} with no role</span>}
       </div>
+
+      {/* Caller sub-tab only: find callers by tech stack. */}
+      {roleFilter === 'caller' && (
+        <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <input value={techQuery} onChange={(e) => setTechQuery(e.target.value)}
+            placeholder="Search callers by tech stack — e.g. React, Go" style={{ maxWidth: 360 }} />
+          {techQuery && <button className="ghost" onClick={() => setTechQuery('')} style={{ fontSize: '0.82rem' }}>Clear</button>}
+          <span className="muted" style={{ fontSize: '0.8rem' }}>{filtered.length} match{filtered.length === 1 ? '' : 'es'}</span>
+        </div>
+      )}
 
       {/* ── Teams tree: ungrouped callers at the top level, then each team as an expandable group ── */}
       {roleFilter === 'teams' && (() => {
@@ -430,21 +474,32 @@ export default function Users() {
                         <div className="muted" style={{ fontSize: '0.8rem' }}>@{u.username} · {(u.roles || []).join(', ') || 'no role'}</div>
                       </div>
                     </div>
+                    {/* Admins may edit EVERY field of a LOCAL user here — each commits on blur through the
+                        same PATCH the row controls use. VPS_1 users stay read-only (their account lives
+                        on VPS_1). `up` is a tiny shorthand for "save one field of this user". */}
+                    {(() => { const up = (payload: any) => updateMutation.mutate({ id: u.id, payload }); return (
+                    <>
                     <div className="u-detail-grid">
-                      <Field label="Email" value={u.email} />
-                      <Field label="Country" value={u.country} />
-                      {/* Admins can change a local user's time zone here — VPS_1 users stay read-only
-                          (their account lives on VPS_1). The picker writes straight through the same
-                          update path as roles/status. */}
-                      <Field label="Time zone" value={
-                        remote
-                          ? (u.timezone || undefined)
-                          : <TimezonePicker value={u.timezone || ''}
-                              onChange={(tz) => { if (tz !== (u.timezone || '')) updateMutation.mutate({ id: u.id, payload: { timezone: tz } }); }} />
-                      } />
-                      <Field label="Telegram" value={u.telegram} />
-                      <Field label="WhatsApp" value={u.whatsapp} />
-                      <Field label="Discord" value={u.discord} />
+                      {remote ? <>
+                        <Field label="Full name" value={u.full_name} />
+                        <Field label="Email" value={u.email} />
+                        <Field label="Country" value={u.country} />
+                        <Field label="Time zone" value={u.timezone || undefined} />
+                        <Field label="Telegram" value={u.telegram} />
+                        <Field label="WhatsApp" value={u.whatsapp} />
+                        <Field label="Discord" value={u.discord} />
+                      </> : <>
+                        <EditField label="Full name" value={u.full_name || ''} onSave={(v) => up({ full_name: v })} />
+                        <EditField label="Email" value={u.email || ''} type="email" onSave={(v) => up({ email: v })} />
+                        <EditField label="Country" value={u.country || ''} onSave={(v) => up({ country: v })} />
+                        <Field label="Time zone" value={
+                          <TimezonePicker value={u.timezone || ''}
+                            onChange={(tz) => { if (tz !== (u.timezone || '')) up({ timezone: tz }); }} />
+                        } />
+                        <EditField label="Telegram" value={u.telegram || ''} onSave={(v) => up({ telegram: v })} placeholder="@handle" />
+                        <EditField label="WhatsApp" value={u.whatsapp || ''} onSave={(v) => up({ whatsapp: v })} placeholder="+1 555…" />
+                        <EditField label="Discord" value={u.discord || ''} onSave={(v) => up({ discord: v })} placeholder="user#0000" />
+                      </>}
                       <Field label="Status" value={u.status} />
                       {(u.roles || []).includes('bidder') && <Field label="Bid method" value={u.bid_method === 1 ? 'Method 1 · Resumes + Apply' : 'Method 2 · Bid'} />}
                       <Field label="Assigned profiles" value={(u.assigned_profile_ids || []).length ? profileNames(u.assigned_profile_ids) : ''} />
@@ -452,12 +507,53 @@ export default function Users() {
                       <Field label="Approved" value={fmtWhen(u.approved_at)} />
                       <Field label="User ID" value={<code style={{ fontSize: '0.78rem' }}>{u.id}</code>} />
                     </div>
-                    {u.emergency_contacts && (
+
+                    {/* Caller CV + tech stacks — admins see these here (the caller sets them on their own
+                        Account page). Tech stacks are editable; the CV is view/download only. */}
+                    {(u.roles || []).includes('caller') && (
+                      <div className="u-detail-grid" style={{ marginTop: 8 }}>
+                        {remote
+                          ? <Field label="Tech stacks" value={(u.tech_stacks || []).join(', ')} />
+                          : <EditField label="Tech stacks" value={(u.tech_stacks || []).join(', ')}
+                              placeholder="React, Node.js, Go…"
+                              onSave={(v) => up({ tech_stacks: v.split(',').map((s) => s.trim()).filter(Boolean) })} />}
+                        <Field label="CV / Resume" value={
+                          u.uploaded_resume?.filename
+                            ? <a className="link" href={`/api/auth/users/${u.id}/resume`} target="_blank" rel="noreferrer">{u.uploaded_resume.filename}</a>
+                            : undefined
+                        } />
+                      </div>
+                    )}
+
+                    {remote ? (u.emergency_contacts && (
                       <div className="u-field" style={{ marginTop: 8 }}>
                         <div className="u-field-lbl">Emergency contacts</div>
                         <div className="u-field-val" style={{ whiteSpace: 'pre-wrap' }}>{u.emergency_contacts}</div>
                       </div>
+                    )) : (
+                      <>
+                        <div className="u-field" style={{ marginTop: 8 }}>
+                          <div className="u-field-lbl">Emergency contacts</div>
+                          <textarea rows={2} defaultValue={u.emergency_contacts || ''} style={{ width: '100%' }}
+                            placeholder="Name · relationship · phone (one per line)"
+                            onBlur={(e) => { if (e.target.value !== (u.emergency_contacts || '')) up({ emergency_contacts: e.target.value }); }} />
+                        </div>
+                        {/* Set a new password for this user (leave blank to keep the current one). */}
+                        <div className="u-field" style={{ marginTop: 8 }}>
+                          <div className="u-field-lbl">Set new password</div>
+                          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                            <input type="text" placeholder="new password (≥ 10 chars)" style={{ maxWidth: 240 }}
+                              value={pwFor[u.id] || ''} onChange={(e) => setPwFor((m) => ({ ...m, [u.id]: e.target.value }))} />
+                            <button className="secondary" disabled={(pwFor[u.id] || '').length < 10}
+                              onClick={() => { up({ password: pwFor[u.id] }); setPwFor((m) => ({ ...m, [u.id]: '' })); toast('Password updated', 'success'); }}>
+                              Set password
+                            </button>
+                          </div>
+                        </div>
+                      </>
                     )}
+                    </>
+                    ); })()}
                   </div>
                 </td>
               </tr>

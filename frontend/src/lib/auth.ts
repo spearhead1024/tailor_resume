@@ -35,6 +35,9 @@ export type User = {
   // if they're ever a Creater (an admin) or hold the call_board_manager role, but harmless otherwise.
   creator_lead_minutes_list?: number[];
   cbm_lead_minutes_list?: number[];
+  // A caller's own CV + tech stacks (set on their Account page; only admins view them in the Users tab).
+  tech_stacks?: string[];
+  uploaded_resume?: { filename?: string; content_type?: string; size_bytes?: number; uploaded_at?: string };
 };
 
 export function hasRole(user: User | null, ...roles: Role[]): boolean {
