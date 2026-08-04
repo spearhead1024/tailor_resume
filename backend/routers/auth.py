@@ -197,11 +197,10 @@ def get_avatar(user_id: str):
     return FileResponse(str(path), media_type=mime)
 
 
-# ─── Caller CV (own resume) ──────────────────────────────────────────────────
-@router.post("/me/resume")
-async def upload_my_resume(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
-    """Upload/replace the current user's own CV (PDF or DOCX, ≤ 10 MB). Only the user sets it; only
-    the user and admins can read it back (see get_user_resume)."""
+# ─── Caller CV — settable by the user themselves OR an admin ─────────────────
+async def _store_resume(uid: str, file: UploadFile) -> dict:
+    """Validate + write a CV for `uid`, replacing any prior one, and persist the metadata. Shared by
+    the self-service and admin upload endpoints so the rules live in one place."""
     fname = (file.filename or "").strip()
     ext = Path(fname).suffix.lower()
     if ext not in _RESUME_EXT:
@@ -210,10 +209,8 @@ async def upload_my_resume(file: UploadFile = File(...), user: dict = Depends(ge
     if len(data) > 10 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="CV too large — max 10 MB.")
 
-    uid = user["id"]
     target_dir = _RESUME_DIR / uid
-    # One CV per user: clear any prior file (the extension may change) before writing the new one.
-    if target_dir.exists():
+    if target_dir.exists():                      # one CV per user — clear any prior file first
         for old in target_dir.iterdir():
             try:
                 old.unlink()
@@ -232,13 +229,10 @@ async def upload_my_resume(file: UploadFile = File(...), user: dict = Depends(ge
         "uploaded_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
     }
     storage.update_user(uid, {"uploaded_resume": meta})
-    return {"uploaded_resume": meta}
+    return meta
 
 
-@router.delete("/me/resume")
-def delete_my_resume(user: dict = Depends(get_current_user)):
-    """Remove the current user's CV."""
-    uid = user["id"]
+def _clear_resume(uid: str) -> None:
     target_dir = _RESUME_DIR / uid
     if target_dir.exists():
         for old in target_dir.iterdir():
@@ -247,6 +241,40 @@ def delete_my_resume(user: dict = Depends(get_current_user)):
             except OSError:
                 pass
     storage.update_user(uid, {"uploaded_resume": {}})
+
+
+@router.post("/me/resume")
+async def upload_my_resume(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
+    """Upload/replace the current user's own CV (PDF or DOCX, ≤ 10 MB)."""
+    return {"uploaded_resume": await _store_resume(user["id"], file)}
+
+
+@router.post("/users/{user_id}/resume")
+async def upload_user_resume(user_id: str, file: UploadFile = File(...), user: dict = Depends(get_current_user)):
+    """Admin uploads/replaces a caller's CV on their behalf. Admin only — nobody uploads for someone
+    else except an admin (the user's own upload goes through /me/resume)."""
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin only")
+    if not storage.get_user_by_id(user_id):
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"uploaded_resume": await _store_resume(user_id, file)}
+
+
+@router.delete("/users/{user_id}/resume")
+def delete_user_resume(user_id: str, user: dict = Depends(get_current_user)):
+    """Remove a user's CV — the user themselves or an admin."""
+    if not user.get("is_admin") and str(user.get("id")) != str(user_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if not storage.get_user_by_id(user_id):
+        raise HTTPException(status_code=404, detail="User not found")
+    _clear_resume(user_id)
+    return {"ok": True}
+
+
+@router.delete("/me/resume")
+def delete_my_resume(user: dict = Depends(get_current_user)):
+    """Remove the current user's CV."""
+    _clear_resume(user["id"])
     return {"ok": True}
 
 

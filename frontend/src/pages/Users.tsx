@@ -152,6 +152,7 @@ export default function Users() {
   });
   const [expanded, setExpanded] = useState<string | null>(null);       // user whose full profile is open (admin-only view)
   const [pwFor, setPwFor] = useState<Record<string, string>>({});       // per-user "set new password" input
+  const cvInputRef = useRef<HTMLInputElement>(null);                     // admin CV upload (one row expanded at a time)
   const [techQuery, setTechQuery] = useState('');                       // caller sub-tab: filter by tech stack
   const [newUser, setNewUser] = useState<{
     username: string; full_name: string; email: string; password: string;
@@ -176,6 +177,22 @@ export default function Users() {
     mutationFn: ({ id, payload }: { id: string; payload: any }) => api.patch(`/api/users/${id}`, { payload }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['users'] }),
     onError: (e: any) => toast(e?.response?.data?.detail || 'Failed to update user', 'error'),
+  });
+
+  // Admin uploads/replaces a caller's CV on their behalf (the caller can also do it themselves on their
+  // Account page). Multipart, so use api.raw to let the browser set the boundary.
+  const cvUpload = useMutation({
+    mutationFn: ({ id, file }: { id: string; file: File }) => {
+      const fd = new FormData(); fd.append('file', file);
+      return api.raw.post(`/api/auth/users/${id}/resume`, fd);
+    },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['users'] }); toast('CV uploaded', 'success'); },
+    onError: (e: any) => toast(e?.response?.data?.detail || 'Failed to upload CV', 'error'),
+  });
+  const cvRemove = useMutation({
+    mutationFn: (id: string) => api.raw.delete(`/api/auth/users/${id}/resume`),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['users'] }); toast('CV removed', 'success'); },
+    onError: (e: any) => toast(e?.response?.data?.detail || 'Failed to remove CV', 'error'),
   });
 
   const deleteMutation = useMutation({
@@ -209,7 +226,6 @@ export default function Users() {
     }
     return list;
   })();
-  const profileNames = (ids?: string[]) => (ids || []).map((id) => profiles.find((p: any) => p.id === id)?.name || id).join(', ');
   const callerView = roleFilter === 'caller';   // the caller sub-tab swaps two columns for tech + CV
 
   return (
@@ -400,7 +416,9 @@ export default function Users() {
         {/* The caller sub-tab is about who can take a call, so it swaps the two bidder-oriented columns
             (Bid method / Assigned profiles) for what matters there: their tech skills and CV. */}
         <thead><tr>
-          <th>Source</th><th>Username</th><th>Name</th><th>Email</th><th>Roles</th><th>Team</th>
+          {/* Every caller is a VPS_2 account, so the source badge is noise there — drop the column. */}
+          {!callerView && <th>Source</th>}
+          <th>Username</th><th>Name</th><th>Email</th><th>Roles</th><th>Team</th>
           <th>{callerView ? 'Tech skills' : 'Bid method'}</th>
           <th>Status</th>
           <th>{callerView ? 'Resume' : 'Assigned profiles'}</th>
@@ -410,7 +428,7 @@ export default function Users() {
           {filtered.map((u) => { const remote = u.source === 'VPS_1'; return (
             <Fragment key={u.id}>
             <tr>
-              <td><SourceBadge source={u.source} /></td>
+              {!callerView && <td><SourceBadge source={u.source} /></td>}
               <td>
                 <button className="ghost u-expand" title="Full profile" onClick={() => setExpanded(expanded === u.id ? null : u.id)}>{expanded === u.id ? '▾' : '▸'}</button>
                 {u.username}
@@ -480,7 +498,7 @@ export default function Users() {
             </tr>
             {expanded === u.id && (
               <tr className="u-detail-row">
-                <td colSpan={10}>
+                <td colSpan={callerView ? 9 : 10}>
                   <div className="u-detail">
                     <div className="u-detail-hd">
                       {u.avatar_url
@@ -519,7 +537,6 @@ export default function Users() {
                       </>}
                       <Field label="Status" value={u.status} />
                       {(u.roles || []).includes('bidder') && <Field label="Bid method" value={u.bid_method === 1 ? 'Method 1 · Resumes + Apply' : 'Method 2 · Bid'} />}
-                      <Field label="Assigned profiles" value={(u.assigned_profile_ids || []).length ? profileNames(u.assigned_profile_ids) : ''} />
                       <Field label="Created" value={fmtWhen(u.created_at)} />
                       <Field label="Approved" value={fmtWhen(u.approved_at)} />
                       <Field label="User ID" value={<code style={{ fontSize: '0.78rem' }}>{u.id}</code>} />
@@ -535,9 +552,24 @@ export default function Users() {
                               placeholder="React, Node.js, Go…"
                               onSave={(v) => up({ tech_stacks: v.split(',').map((s) => s.trim()).filter(Boolean) })} />}
                         <Field label="CV / Resume" value={
-                          u.uploaded_resume?.filename
-                            ? <a className="link" href={`/api/auth/users/${u.id}/resume`} target="_blank" rel="noreferrer">{u.uploaded_resume.filename}</a>
-                            : undefined
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                            {u.uploaded_resume?.filename
+                              ? <a className="link" href={`/api/auth/users/${u.id}/resume`} target="_blank" rel="noreferrer">{u.uploaded_resume.filename}</a>
+                              : <span className="muted">No CV</span>}
+                            {/* Admin may upload/replace a caller's CV (PDF/DOCX); VPS_1 users are read-only. */}
+                            {!remote && isAdmin && (<>
+                              <input ref={cvInputRef} type="file" accept=".pdf,.docx" style={{ display: 'none' }}
+                                onChange={(e) => { const f = e.target.files?.[0]; if (f) cvUpload.mutate({ id: u.id, file: f }); e.currentTarget.value = ''; }} />
+                              <button className="secondary" disabled={cvUpload.isPending}
+                                onClick={() => cvInputRef.current?.click()} style={{ fontSize: '0.8rem', padding: '2px 8px' }}>
+                                {cvUpload.isPending ? '…' : (u.uploaded_resume?.filename ? 'Replace' : 'Upload')}
+                              </button>
+                              {u.uploaded_resume?.filename && (
+                                <button className="ghost danger" disabled={cvRemove.isPending}
+                                  onClick={() => cvRemove.mutate(u.id)} style={{ fontSize: '0.8rem', padding: '2px 8px' }}>Remove</button>
+                              )}
+                            </>)}
+                          </div>
                         } />
                       </div>
                     )}
