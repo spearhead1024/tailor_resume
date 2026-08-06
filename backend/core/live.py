@@ -247,13 +247,17 @@ def on_row_changed(row_id: str, before: dict, after: dict, actor: dict) -> None:
             # own creater: add() already excludes the actor from their own audience.
             if "call_board_manager" in actor_roles and creator_ids:
                 add(creator_ids, "Interview updated", f"{who} changed {what} of {name}")
-            # The row's OWN creater editing their own call is news to every Call Board Manager —
-            # they oversee the whole board, so this matters even though they didn't create it.
-            # No-ops for a creater who is also a CBM, same reasoning as above.
-            if creator_ids and actor_id in creator_ids:
-                add(_call_board_manager_ids(), "Interview updated", f"{who} changed {what} of {name}")
 
-        # ── then the supervisory ones (creator / team manager) ─────────────────
+        # Call Board Managers oversee the whole board, but they were being pinged on EVERY content
+        # edit (company, link, salary…) — far too noisy. They care about only two things: WHEN a call
+        # is and WHO is on it. So notify every CBM when the schedule or the caller changes, and only
+        # then — regardless of who made the edit. (add() already excludes the actor, so a CBM editing
+        # is not told about their own change.) The caller-change wording is handled by the dedicated
+        # block below; here we cover the schedule move.
+        if "c_sched" in touched and not caller_changed:
+            add(_call_board_manager_ids(), "Interview updated", f"{who} changed the time of {name}")
+
+        # ── then the supervisory ones (creator / team manager / board manager) ──
         if caller_changed:
             audience: set[str] = set()
             if is_manager or is_caller:
@@ -261,6 +265,7 @@ def on_row_changed(row_id: str, before: dict, after: dict, actor: dict) -> None:
             if nu:
                 mgrs, _ = _team_people(new_team or old_team)
                 audience |= mgrs                  # ...and that team's manager
+            audience |= _call_board_manager_ids()  # WHO is on a call is one of the two things a CBM watches
             add(audience, "Interview assigned", f"{who} assigned {name} to {new_caller or 'nobody'}")
 
         # ── least specific: the whole team, when a call is handed to one ───────
