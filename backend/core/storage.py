@@ -511,20 +511,69 @@ def _normalize_uploaded_resume(item: Any) -> dict:
     }
 
 
+def _clamp_int(value, default: int, lo: int, hi: int) -> int:
+    try:
+        n = int(value)
+    except Exception:
+        return default
+    return max(lo, min(hi, n))
+
+
 def _normalize_generation_settings(raw) -> dict:
+    # tech_skills_target / bullets_per_company_default drive the ChatGPT prompt
+    # (VPS1 flow); summary_char_count / skills_count / bullet_counts are kept for
+    # backward compatibility with older profiles. bullets_per_company is a list of
+    # per-company overrides {company_name, bullets} matched by name in the prompt.
     if not isinstance(raw, dict):
-        return {'summary_char_count': 650, 'skills_count': 85, 'bullet_counts': []}
+        return {
+            'summary_char_count': 650, 'skills_count': 85, 'bullet_counts': [],
+            'tech_skills_target': 70, 'bullets_per_company_default': 5,
+            'bullets_per_company': [], 'candidate_background': '',
+        }
     bullet_counts = []
     for bc in raw.get('bullet_counts') or []:
         try:
             bullet_counts.append(int(bc))
         except Exception:
             pass
+    overrides = []
+    for ov in raw.get('bullets_per_company') or []:
+        if not isinstance(ov, dict):
+            continue
+        name = str(ov.get('company_name') or '').strip()
+        if name:
+            overrides.append({'company_name': name, 'bullets': _clamp_int(ov.get('bullets'), 5, 1, 20)})
     return {
         'summary_char_count': int(raw.get('summary_char_count') or 650),
         'skills_count': int(raw.get('skills_count') or 85),
         'bullet_counts': bullet_counts,
+        'tech_skills_target': _clamp_int(raw.get('tech_skills_target'), 70, 10, 200),
+        'bullets_per_company_default': _clamp_int(raw.get('bullets_per_company_default'), 5, 1, 20),
+        'bullets_per_company': overrides,
+        'candidate_background': str(raw.get('candidate_background') or '').strip(),
     }
+
+
+def _normalize_detected_work_history(raw, default_bullets: int = 5) -> list:
+    """Per-company anchors extracted from the profile's uploaded DOCX (VPS1 flow):
+    company_name + duration + a per-company bullet target. Editable on the Profiles page."""
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get('company_name') or '').strip()
+        if not name:
+            continue
+        out.append({
+            'company_name': name,
+            'role_title': str(item.get('role_title') or '').strip(),
+            'duration': str(item.get('duration') or '').strip(),
+            'location': str(item.get('location') or '').strip(),
+            'bullets': _clamp_int(item.get('bullets'), default_bullets, 1, 20),
+        })
+    return out[:8]
 
 
 _DOB_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
@@ -629,6 +678,10 @@ def _normalize_profile(item: dict) -> dict:
             for edu in item.get('education_history', []) or []
         ],
         'generation_settings': _normalize_generation_settings(item.get('generation_settings')),
+        'detected_work_history': _normalize_detected_work_history(
+            item.get('detected_work_history'),
+            _normalize_generation_settings(item.get('generation_settings')).get('bullets_per_company_default', 5),
+        ),
         'resume_template': str(item.get('resume_template') or 'spear-1').strip() or 'spear-1',
     }
 
@@ -788,8 +841,6 @@ def _normalize_user(item: dict) -> dict:
         'is_admin': 'admin' in roles,
         'status': str(item.get('status', 'pending') or 'pending').strip(),
         'assigned_profile_ids': [str(v).strip() for v in item.get('assigned_profile_ids', []) if str(v).strip()],
-        # Bidder workflow: 1 = Resumes + Apply tabs, 2 = Bid tab. Default 2 (current Bid).
-        'bid_method': 1 if str(item.get('bid_method', 2)).strip() == '1' else 2,
         'created_at': str(item.get('created_at', '')),
         'approved_at': str(item.get('approved_at', '')),
         'approved_by_user_id': str(item.get('approved_by_user_id', '')).strip(),
@@ -1295,6 +1346,24 @@ class Storage:
     def get_generated_resumes(self) -> list[dict]:
         with session_scope(self.db_path) as session:
             rows = session.scalars(select(GeneratedResumeRow).order_by(GeneratedResumeRow.created_at_ts)).all()
+            return [_normalize_generated_resume(dict(row.data or {})) for row in rows]
+
+    def get_generated_resumes_for_profile(self, profile_id: str) -> list[dict]:
+        """Only one profile's generated resumes, via the indexed profile_id column.
+
+        The Bid queue needs a single profile's resumes to work out which jobs are
+        already applied/generated. Deserializing ALL ~3.8k rows (get_generated_resumes,
+        ~1.8 s) just to keep ~50 was the main cost of the slow Bid tab. This filters
+        in SQL on the indexed column and normalizes only the matching rows."""
+        pid = str(profile_id or "")
+        if not pid:
+            return []
+        with session_scope(self.db_path) as session:
+            rows = session.scalars(
+                select(GeneratedResumeRow)
+                .where(GeneratedResumeRow.profile_id == pid)
+                .order_by(GeneratedResumeRow.created_at_ts)
+            ).all()
             return [_normalize_generated_resume(dict(row.data or {})) for row in rows]
 
     # Fields the Applied list needs. They live inside the `data` JSON (no columns for them), so pull

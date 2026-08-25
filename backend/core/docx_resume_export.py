@@ -91,6 +91,12 @@ def _preserve_line_text(value: object) -> str:
     return _strip_markdown_emphasis(value).replace("\r", "").replace("\n", " ")
 
 
+def _preserve_bold_line_text(value: object) -> str:
+    """Like _preserve_line_text but KEEPS **bold** / __bold__ markers, so the
+    keyword-bold renderer can turn them into real DOCX bold runs."""
+    return str(value or "").replace("\r", "").replace("\n", " ")
+
+
 def _paragraph_contains_any_marker(paragraph: Paragraph, markers: set[str]) -> bool:
     text_lower = (paragraph.text or "").lower()
     return any(marker.lower() in text_lower for marker in markers)
@@ -352,6 +358,38 @@ def _add_run(
     return run
 
 
+_MARKDOWN_BOLD_RE = re.compile(r"(\*\*|__)(.+?)\1")
+
+
+def _markdown_bold_segments(value: object) -> list[tuple[str, bool]]:
+    """Split text into (segment, is_bold) honoring **bold** / __bold__ markers.
+
+    Ported from VPS1: the pasted ChatGPT JSON marks tech phrases with **markdown**,
+    which must render as real DOCX bold (VPS2 previously stripped the markers and
+    lost the intent). Punctuation and spaces are preserved so "using **Node.js**,"
+    does not collapse.
+    """
+    text = str(value or "").replace("\r", " ").replace("\n", " ")
+    if not text:
+        return [("", False)]
+    segments: list[tuple[str, bool]] = []
+    pos = 0
+    for match in _MARKDOWN_BOLD_RE.finditer(text):
+        if match.start() > pos:
+            plain = text[pos:match.start()]
+            if plain:
+                segments.append((plain, False))
+        bold = match.group(2)
+        if bold:
+            segments.append((bold, True))
+        pos = match.end()
+    if pos < len(text):
+        tail = text[pos:]
+        if tail:
+            segments.append((tail, False))
+    return segments or [("", False)]
+
+
 def _add_text_with_keyword_bold(
     paragraph: Paragraph,
     text: str,
@@ -360,23 +398,39 @@ def _add_text_with_keyword_bold(
     *,
     base_no_bold: bool = True,
 ) -> None:
-    text = _plain_resume_text(text)
+    # First honor EXPLICIT **bold** markers from the model, then keyword-bold the
+    # remaining plain segments. A segment the model bolded is emitted bold as-is;
+    # plain segments still get tech-keyword auto-bolding on top.
     keywords = keywords or []
-    if not keywords:
-        _add_run(paragraph, text, source_run, force_no_bold=base_no_bold)
-        return
-    pattern = _keyword_pattern(keywords)
-    pos = 0
-    matched_any = False
-    for match in pattern.finditer(text):
-        if match.start() > pos:
-            _add_run(paragraph, text[pos:match.start()], source_run, force_no_bold=base_no_bold)
-        _add_run(paragraph, match.group(0), source_run, force_no_bold=True, force_bold=True)
-        matched_any = True
-        pos = match.end()
-    if pos < len(text):
-        _add_run(paragraph, text[pos:], source_run, force_no_bold=base_no_bold)
-    if not matched_any and not text:
+    pattern = _keyword_pattern(keywords) if keywords else None
+    emitted = False
+
+    for segment_text, is_bold in _markdown_bold_segments(text):
+        # Collapse internal whitespace but KEEP boundary spaces (VPS1 behavior) so
+        # "using **Node.js**, AWS" does not render as "usingNode.js". Only strip
+        # the BOLD phrase itself; plain segments keep their surrounding spaces.
+        seg = re.sub(r"\s+", " ", segment_text)
+        if is_bold:
+            seg = seg.strip()
+        if not seg:
+            continue
+        emitted = True
+        if is_bold:
+            _add_run(paragraph, seg, source_run, force_no_bold=False, force_bold=True)
+            continue
+        if pattern is None:
+            _add_run(paragraph, seg, source_run, force_no_bold=base_no_bold)
+            continue
+        pos = 0
+        for match in pattern.finditer(seg):
+            if match.start() > pos:
+                _add_run(paragraph, seg[pos:match.start()], source_run, force_no_bold=base_no_bold)
+            _add_run(paragraph, match.group(0), source_run, force_no_bold=True, force_bold=True)
+            pos = match.end()
+        if pos < len(seg):
+            _add_run(paragraph, seg[pos:], source_run, force_no_bold=base_no_bold)
+
+    if not emitted:
         _add_run(paragraph, "", source_run, force_no_bold=base_no_bold)
 
 
@@ -739,6 +793,22 @@ def _append_tab(paragraph: Paragraph, source_run=None) -> None:
         run.text = "\t"
 
 
+def _has_trailing_pipe_marker(value: object) -> bool:
+    """Return True only for a template marker pipe at the END of a line.
+
+    Internal separators such as ``Company | Location | Date`` are real resume
+    content and must be preserved. Only a final marker like
+    ``__role__        Jan 2025 \u2013 Present|`` is treated as layout syntax.
+    (Ported from VPS1 commit fa87489 \u2014 VPS2 previously split on the FIRST pipe,
+    which mangled pipe-separated role/meta lines.)
+    """
+    return bool(re.search(r"\|\s*$", str(value or "")))
+
+
+def _strip_trailing_pipe_marker(value: object) -> str:
+    return re.sub(r"\s*\|\s*$", "", str(value or ""))
+
+
 def _split_role_line(original: str):
     text = str(original or "").replace("\r", "").replace("\n", " ")
     match = _ROLE_MARKER_PATTERN.search(text)
@@ -746,8 +816,10 @@ def _split_role_line(original: str):
         return None
     before = text[:match.start()]
     after_marker = text[match.end():]
-    pipe_offset = after_marker.find("|")
-    if pipe_offset < 0:
+    # Only treat a pipe as template layout syntax when it is the final
+    # character/marker on the paragraph. Internal pipes are normal content,
+    # e.g. "AnviraSoft | Lewisville, TX | May 2023 \u2013 Present".
+    if not _has_trailing_pipe_marker(after_marker):
         return {
             "before": before,
             "role_marker": match.group(0),
@@ -756,8 +828,8 @@ def _split_role_line(original: str):
             "after": "",
             "has_pipe": False,
         }
-    bounded = after_marker[:pipe_offset]
-    after = after_marker[pipe_offset + 1:]
+    bounded = _strip_trailing_pipe_marker(after_marker)
+    after = ""
     sep_match = re.match(r"([ \t\u00a0]*)(.*)", bounded, flags=re.DOTALL)
     separator = sep_match.group(1) if sep_match else ""
     right_text = (sep_match.group(2) if sep_match else bounded).strip()
@@ -789,14 +861,19 @@ def _replace_role_paragraph(paragraph: Paragraph, role_value: str) -> bool:
     right_run = before_run
     _clear_paragraph_keep_ppr(paragraph)
     _set_role_line_right_tab(paragraph)
-    if parts["before"]:
-        _add_run(paragraph, str(parts["before"]), before_run)
+    # Strip only a TRAILING pipe marker from each segment (not every pipe), and
+    # force the right-hand date/location run to normal weight so the bold role
+    # title doesn't bleed bold into its metadata. (VPS1 fa87489.)
+    prefix = _strip_trailing_pipe_marker(parts["before"] or "")
+    right_text = _clean_text(_strip_trailing_pipe_marker(parts["right_text"] or ""))
+    after_text = _clean_text(_strip_trailing_pipe_marker(parts["after"] or ""))
+    if prefix:
+        _add_run(paragraph, prefix, before_run)
     _add_run(paragraph, role, role_run)
-    if parts["right_text"]:
+    final_right = right_text or after_text
+    if final_right:
         _append_tab(paragraph, role_run)
-        _add_run(paragraph, str(parts["right_text"]), right_run)
-    if parts["after"]:
-        _add_run(paragraph, str(parts["after"]).replace("|", ""), right_run)
+        _add_run(paragraph, final_right, right_run, force_no_bold=True)
     _set_keep_lines(paragraph)
     return True
 
@@ -1073,7 +1150,8 @@ def _replace_experience_bullets_and_titles(doc: Document, resume: dict) -> bool:
     for idx, group in enumerate(bullet_groups):
         if idx >= len(jobs) or not group:
             continue
-        bullets = [_plain_resume_text(bullet) for bullet in jobs[idx].get("bullets", []) if _plain_resume_text(bullet)]
+        # Keep **bold** markers — _set_paragraph_text/keyword-bold honors them.
+        bullets = [_preserve_bold_line_text(bullet) for bullet in jobs[idx].get("bullets", []) if _plain_resume_text(bullet)]
         if not bullets:
             continue
 
@@ -1396,7 +1474,9 @@ def _inject_section_heading_borders(doc: Document, resume_template: str = 'spear
 def apply_resume_to_docx(docx_path: Path, resume: dict, resume_template: str = 'spear-1') -> None:
     doc = _DocxFactory(str(docx_path))
     headline = _plain_resume_text(resume.get("headline", ""))
-    summary = _plain_resume_text(resume.get("summary", ""))
+    # Keep **bold** markers in the summary — the keyword-bold path honors them and
+    # renders those phrases bold. (Headline stays plain: it is never bolded.)
+    summary = _preserve_bold_line_text(resume.get("summary", ""))
     tech_keywords = _technical_skill_keywords(resume)
     _strip_paragraph_borders(doc)
 
@@ -1447,8 +1527,9 @@ def apply_resume_to_docx(docx_path: Path, resume: dict, resume_template: str = '
         if role:
             experience_lines.append(role)
         for bullet in job.get("bullets", []) or []:
-            bullet_text = _plain_resume_text(bullet)
-            if bullet_text:
+            # Keep **bold** markers so tech phrases the model bolded render bold.
+            bullet_text = _preserve_bold_line_text(bullet)
+            if bullet_text.strip():
                 experience_lines.append(f"• {bullet_text}")
 
     if experience_lines:

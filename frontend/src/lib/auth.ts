@@ -21,7 +21,6 @@ export type User = {
   days_off?: string[];                                                          // YYYY-MM-DD they can't work
   status: string;
   assigned_profile_ids?: string[];
-  bid_method?: 1 | 2;        // 1 = Resumes + Apply tabs, 2 = Bid tab
   force_password_change?: boolean;
   avatar_url?: string;
   country?: string;

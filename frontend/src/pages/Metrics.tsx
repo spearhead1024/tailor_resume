@@ -1,7 +1,26 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useRef, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useAuth, hasRole } from '../lib/auth';
+
+// The admin's chosen set of users to show in the Metrics tables. Persisted so it
+// survives navigating away and back (and reloads). `null` (no saved value) means
+// "not chosen yet" → show everyone; an explicit list (even empty) is honored.
+const USER_FILTER_KEY = 'metrics_selected_users';
+function loadUserFilter(): string[] | null {
+  try {
+    const raw = localStorage.getItem(USER_FILTER_KEY);
+    if (raw == null) return null;
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v.map(String) : null;
+  } catch { return null; }
+}
+function saveUserFilter(ids: string[] | null) {
+  try {
+    if (ids == null) localStorage.removeItem(USER_FILTER_KEY);
+    else localStorage.setItem(USER_FILTER_KEY, JSON.stringify(ids));
+  } catch { /* ignore quota / disabled storage */ }
+}
 
 type Cell = { applied: number; total: number };
 type Row = {
@@ -120,6 +139,71 @@ function aggregateAcrossRows(arrays: Cell[][]): Cell[] {
   return out;
 }
 
+/** Searchable multi-select of users for the Metrics filter. `selected === null`
+ *  means "all users". Picking users produces an explicit id list. */
+function UserFilter({ users, selected, onChange }: {
+  users: { id: string; name: string }[];
+  selected: string[] | null;
+  onChange: (next: string[] | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState('');
+  const ref = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+  useEffect(() => { if (open) { setQ(''); setTimeout(() => inputRef.current?.focus(), 0); } }, [open]);
+
+  const set = new Set(selected ?? users.map((u) => u.id));  // null = all selected
+  const allSelected = selected === null || selected.length === users.length;
+  const terms = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const shown = terms.length ? users.filter((u) => terms.every((t) => u.name.toLowerCase().includes(t))) : users;
+
+  const toggle = (id: string) => {
+    const next = new Set(set);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    // Collapse "everything selected" back to null (the all-users sentinel).
+    onChange(next.size === users.length ? null : [...next]);
+  };
+  const count = allSelected ? users.length : (selected?.length ?? 0);
+  const label = allSelected ? 'All users' : `${count} of ${users.length} users`;
+
+  return (
+    <div ref={ref} className="tz-picker" style={{ display: 'inline-block' }}>
+      <button type="button" className="secondary" onClick={() => setOpen((o) => !o)}
+        style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.85rem' }}>
+        <span>👥 {label}</span><span style={{ opacity: 0.6 }}>▾</span>
+      </button>
+      {open && (
+        <div className="card tz-menu" style={{ minWidth: 240, right: 0, left: 'auto' }}>
+          <input ref={inputRef} className="tz-search" value={q} placeholder="Search users…"
+            onChange={(e) => setQ(e.target.value)} />
+          <div style={{ display: 'flex', gap: 8, padding: '2px 4px 6px', fontSize: '0.8rem' }}>
+            <button className="link" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+              onClick={() => onChange(null)}>Select all</button>
+            <span className="muted">·</span>
+            <button className="link" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+              onClick={() => onChange([])}>Clear</button>
+          </div>
+          <div className="tz-list">
+            {shown.length === 0 && <div className="muted" style={{ padding: 8, fontSize: '0.82rem' }}>No matches</div>}
+            {shown.map((u) => (
+              <label key={u.id} className="tz-opt" style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                <input type="checkbox" checked={set.has(u.id)} onChange={() => toggle(u.id)} />
+                {u.name}
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Metrics() {
   const { user } = useAuth();
   const isAdmin = !!user?.is_admin;
@@ -129,6 +213,10 @@ export default function Metrics() {
   const canSeeJobs = isAdmin || hasRole(user, 'job_adder');
   const [view, setView] = useState<'apps' | 'jobs'>(canSeeApps ? 'apps' : 'jobs');
   const [weekStart, setWeekStart] = useState<string>(todayIsoMonday());
+  // Admin-only user filter. null = all users. Persisted so it survives leaving
+  // and returning to the tab.
+  const [selectedUserIds, setSelectedUserIds] = useState<string[] | null>(() => loadUserFilter());
+  const applyUserFilter = (next: string[] | null) => { setSelectedUserIds(next); saveUserFilter(next); };
 
   const { data, isLoading, isFetching } = useQuery({
     queryKey: ['metrics', weekStart],
@@ -136,19 +224,81 @@ export default function Metrics() {
     refetchInterval: 60_000,
   });
 
+  // Roles per user, so the default filter can exclude admins. Admin-only endpoint;
+  // only fetched for admins (the only ones who see the filter).
+  const { data: allAppUsers = [] } = useQuery({
+    queryKey: ['users'],
+    queryFn: () => api.get<any[]>('/api/users'),
+    enabled: isAdmin,
+  });
+  const isDefaultExcluded = (uid: string, username: string): boolean => {
+    if (username === 'intern_bidder') return true;                 // excluded test account
+    const u = allAppUsers.find((x: any) => x.id === uid);
+    return !!u && (u.is_admin || (u.roles || []).includes('admin'));  // admins excluded by default
+  };
+
   // Group rows by user_id so we can rowSpan the user cell and add per-user
   // subtotal rows when a user has 2+ profiles.
-  const groups = useMemo(() => {
-    const m = new Map<string, { username: string; rows: Row[] }>();
+  const allGroups = useMemo(() => {
+    const m = new Map<string, { user_id: string; username: string; rows: Row[] }>();
     for (const r of data?.rows || []) {
       let g = m.get(r.user_id);
-      if (!g) { g = { username: r.username, rows: [] }; m.set(r.user_id, g); }
+      if (!g) { g = { user_id: r.user_id, username: r.username, rows: [] }; m.set(r.user_id, g); }
       g.rows.push(r);
     }
     return [...m.values()];
   }, [data]);
+  const allJobRows = data?.job_rows || [];
 
-  const jobRows = data?.job_rows || [];
+  // Every user that appears in either table — the options for the filter.
+  const userOptions = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const g of allGroups) m.set(g.user_id, g.username);
+    for (const r of allJobRows) if (!m.has(r.user_id)) m.set(r.user_id, r.username);
+    return [...m.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
+  }, [allGroups, allJobRows]);
+
+  // Smart default (admins only): the FIRST time this admin opens Metrics with no
+  // saved selection, pre-select all users EXCEPT admins and intern_bidder. Once a
+  // selection exists (from this default or a manual edit) it is left untouched and
+  // restored on later visits. `didSeedDefault` guards against re-seeding on refetch.
+  const didSeedDefault = useRef(false);
+  useEffect(() => {
+    if (!isAdmin || didSeedDefault.current) return;
+    if (loadUserFilter() !== null) { didSeedDefault.current = true; return; }  // already have a saved choice
+    if (userOptions.length === 0 || allAppUsers.length === 0) return;          // wait for data
+    const defaults = userOptions.filter((u) => !isDefaultExcluded(u.id, u.name)).map((u) => u.id);
+    didSeedDefault.current = true;
+    applyUserFilter(defaults.length === userOptions.length ? null : defaults);
+  }, [isAdmin, userOptions, allAppUsers]);
+
+  // Apply the admin's saved user filter. null = all users. Non-admins never filter.
+  const showUser = (uid: string) => !isAdmin || selectedUserIds === null || selectedUserIds.includes(uid);
+  const groups = isAdmin ? allGroups.filter((g) => showUser(g.user_id)) : allGroups;
+  const jobRows = isAdmin ? allJobRows.filter((r) => showUser(r.user_id)) : allJobRows;
+
+  // GRAND TOTAL reflects only the visible (selected) users, so it matches the rows
+  // on screen rather than the backend's all-users total.
+  const appsTotals = useMemo(() => {
+    const rows = groups.flatMap((g) => g.rows);
+    if (rows.length === 0) return null;
+    return { daily: aggregateAcrossRows(rows.map((r) => r.daily)), week: sumApplied(rows.map((r) => r.week)) };
+  }, [groups]);
+  const jobTotals = useMemo(() => {
+    if (jobRows.length === 0) return null;
+    const days = jobRows[0].daily.length;
+    const sumCells = (cells: JobCell[]): JobCell => ({
+      uploaded: cells.reduce((a, c) => a + c.uploaded, 0),
+      approved: cells.reduce((a, c) => a + c.approved, 0),
+      rejected: cells.reduce((a, c) => a + c.rejected, 0),
+    });
+    return {
+      daily: Array.from({ length: days }, (_, i) => sumCells(jobRows.map((r) => r.daily[i]))),
+      week: sumCells(jobRows.map((r) => r.week)),
+      lifetime: sumCells(jobRows.map((r) => r.lifetime)),
+    };
+  }, [jobRows]);
+
   const isCurrentWeek = weekStart === todayIsoMonday();
 
   if (isLoading) return <div><span className="spinner" /> Loading metrics…</div>;
@@ -179,7 +329,12 @@ export default function Metrics() {
           onClick={() => setWeekStart(todayIsoMonday())}>
           This week
         </button>
-        <span className="muted" style={{ fontSize: '0.82rem', marginLeft: 'auto' }}>
+        {isAdmin && userOptions.length > 0 && (
+          <div style={{ marginLeft: 'auto' }}>
+            <UserFilter users={userOptions} selected={selectedUserIds} onChange={applyUserFilter} />
+          </div>
+        )}
+        <span className="muted" style={{ fontSize: '0.82rem', marginLeft: isAdmin ? 0 : 'auto' }}>
           {view === 'apps'
             ? 'Each cell = applied / total To-Do'
             : 'Each cell = uploaded ( ✓ approved · ✗ rejected )'}
@@ -264,14 +419,14 @@ export default function Metrics() {
               })
             )}
           </tbody>
-          {isAdmin && data.totals && groups.length > 0 && (
+          {isAdmin && appsTotals && groups.length > 0 && (
             <tfoot>
               <tr className="metrics-grand-total">
                 <td colSpan={2}><strong>GRAND TOTAL</strong></td>
-                {data.totals.daily.map((c, i) => (
+                {appsTotals.daily.map((c, i) => (
                   <td key={i} style={{ textAlign: 'center' }}><CellView cell={c} /></td>
                 ))}
-                <td style={{ textAlign: 'center' }}><CellView cell={data.totals.week} /></td>
+                <td style={{ textAlign: 'center' }}><CellView cell={appsTotals.week} /></td>
               </tr>
             </tfoot>
           )}
@@ -312,15 +467,15 @@ export default function Metrics() {
               ))
             )}
           </tbody>
-          {isAdmin && data.job_totals && jobRows.length > 0 && (
+          {isAdmin && jobTotals && jobRows.length > 0 && (
             <tfoot>
               <tr className="metrics-grand-total">
                 <td><strong>GRAND TOTAL</strong></td>
-                {data.job_totals.daily.map((c, i) => (
+                {jobTotals.daily.map((c, i) => (
                   <td key={i} style={{ textAlign: 'center' }}><JobCellView cell={c} /></td>
                 ))}
-                <td style={{ textAlign: 'center' }}><JobCellView cell={data.job_totals.week} /></td>
-                <td style={{ textAlign: 'center' }}><JobCellView cell={data.job_totals.lifetime} /></td>
+                <td style={{ textAlign: 'center' }}><JobCellView cell={jobTotals.week} /></td>
+                <td style={{ textAlign: 'center' }}><JobCellView cell={jobTotals.lifetime} /></td>
               </tr>
             </tfoot>
           )}

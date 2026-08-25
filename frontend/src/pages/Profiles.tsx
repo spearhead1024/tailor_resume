@@ -2,8 +2,11 @@ import { useState, useRef } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useAuth } from '../lib/auth';
+import { useToast } from '../lib/toast';
 import SourceBadge from '../lib/SourceBadge';
 import { CONTRACTS, CURRENCIES, PERIODS, contractText, salaryText } from '../lib/profile-terms';
+
+const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -55,6 +58,7 @@ const BLANK_PROFILE = {
 export default function Profiles() {
   const { user } = useAuth();
   const qc = useQueryClient();
+  const toast = useToast();
   const isAdmin = !!user?.is_admin;
 
   const [selected, setSelected]     = useState<any | null>(null);
@@ -91,6 +95,53 @@ export default function Profiles() {
       setSelected((prev: any) => ({ ...prev, ...data }));
     },
   });
+
+  const [dlBusy, setDlBusy] = useState(false);
+  // Download a profile's DOCX template (admin-only endpoint). Fetch as a blob so
+  // the Bearer token is sent — a plain <a href> would navigate without it → 401.
+  async function downloadDocx(id: string, filename: string) {
+    if (dlBusy) return;
+    setDlBusy(true);
+    try {
+      const res = await api.raw.get(`/api/profiles/${id}/resume`, { responseType: 'blob' });
+      const blob = res.data as Blob;
+      const name = filename || 'resume.docx';
+      const w = window as any;
+      // Preferred path: the File System Access API gives a real Save dialog and
+      // never races an object-URL revoke.
+      if (typeof w.showSaveFilePicker === 'function') {
+        try {
+          const handle = await w.showSaveFilePicker({
+            suggestedName: name,
+            types: [{ description: 'Word document', accept: { [DOCX_MIME]: ['.docx'] } }],
+          });
+          const writable = await handle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+          return;
+        } catch (e: any) {
+          if (e?.name === 'AbortError') return;   // user cancelled — not an error
+          // otherwise fall through to the anchor method
+        }
+      }
+      // Fallback: anchor + object URL. Revoke LATE (4s) — revoking too early is
+      // what made this download "sometimes work, sometimes not": on a slower
+      // machine the browser hadn't finished reading the blob before the URL was
+      // freed, so the download silently failed.
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+    } catch {
+      toast('Failed to download résumé DOCX', 'error');
+    } finally {
+      setDlBusy(false);
+    }
+  }
 
   const saveMutation = useMutation({
     mutationFn: (p: any) => p.id
@@ -188,7 +239,19 @@ export default function Profiles() {
         summary_char_count: Number(selected.generation_settings?.summary_char_count) || 650,
         skills_count: Number(selected.generation_settings?.skills_count) || 85,
         bullet_counts: bulletCounts,
+        // VPS1 prompt fields — drive the ChatGPT prompt's tech-skill target and
+        // the default per-company bullet count.
+        tech_skills_target: Number(selected.generation_settings?.tech_skills_target) || 70,
+        bullets_per_company_default: Number(selected.generation_settings?.bullets_per_company_default) || 5,
       },
+      // Editable FIXED WORK HISTORY detected from the uploaded DOCX.
+      detected_work_history: (selected.detected_work_history || []).map((d: any) => ({
+        company_name: String(d.company_name || '').trim(),
+        role_title: String(d.role_title || '').trim(),
+        duration: String(d.duration || '').trim(),
+        location: String(d.location || '').trim(),
+        bullets: Number(d.bullets) || 5,
+      })).filter((d: any) => d.company_name),
     };
     saveMutation.mutate(payload);
   }
@@ -500,6 +563,74 @@ export default function Profiles() {
                           onChange={(e) => setSelected({ ...selected, generation_settings: { ...selected.generation_settings, summary_char_count: Number(e.target.value) } })} />
                       </Field>
 
+                      {/* VPS1 prompt controls: the ChatGPT prompt asks for tech_skills_target±5
+                          unique skills, and EXACTLY N bullets per company (default below, or the
+                          per-company value in the FIXED WORK HISTORY table). */}
+                      <div className="row">
+                        <Field label="Tech skills target (prompt)">
+                          <input type="number" min={10} max={200}
+                            value={selected.generation_settings?.tech_skills_target ?? 70}
+                            onChange={(e) => setSelected({ ...selected, generation_settings: { ...selected.generation_settings, tech_skills_target: Number(e.target.value) } })} />
+                        </Field>
+                        <Field label="Bullets / company (default)">
+                          <input type="number" min={1} max={20}
+                            value={selected.generation_settings?.bullets_per_company_default ?? 5}
+                            onChange={(e) => setSelected({ ...selected, generation_settings: { ...selected.generation_settings, bullets_per_company_default: Number(e.target.value) } })} />
+                        </Field>
+                      </div>
+
+                      {/* FIXED WORK HISTORY — auto-detected from the uploaded DOCX; seeds the prompt.
+                          Editable: company, duration, and the exact bullet count per company. */}
+                      <Field label="Fixed work history (detected from DOCX — seeds the ChatGPT prompt)">
+                        {(selected.detected_work_history || []).length === 0 ? (
+                          <span className="muted" style={{ fontSize: '0.85rem' }}>
+                            Upload a DOCX resume above — the companies, durations, and per-company bullet
+                            counts are detected automatically and can be edited here.
+                          </span>
+                        ) : (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            {(selected.detected_work_history as any[]).map((d: any, i: number) => (
+                              <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                                <input style={{ flex: 2 }} placeholder="Company"
+                                  value={d.company_name || ''}
+                                  onChange={(e) => {
+                                    const next = [...(selected.detected_work_history || [])];
+                                    next[i] = { ...next[i], company_name: e.target.value };
+                                    setSelected({ ...selected, detected_work_history: next });
+                                  }} />
+                                <input style={{ flex: 2 }} placeholder="Duration"
+                                  value={d.duration || ''}
+                                  onChange={(e) => {
+                                    const next = [...(selected.detected_work_history || [])];
+                                    next[i] = { ...next[i], duration: e.target.value };
+                                    setSelected({ ...selected, detected_work_history: next });
+                                  }} />
+                                <input type="number" min={1} max={20} style={{ width: 64 }} title="Bullets"
+                                  value={d.bullets ?? 5}
+                                  onChange={(e) => {
+                                    const next = [...(selected.detected_work_history || [])];
+                                    next[i] = { ...next[i], bullets: Number(e.target.value) };
+                                    setSelected({ ...selected, detected_work_history: next });
+                                  }} />
+                                <button type="button" className="ghost danger" title="Remove"
+                                  onClick={() => {
+                                    const next = (selected.detected_work_history || []).filter((_: any, j: number) => j !== i);
+                                    setSelected({ ...selected, detected_work_history: next });
+                                  }}>✕</button>
+                              </div>
+                            ))}
+                            <button type="button" className="secondary" style={{ alignSelf: 'flex-start' }}
+                              onClick={() => setSelected({
+                                ...selected,
+                                detected_work_history: [
+                                  ...(selected.detected_work_history || []),
+                                  { company_name: '', role_title: '', duration: '', location: '', bullets: Number(selected.generation_settings?.bullets_per_company_default) || 5 },
+                                ],
+                              })}>+ Add company</button>
+                          </div>
+                        )}
+                      </Field>
+
                       <Field label="Summary seed (optional — extra context for AI summary generation)">
                         <textarea rows={3}
                           value={selected.summary_seed || ''}
@@ -542,8 +673,17 @@ export default function Profiles() {
                       <Field label="Summary char count">
                         <ReadValue value={String(selected.generation_settings?.summary_char_count || 650)} />
                       </Field>
+                      <div className="row">
+                        <Field label="Tech skills target"><ReadValue value={String(selected.generation_settings?.tech_skills_target ?? 70)} /></Field>
+                        <Field label="Bullets / company (default)"><ReadValue value={String(selected.generation_settings?.bullets_per_company_default ?? 5)} /></Field>
+                      </div>
+                      {(selected.detected_work_history || []).length > 0 && (
+                        <Field label="Fixed work history (prompt)">
+                          <ReadValue value={(selected.detected_work_history as any[]).map((d: any) => `${d.company_name}${d.duration ? ` · ${d.duration}` : ''} → ${d.bullets} bullets`).join('\n')} />
+                        </Field>
+                      )}
                       {(selected.generation_settings?.bullet_counts || []).length > 0 && (
-                        <Field label="Bullet counts per company">
+                        <Field label="Bullet counts per company (legacy)">
                           <ReadValue value={(selected.generation_settings.bullet_counts as number[]).join(', ')} />
                         </Field>
                       )}
@@ -560,11 +700,20 @@ export default function Profiles() {
                 <div style={{ marginTop: '1.25rem', borderTop: '1px solid var(--border)', paddingTop: '1rem' }}>
                   <Field label="Uploaded resume DOCX template">
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                      {/* Show current filename if one exists */}
+                      {/* Show current filename + admin-only download */}
                       {(selected.uploaded_resume_filename || selected.uploaded_resume?.filename) && (
-                        <span className="muted">
-                          {selected.uploaded_resume_filename || selected.uploaded_resume?.filename}
-                        </span>
+                        <>
+                          <span className="muted">
+                            {selected.uploaded_resume_filename || selected.uploaded_resume?.filename}
+                          </span>
+                          {selected.id && (
+                            <button type="button" className="secondary" disabled={dlBusy}
+                              style={{ fontSize: '0.8rem', padding: '2px 10px' }}
+                              onClick={() => downloadDocx(selected.id, selected.uploaded_resume_filename || selected.uploaded_resume?.filename || 'resume.docx')}>
+                              {dlBusy ? '…' : '⬇ Download'}
+                            </button>
+                          )}
+                        </>
                       )}
 
                       {editing && (

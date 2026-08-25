@@ -3,7 +3,6 @@ import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useToast } from '../lib/toast';
 import { Role, useAuth } from '../lib/auth';
-import SourceBadge from '../lib/SourceBadge';
 import { TimezonePicker } from '../lib/TimezonePicker';
 
 function fmtWhen(iso?: string): string {
@@ -118,6 +117,67 @@ function CheckboxDropdown({
   );
 }
 
+/** Search-and-add picker for team members — the "add a tag/skill" pattern. A button
+ *  opens a dropdown that lists the CANDIDATE callers (unassigned to any team),
+ *  searchable by name/username; clicking one adds it. Closes on outside click. */
+function AddMemberPicker({ candidates, onAdd, disabled }: {
+  candidates: { id: string; name: string; username: string }[];
+  onAdd: (id: string) => void;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState('');
+  const [hl, setHl] = useState(0);
+  const ref = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+  useEffect(() => { if (open) { setQ(''); setHl(0); setTimeout(() => inputRef.current?.focus(), 0); } }, [open]);
+
+  const terms = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const filtered = terms.length
+    ? candidates.filter((c) => { const s = `${c.name} ${c.username}`.toLowerCase(); return terms.every((t) => s.includes(t)); })
+    : candidates;
+  const pick = (id: string) => { onAdd(id); setOpen(false); };
+
+  return (
+    <div ref={ref} className="tz-picker" style={{ display: 'inline-block' }}>
+      <button type="button" className="secondary" disabled={disabled}
+        onClick={() => setOpen((o) => !o)} style={{ fontSize: '0.8rem', padding: '0.25rem 0.7rem' }}>
+        + Add caller ▾
+      </button>
+      {open && (
+        <div className="card tz-menu" style={{ minWidth: 240 }}>
+          <input ref={inputRef} className="tz-search" value={q} placeholder="Search unassigned callers…"
+            onChange={(e) => { setQ(e.target.value); setHl(0); }}
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowDown') { e.preventDefault(); setHl((h) => Math.min(filtered.length - 1, h + 1)); }
+              else if (e.key === 'ArrowUp') { e.preventDefault(); setHl((h) => Math.max(0, h - 1)); }
+              else if (e.key === 'Enter') { e.preventDefault(); if (filtered[hl]) pick(filtered[hl].id); }
+              else if (e.key === 'Escape') { e.preventDefault(); setOpen(false); }
+            }} />
+          <div className="tz-list">
+            {filtered.length === 0 && <div className="muted" style={{ padding: 8, fontSize: '0.82rem' }}>
+              {candidates.length === 0 ? 'No unassigned callers' : 'No matches'}
+            </div>}
+            {filtered.map((c, i) => (
+              <div key={c.id} className={'tz-opt' + (i === hl ? ' tz-opt--hl' : '')}
+                onMouseEnter={() => setHl(i)} onClick={() => pick(c.id)}>
+                {c.name || c.username} <span className="muted">@{c.username}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Users() {
   const qc = useQueryClient();
   const toast = useToast();
@@ -125,13 +185,15 @@ export default function Users() {
   const isAdmin = !!me?.is_admin;
   const myTeam = String(me?.team_id || '').trim();
 
-  const { data: users = [], isLoading } = useQuery({ queryKey: ['users'], queryFn: () => api.get<any[]>('/api/users') });
+  const { data: allUsers = [], isLoading } = useQuery({ queryKey: ['users'], queryFn: () => api.get<any[]>('/api/users') });
   const { data: profiles = [] } = useQuery({ queryKey: ['profiles'], queryFn: () => api.get<any[]>('/api/profiles') });
   const { data: teams = [] } = useQuery({ queryKey: ['teams'], queryFn: () => api.get<Team[]>('/api/teams') });
 
+  // VPS_1 users are never shown here — this tab manages VPS_2 accounts only.
+  const users = allUsers.filter((u: any) => u.source !== 'VPS_1');
+
   const [showForm, setShowForm] = useState(false);
-  const [roleFilter, setRoleFilter] = useState<Role | 'all' | 'teams'>(isAdmin ? 'all' : 'teams');   // "see users by role"
-  const [openTeams, setOpenTeams] = useState<Set<string>>(new Set());
+  const [roleFilter, setRoleFilter] = useState<Role | 'teams'>('teams');   // sub-tab: Teams or a role
   const [newTeamName, setNewTeamName] = useState('');
 
   const afterTeams = () => { qc.invalidateQueries({ queryKey: ['teams'] }); qc.invalidateQueries({ queryKey: ['users'] }); };
@@ -228,7 +290,7 @@ export default function Users() {
   const roleCount = (role: Role) => users.filter((u: any) => inRole(u, role)).length;
   const noRoleCount = users.filter((u: any) => !(u.roles || []).length).length;
   const filtered = (() => {
-    let list = (roleFilter === 'all' || roleFilter === 'teams')
+    let list = roleFilter === 'teams'
       ? users
       : users.filter((u: any) => inRole(u, roleFilter));
     // Caller sub-tab: narrow by tech stack. Every search term must match some stack (AND), each term a
@@ -243,6 +305,14 @@ export default function Users() {
     return list;
   })();
   const callerView = roleFilter === 'caller';   // the caller sub-tab swaps two columns for tech + CV
+
+  // Which columns each role sub-tab shows. Source is gone everywhere (VPS_1 users
+  // are filtered out). Name/Email hide on the caller view (checked in the dropdown).
+  //   Team column:     callers + team managers only  (admins/bidders/job-adders don't belong to a team)
+  //   Assigned profiles: bidders + call-board managers only (admins/job-adders/managers don't apply to jobs)
+  const showTeamCol = roleFilter === 'caller' || roleFilter === 'manager';
+  const showAssignedCol = roleFilter === 'bidder' || roleFilter === 'call_board_manager';
+  const showNameEmail = !callerView;
 
   return (
     <div>
@@ -295,10 +365,6 @@ export default function Users() {
           Teams <span style={{ opacity: 0.6 }}>{teams.length}</span>
         </button>
         <span style={{ width: 1, alignSelf: 'stretch', background: 'var(--border, #2a2a2a)', margin: '0 2px' }} />
-        <button className={roleFilter === 'all' ? '' : 'secondary'} onClick={() => setRoleFilter('all')}
-          style={{ fontSize: '0.82rem', padding: '0.32rem 0.7rem' }}>
-          All <span style={{ opacity: 0.6 }}>{users.length}</span>
-        </button>
         {ALL_ROLES.map((r) => (
           <button key={r.value} className={roleFilter === r.value ? '' : 'secondary'} onClick={() => setRoleFilter(r.value)}
             style={{ fontSize: '0.82rem', padding: '0.32rem 0.7rem' }}>
@@ -321,44 +387,18 @@ export default function Users() {
       {/* ── Teams tree: ungrouped callers at the top level, then each team as an expandable group ── */}
       {roleFilter === 'teams' && (() => {
         const callers = users.filter(isCaller);
-        const ungrouped = callers.filter((u: any) => !teamOf(u));
-        const setTeam = (u: any, team_id: string) => updateMutation.mutate({ id: u.id, payload: { team_id } });
-        const teamPicker = (u: any) => (
-          <select value={teamOf(u)} disabled={!isAdmin || updateMutation.isPending}
-            onChange={(e) => setTeam(u, e.target.value)} style={{ fontSize: '0.8rem' }}
-            title={isAdmin ? 'Move this caller to a team' : 'Only an admin can move callers between teams'}>
-            <option value="">— no team —</option>
-            {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-          </select>
-        );
-        const callerRow = (u: any, indent: number) => (
-          <div key={u.id} className="card" style={{
-            display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', marginBottom: 6,
-            marginLeft: indent, background: indent ? 'var(--bg-soft, #1c1c1c)' : undefined,
-          }}>
-            <span style={{ fontWeight: 500 }}>{u.full_name || u.username}</span>
-            <span className="muted" style={{ fontSize: '0.8rem' }}>@{u.username}</span>
-            {u.status !== 'approved' && (
-              <span className="muted" style={{ fontSize: '0.75rem', border: '1px solid currentColor', borderRadius: 999, padding: '0 6px' }}>
-                {u.status}
-              </span>
-            )}
-            <span style={{ flex: 1 }} />
-            <select value={u.status} disabled={updateMutation.isPending}
-              onChange={(e) => updateMutation.mutate({ id: u.id, payload: { status: e.target.value } })}
-              style={{ fontSize: '0.8rem' }} title="Approve or suspend this caller">
-              <option value="approved">Approved</option><option value="pending">Pending</option><option value="disabled">Disabled</option>
-            </select>
-            {teamPicker(u)}
-          </div>
-        );
+        const unassigned = callers
+          .filter((u: any) => !teamOf(u))
+          .map((u: any) => ({ id: u.id, name: u.full_name || u.username, username: u.username }));
+        const addToTeam = (uid: string, team_id: string) => updateMutation.mutate({ id: uid, payload: { team_id } });
+        const removeFromTeam = (uid: string) => updateMutation.mutate({ id: uid, payload: { team_id: '' } });
 
         return (
           <>
             <p className="muted">
-              Callers grouped into teams. A <strong>Team Manager</strong> runs one team: they create and approve that
-              team's callers, and on the interview board they can hand a call to any caller on their team and set
-              Approved / Status / Feedback — nothing else, and never outside their team.
+              Each <strong>Team</strong> is a set of callers run by a <strong>Team Manager</strong>. Add callers to a
+              team from the unassigned list; remove one with the ✕ on its chip (it becomes unassigned — no account is
+              deleted). On the interview board a manager can hand a call to any caller on their team.
             </p>
 
             {isAdmin && (
@@ -371,28 +411,22 @@ export default function Users() {
                   disabled={!newTeamName.trim() || createTeam.isPending}>
                   {createTeam.isPending ? <span className="spinner" /> : '+ Create team'}
                 </button>
+                <span style={{ flex: 1 }} />
+                <span className="muted" style={{ fontSize: '0.8rem' }}>{unassigned.length} unassigned caller{unassigned.length === 1 ? '' : 's'}</span>
               </div>
             )}
 
-            {/* ungrouped callers, top level */}
-            {ungrouped.map((u: any) => callerRow(u, 0))}
-
-            {/* each team, expandable */}
+            {/* One card per team: header (name · counts · manage) then member chips + add-picker. */}
             {teams.map((t) => {
               const members = callers.filter((u: any) => teamOf(u) === t.id);
               const mgrs = users.filter((u: any) => isTeamManager(u) && teamOf(u) === t.id);
-              const open = openTeams.has(t.id);
               return (
-                <div key={t.id} style={{ marginBottom: 6 }}>
-                  <div className="card" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px' }}>
-                    <button className="ghost" title={open ? 'Collapse' : 'Expand'}
-                      onClick={() => setOpenTeams((s) => { const n = new Set(s); n.has(t.id) ? n.delete(t.id) : n.add(t.id); return n; })}
-                      style={{ padding: '0 4px' }}>{open ? '▾' : '▸'}</button>
+                <div key={t.id} className="card" style={{ marginBottom: 10, padding: '12px 14px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: members.length || isAdmin ? 10 : 0 }}>
                     <strong>{t.name}</strong>
                     <span className="muted" style={{ fontSize: '0.8rem' }}>
                       {members.length} caller{members.length === 1 ? '' : 's'}
-                      {mgrs.length > 0 && <> · manager: {mgrs.map((m: any) => m.full_name || m.username).join(', ')}</>}
-                      {mgrs.length === 0 && <> · <em>no manager</em></>}
+                      {mgrs.length > 0 ? <> · manager: {mgrs.map((m: any) => m.full_name || m.username).join(', ')}</> : <> · <em>no manager</em></>}
                     </span>
                     <span style={{ flex: 1 }} />
                     {isAdmin && (
@@ -402,24 +436,40 @@ export default function Users() {
                           Rename
                         </button>
                         <button className="danger" style={{ fontSize: '0.78rem', padding: '0.25rem 0.6rem' }}
-                          onClick={() => { if (confirm(`Delete "${t.name}"? Its ${members.length} caller(s) become ungrouped — no account is deleted.`)) removeTeam.mutate(t.id); }}>
+                          onClick={() => { if (confirm(`Delete "${t.name}"? Its ${members.length} caller(s) become unassigned — no account is deleted.`)) removeTeam.mutate(t.id); }}>
                           Delete
                         </button>
                       </>
                     )}
                   </div>
-                  {open && (members.length === 0
-                    ? <div className="card" style={{ marginLeft: 28, marginTop: 6, padding: '8px 12px' }}>
-                        <span className="muted">No callers yet{isAdmin ? ' — assign one with the team dropdown above.' : '.'}</span>
-                      </div>
-                    : <div style={{ marginTop: 6 }}>{members.map((u: any) => callerRow(u, 28))}</div>
-                  )}
+
+                  {/* member chips + add-picker (the "add skills" pattern) */}
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                    {members.length === 0 && <span className="muted" style={{ fontSize: '0.82rem' }}>No callers yet.</span>}
+                    {members.map((u: any) => (
+                      <span key={u.id} title={`@${u.username}${u.status !== 'approved' ? ` · ${u.status}` : ''}`}
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: '0.82rem',
+                          background: 'var(--panel-2, #262626)', border: '1px solid var(--border-soft, #333)',
+                          borderRadius: 999, padding: '2px 4px 2px 10px', opacity: u.status === 'approved' ? 1 : 0.6 }}>
+                        {u.full_name || u.username}
+                        {isAdmin && (
+                          <button className="ghost" title="Remove from team" disabled={updateMutation.isPending}
+                            onClick={() => removeFromTeam(u.id)}
+                            style={{ padding: '0 4px', lineHeight: 1, fontSize: '0.9rem', color: 'var(--muted)' }}>✕</button>
+                        )}
+                      </span>
+                    ))}
+                    {isAdmin && (
+                      <AddMemberPicker candidates={unassigned} disabled={updateMutation.isPending}
+                        onAdd={(uid) => addToTeam(uid, t.id)} />
+                    )}
+                  </div>
                 </div>
               );
             })}
 
-            {teams.length === 0 && ungrouped.length === 0 && (
-              <div className="card"><span className="muted">No callers yet.</span></div>
+            {teams.length === 0 && (
+              <div className="card"><span className="muted">No teams yet{isAdmin ? ' — create one above.' : '.'}</span></div>
             )}
           </>
         );
@@ -429,95 +479,85 @@ export default function Users() {
         <div className="card"><span className="muted">No users with this role.</span></div>
       ) : (
       <table>
-        {/* The caller sub-tab is about who can take a call, so it swaps the two bidder-oriented columns
-            (Bid method / Assigned profiles) for what matters there: their tech skills and CV. */}
+        {/* Columns are role-specific (see showTeamCol / showAssignedCol above). The caller
+            view shows Tech skills + Resume; other roles show only what applies to them. */}
         <thead><tr>
-          {/* Caller view drops Source (all callers are VPS_2) and Name/Email (check them in the
-              dropdown), and gives Tech skills a wider column since it's the point of this view. */}
-          {!callerView && <th>Source</th>}
           <th>Username</th>
-          {!callerView && <><th>Name</th><th>Email</th></>}
-          <th>Roles</th><th>Team</th>
-          <th style={callerView ? { minWidth: 280 } : undefined}>{callerView ? 'Tech skills' : 'Bid method'}</th>
+          {showNameEmail && <><th>Name</th><th>Email</th></>}
+          <th>Roles</th>
+          {showTeamCol && <th>Team</th>}
+          {callerView && <th style={{ minWidth: 280 }}>Tech skills</th>}
           <th>Status</th>
-          <th>{callerView ? 'Resume' : 'Assigned profiles'}</th>
+          {callerView && <th>Resume</th>}
+          {showAssignedCol && <th>Assigned profiles</th>}
           <th></th>
         </tr></thead>
         <tbody>
-          {filtered.map((u) => { const remote = u.source === 'VPS_1'; return (
+          {filtered.map((u) => (
             <Fragment key={u.id}>
             <tr>
-              {!callerView && <td><SourceBadge source={u.source} /></td>}
               <td>
                 <button className="ghost u-expand" title="Full profile" onClick={() => setExpanded(expanded === u.id ? null : u.id)}>{expanded === u.id ? '▾' : '▸'}</button>
                 {u.username}
               </td>
-              {!callerView && <><td>{u.full_name}</td><td>{u.email}</td></>}
-              <td>{remote
-                ? <span className="muted">{(u.roles || []).join(', ') || '—'}</span>
-                : <CheckboxDropdown options={ALL_ROLES} selected={u.roles || []}
+              {showNameEmail && <><td>{u.full_name}</td><td>{u.email}</td></>}
+              <td><CheckboxDropdown options={ALL_ROLES} selected={u.roles || []}
                     onChange={(roles) => updateRoles(u, roles as Role[])}
-                    disabled={!isAdmin || updateMutation.isPending} placeholder="No roles" />}</td>
-              <td>
-                {/* Team for BOTH callers and managers — a manager's team is the one they run.
-                    (The Teams tree only lists callers, so a manager can only be placed from here.) */}
-                {remote ? <span className="muted">—</span> : (isCaller(u) || isTeamManager(u)) ? (
-                  <select value={teamOf(u)} disabled={!isAdmin || updateMutation.isPending}
-                    onChange={(e) => updateMutation.mutate({ id: u.id, payload: { team_id: e.target.value } })}
-                    title={isTeamManager(u) ? 'The team this manager runs' : 'The team this caller belongs to'}>
-                    <option value="">— none —</option>
-                    {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-                  </select>
-                ) : <span className="muted">—</span>}
-              </td>
-              <td>
-                {callerView
-                  ? (u.tech_stacks || []).length
-                      ? <span title={(u.tech_stacks || []).join(', ')}>{(u.tech_stacks || []).join(', ')}</span>
-                      : <span className="muted">—</span>
-                  : !remote && (u.roles || []).includes('bidder') ? (
-                    <select value={u.bid_method ?? 2}
-                      onChange={(e) => updateMutation.mutate({ id: u.id, payload: { bid_method: Number(e.target.value) } })}
-                      disabled={updateMutation.isPending} title="Which bidding workflow this bidder sees">
-                      <option value={1}>Method 1 · Resumes + Apply</option>
-                      <option value={2}>Method 2 · Bid</option>
+                    disabled={!isAdmin || updateMutation.isPending} placeholder="No roles" /></td>
+              {showTeamCol && (
+                <td>
+                  {/* Team for callers and managers — a manager's team is the one they run. */}
+                  {(isCaller(u) || isTeamManager(u)) ? (
+                    <select value={teamOf(u)} disabled={!isAdmin || updateMutation.isPending}
+                      onChange={(e) => updateMutation.mutate({ id: u.id, payload: { team_id: e.target.value } })}
+                      title={isTeamManager(u) ? 'The team this manager runs' : 'The team this caller belongs to'}>
+                      <option value="">— none —</option>
+                      {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
                     </select>
                   ) : <span className="muted">—</span>}
-              </td>
+                </td>
+              )}
+              {callerView && (
+                <td>
+                  {(u.tech_stacks || []).length
+                    ? <span title={(u.tech_stacks || []).join(', ')}>{(u.tech_stacks || []).join(', ')}</span>
+                    : <span className="muted">—</span>}
+                </td>
+              )}
               <td>
-                {remote
-                  ? <span className="muted">{u.status || '—'}</span>
-                  : <select value={u.status} onChange={(e) => updateMutation.mutate({ id: u.id, payload: { status: e.target.value } })}>
-                      <option value="approved">Approved</option><option value="pending">Pending</option><option value="disabled">Disabled</option>
-                    </select>}
+                <select value={u.status} onChange={(e) => updateMutation.mutate({ id: u.id, payload: { status: e.target.value } })}>
+                  <option value="approved">Approved</option><option value="pending">Pending</option><option value="disabled">Disabled</option>
+                </select>
               </td>
+              {callerView && (
+                <td>
+                  {u.uploaded_resume?.filename
+                    ? <button className="link" style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}
+                        title={u.uploaded_resume.filename} onClick={() => openCv(u.id)}>📄 CV</button>
+                    : <span className="muted">—</span>}
+                </td>
+              )}
+              {showAssignedCol && (
+                <td>
+                  <CheckboxDropdown
+                    options={profiles.map((p: any) => ({ value: p.id, label: p.name }))}
+                    selected={u.assigned_profile_ids || []}
+                    onChange={(ids) => updateMutation.mutate({ id: u.id, payload: { assigned_profile_ids: ids } })}
+                    disabled={updateMutation.isPending}
+                    placeholder="No profiles"
+                    summary={(labels) => (labels.length > 2 ? `${labels.length} profiles` : labels.join(', '))}
+                  />
+                </td>
+              )}
               <td>
-                {callerView
-                  ? (u.uploaded_resume?.filename
-                      ? <button className="link" style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}
-                          title={u.uploaded_resume.filename} onClick={() => openCv(u.id)}>📄 CV</button>
-                      : <span className="muted">—</span>)
-                  : remote ? <span className="muted">—</span> : (
-                    <CheckboxDropdown
-                      options={profiles.map((p: any) => ({ value: p.id, label: p.name }))}
-                      selected={u.assigned_profile_ids || []}
-                      onChange={(ids) => updateMutation.mutate({ id: u.id, payload: { assigned_profile_ids: ids } })}
-                      disabled={updateMutation.isPending}
-                      placeholder="No profiles"
-                      summary={(labels) => (labels.length > 2 ? `${labels.length} profiles` : labels.join(', '))}
-                    />)}
-              </td>
-              <td>
-                {remote
-                  ? <span className="muted" title="This account lives on VPS_1 — manage it there.">read-only</span>
-                  : isAdmin
+                {isAdmin
                   ? <button className="danger" onClick={() => { if (confirm('Delete user?')) deleteMutation.mutate(u.id); }}>Delete</button>
                   : <span className="muted" title="Only an admin can delete an account — you can set the status to Disabled instead.">—</span>}
               </td>
             </tr>
             {expanded === u.id && (
               <tr className="u-detail-row">
-                <td colSpan={callerView ? 7 : 10}>
+                <td colSpan={4 + (showNameEmail ? 2 : 0) + (showTeamCol ? 1 : 0) + (callerView ? 2 : 0) + (showAssignedCol ? 1 : 0)}>
                   <div className="u-detail">
                     <div className="u-detail-hd">
                       {u.avatar_url
@@ -528,34 +568,22 @@ export default function Users() {
                         <div className="muted" style={{ fontSize: '0.8rem' }}>@{u.username} · {(u.roles || []).join(', ') || 'no role'}</div>
                       </div>
                     </div>
-                    {/* Admins may edit EVERY field of a LOCAL user here — each commits on blur through the
-                        same PATCH the row controls use. VPS_1 users stay read-only (their account lives
-                        on VPS_1). `up` is a tiny shorthand for "save one field of this user". */}
+                    {/* Admins may edit EVERY field of a user here — each commits on blur through the
+                        same PATCH the row controls use. `up` is a tiny shorthand for "save one field". */}
                     {(() => { const up = (payload: any) => updateMutation.mutate({ id: u.id, payload }); return (
                     <>
                     <div className="u-detail-grid">
-                      {remote ? <>
-                        <Field label="Full name" value={u.full_name} />
-                        <Field label="Email" value={u.email} />
-                        <Field label="Country" value={u.country} />
-                        <Field label="Time zone" value={u.timezone || undefined} />
-                        <Field label="Telegram" value={u.telegram} />
-                        <Field label="WhatsApp" value={u.whatsapp} />
-                        <Field label="Discord" value={u.discord} />
-                      </> : <>
-                        <EditField label="Full name" value={u.full_name || ''} onSave={(v) => up({ full_name: v })} />
-                        <EditField label="Email" value={u.email || ''} type="email" onSave={(v) => up({ email: v })} />
-                        <EditField label="Country" value={u.country || ''} onSave={(v) => up({ country: v })} />
-                        <Field label="Time zone" value={
-                          <TimezonePicker value={u.timezone || ''}
-                            onChange={(tz) => { if (tz !== (u.timezone || '')) up({ timezone: tz }); }} />
-                        } />
-                        <EditField label="Telegram" value={u.telegram || ''} onSave={(v) => up({ telegram: v })} placeholder="@handle" />
-                        <EditField label="WhatsApp" value={u.whatsapp || ''} onSave={(v) => up({ whatsapp: v })} placeholder="+1 555…" />
-                        <EditField label="Discord" value={u.discord || ''} onSave={(v) => up({ discord: v })} placeholder="user#0000" />
-                      </>}
+                      <EditField label="Full name" value={u.full_name || ''} onSave={(v) => up({ full_name: v })} />
+                      <EditField label="Email" value={u.email || ''} type="email" onSave={(v) => up({ email: v })} />
+                      <EditField label="Country" value={u.country || ''} onSave={(v) => up({ country: v })} />
+                      <Field label="Time zone" value={
+                        <TimezonePicker value={u.timezone || ''}
+                          onChange={(tz) => { if (tz !== (u.timezone || '')) up({ timezone: tz }); }} />
+                      } />
+                      <EditField label="Telegram" value={u.telegram || ''} onSave={(v) => up({ telegram: v })} placeholder="@handle" />
+                      <EditField label="WhatsApp" value={u.whatsapp || ''} onSave={(v) => up({ whatsapp: v })} placeholder="+1 555…" />
+                      <EditField label="Discord" value={u.discord || ''} onSave={(v) => up({ discord: v })} placeholder="user#0000" />
                       <Field label="Status" value={u.status} />
-                      {(u.roles || []).includes('bidder') && <Field label="Bid method" value={u.bid_method === 1 ? 'Method 1 · Resumes + Apply' : 'Method 2 · Bid'} />}
                       <Field label="Created" value={fmtWhen(u.created_at)} />
                       <Field label="Approved" value={fmtWhen(u.approved_at)} />
                       <Field label="User ID" value={<code style={{ fontSize: '0.78rem' }}>{u.id}</code>} />
@@ -565,19 +593,17 @@ export default function Users() {
                         Account page). Tech stacks are editable; the CV is view/download only. */}
                     {(u.roles || []).includes('caller') && (
                       <div className="u-detail-grid" style={{ marginTop: 8 }}>
-                        {remote
-                          ? <Field label="Tech stacks" value={(u.tech_stacks || []).join(', ')} />
-                          : <EditField label="Tech stacks" value={(u.tech_stacks || []).join(', ')}
-                              placeholder="React, Node.js, Go…"
-                              onSave={(v) => up({ tech_stacks: v.split(',').map((s) => s.trim()).filter(Boolean) })} />}
+                        <EditField label="Tech stacks" value={(u.tech_stacks || []).join(', ')}
+                          placeholder="React, Node.js, Go…"
+                          onSave={(v) => up({ tech_stacks: v.split(',').map((s) => s.trim()).filter(Boolean) })} />
                         <Field label="CV / Resume" value={
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                             {u.uploaded_resume?.filename
                               ? <button className="link" style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}
                                   onClick={() => openCv(u.id)}>{u.uploaded_resume.filename}</button>
                               : <span className="muted">No CV</span>}
-                            {/* Admin may upload/replace a caller's CV (PDF/DOCX); VPS_1 users are read-only. */}
-                            {!remote && isAdmin && (<>
+                            {/* Admin may upload/replace a caller's CV (PDF/DOCX). */}
+                            {isAdmin && (<>
                               <input ref={cvInputRef} type="file" accept=".pdf,.docx" style={{ display: 'none' }}
                                 onChange={(e) => { const f = e.target.files?.[0]; if (f) cvUpload.mutate({ id: u.id, file: f }); e.currentTarget.value = ''; }} />
                               <button className="secondary" disabled={cvUpload.isPending}
@@ -594,33 +620,24 @@ export default function Users() {
                       </div>
                     )}
 
-                    {remote ? (u.emergency_contacts && (
-                      <div className="u-field" style={{ marginTop: 8 }}>
-                        <div className="u-field-lbl">Emergency contacts</div>
-                        <div className="u-field-val" style={{ whiteSpace: 'pre-wrap' }}>{u.emergency_contacts}</div>
+                    <div className="u-field" style={{ marginTop: 8 }}>
+                      <div className="u-field-lbl">Emergency contacts</div>
+                      <textarea rows={2} defaultValue={u.emergency_contacts || ''} style={{ width: '100%' }}
+                        placeholder="Name · relationship · phone (one per line)"
+                        onBlur={(e) => { if (e.target.value !== (u.emergency_contacts || '')) up({ emergency_contacts: e.target.value }); }} />
+                    </div>
+                    {/* Set a new password for this user (leave blank to keep the current one). */}
+                    <div className="u-field" style={{ marginTop: 8 }}>
+                      <div className="u-field-lbl">Set new password</div>
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                        <input type="text" placeholder="new password (≥ 10 chars)" style={{ maxWidth: 240 }}
+                          value={pwFor[u.id] || ''} onChange={(e) => setPwFor((m) => ({ ...m, [u.id]: e.target.value }))} />
+                        <button className="secondary" disabled={(pwFor[u.id] || '').length < 10}
+                          onClick={() => { up({ password: pwFor[u.id] }); setPwFor((m) => ({ ...m, [u.id]: '' })); toast('Password updated', 'success'); }}>
+                          Set password
+                        </button>
                       </div>
-                    )) : (
-                      <>
-                        <div className="u-field" style={{ marginTop: 8 }}>
-                          <div className="u-field-lbl">Emergency contacts</div>
-                          <textarea rows={2} defaultValue={u.emergency_contacts || ''} style={{ width: '100%' }}
-                            placeholder="Name · relationship · phone (one per line)"
-                            onBlur={(e) => { if (e.target.value !== (u.emergency_contacts || '')) up({ emergency_contacts: e.target.value }); }} />
-                        </div>
-                        {/* Set a new password for this user (leave blank to keep the current one). */}
-                        <div className="u-field" style={{ marginTop: 8 }}>
-                          <div className="u-field-lbl">Set new password</div>
-                          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                            <input type="text" placeholder="new password (≥ 10 chars)" style={{ maxWidth: 240 }}
-                              value={pwFor[u.id] || ''} onChange={(e) => setPwFor((m) => ({ ...m, [u.id]: e.target.value }))} />
-                            <button className="secondary" disabled={(pwFor[u.id] || '').length < 10}
-                              onClick={() => { up({ password: pwFor[u.id] }); setPwFor((m) => ({ ...m, [u.id]: '' })); toast('Password updated', 'success'); }}>
-                              Set password
-                            </button>
-                          </div>
-                        </div>
-                      </>
-                    )}
+                    </div>
                     </>
                     ); })()}
                   </div>
@@ -628,7 +645,7 @@ export default function Users() {
               </tr>
             )}
             </Fragment>
-          ); })}
+          ))}
         </tbody>
       </table>
       ))}
