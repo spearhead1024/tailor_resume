@@ -187,11 +187,15 @@ function displayValue(row: Row, colId: string): any {
 }
 // Displayed names that differ from the persisted column name (display-only override; used for headers AND cells).
 const DISPLAY_NAME: Record<string, string> = { c_account: 'Profile Name(Country)', c_jd: 'Job Description', c_feedback: 'Chat & Feedback' };
-// Select columns offered as dropdown filters above the table (c_caller is admin-only).
-const FILTER_COLS = ['c_type', 'c_approved', 'c_status', 'c_account', 'c_caller'];
-// Filters only admins/managers get. The API hands every user the full column list (the frontend is
+// Select columns offered as dropdown filters above the table (c_caller + c_creater are admin-only).
+const FILTER_COLS = ['c_type', 'c_approved', 'c_status', 'c_account', 'c_caller', 'c_creater'];
+// Filters only admins get. The API hands every user the full column list (the frontend is
 // what hides them), so without this a caller would be offered a Caller filter they can't see.
-const STAFF_ONLY_FILTERS = new Set(['c_caller']);
+// c_creater is in ROLE_HIDDEN for managers+callers, so listing it here keeps the filter admin-only.
+const STAFF_ONLY_FILTERS = new Set(['c_caller', 'c_creater']);
+// Labels for the FILTER dropdowns only (kept separate from DISPLAY_NAME so the column header/modal
+// titles are unaffected). Creater → "Creator" in the filter bar.
+const FILTER_LABEL: Record<string, string> = { c_creater: 'Creator' };
 // Created_at is data-only now: hidden from the grid, surfaced on Index hover (see the row render).
 function buildStackHidden(merged: Record<string, SubField[]>, extra: string[] = []): Set<string> {
   return new Set<string>([...Object.values(merged).flatMap((fs) => fs.slice(1).map((f) => f.colId)), 'c_created', ...extra]);
@@ -1409,6 +1413,40 @@ export default function Interviews() {
     const t = window.setTimeout(() => setFlashRow(null), 1500);
     return () => window.clearTimeout(t);
   }, [flashRow]);
+  // FLIP animation for reordering: when a Scheduled_at edit moves a row to its new
+  // chronological slot, the row would otherwise JUMP instantly and the user loses
+  // track of it. After each render we snapshot every visible row's Y position; when a
+  // row's position changed vs the previous render, we invert it to its old spot then
+  // transition transform→0 so it visibly SLIDES into place. Paired with the blue flash
+  // + scroll-to on the edited row (flashRow), the move is easy to follow.
+  //
+  // NB: this hook (and its refs) MUST live above the `if (loading) return` guards
+  // below — a hook placed after an early return runs a different number of times
+  // across renders and crashes the whole page ("rendered more hooks…").
+  const flipPos = useRef<Map<string, number>>(new Map());
+  useLayoutEffect(() => {
+    const prev = flipPos.current;
+    const next = new Map<string, number>();
+    const rows = Array.from(document.querySelectorAll<HTMLTableRowElement>('tr.iv-row[data-rid]'));
+    for (const tr of rows) {
+      const id = tr.getAttribute('data-rid') || '';
+      const top = tr.getBoundingClientRect().top;
+      next.set(id, top);
+      const old = prev.get(id);
+      if (old !== undefined) {
+        const delta = old - top;
+        if (Math.abs(delta) > 1) {
+          tr.style.transition = 'none';
+          tr.style.transform = `translateY(${delta}px)`;
+          requestAnimationFrame(() => {
+            tr.style.transition = 'transform 320ms cubic-bezier(0.22, 1, 0.36, 1)';
+            tr.style.transform = '';
+          });
+        }
+      }
+    }
+    flipPos.current = next;
+  });   // no dep array: runs after every render; only rows that actually moved animate
   useEffect(() => {
     const up = () => { dragging.current = false; };
     document.addEventListener('mouseup', up);
@@ -2036,6 +2074,7 @@ export default function Interviews() {
   // "Recent N" keeps the latest N schedules; unscheduled rows are always shown (the limit never hides them).
   const shownScheduled = limit > 0 && scheduled.length > limit ? scheduled.slice(scheduled.length - limit) : scheduled;
   const viewRows = [...shownScheduled, ...unscheduled];
+
   // Exactly ONE row is highlighted: the NEXT upcoming call — the soonest Scheduled_at still in the
   // future. `shownScheduled` is already sorted ascending, so the first one at/after now is it. Calls
   // that have passed, and every call after the next one, stay uncoloured.
@@ -2159,7 +2198,7 @@ export default function Interviews() {
         {FILTER_COLS.filter((cid) => (!STAFF_ONLY_FILTERS.has(cid) || !L.ROLE_HIDDEN.has(cid)) && colById[cid]).map((cid) => {
           const col = colById[cid];
           return (
-            <FilterDropdown key={cid} label={DISPLAY_NAME[cid] || col.name} options={filterOptionsFor(cid)}
+            <FilterDropdown key={cid} label={FILTER_LABEL[cid] || DISPLAY_NAME[cid] || col.name} options={filterOptionsFor(cid)}
               selected={colFlt[cid] || []} onChange={(next) => setColFlt((f) => ({ ...f, [cid]: next }))} />
           );
         })}
