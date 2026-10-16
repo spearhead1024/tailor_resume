@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useToast } from '../lib/toast';
+import CompanyBadge, { type CompanyInfo } from '../lib/CompanyBadge';
 
 type Edu = { university: string; degree: string; duration: string; location: string };
 type Work = { company_name: string; duration: string; location: string; legacy_role: string };
@@ -13,6 +14,7 @@ type BidProfile = {
 type BidJob = {
   id: string; company: string; job_title: string; region: string;
   link: string; submitted_at: string; resume_id: string;
+  company_info?: CompanyInfo | null;
 };
 type JobDetail = BidJob & { description: string };
 type StepState = 'active' | 'done' | 'todo';
@@ -336,6 +338,7 @@ function BidJobView({ job, profile, onAdvance }: { job: BidJob; profile: BidProf
               <span style={{ fontSize: '0.68rem', marginLeft: 8, background: 'var(--border,#334155)', borderRadius: 4, padding: '1px 6px' }}>{job.region}</span>
             </div>
             <div className="muted" style={{ fontSize: '0.82rem' }}>{job.job_title || '—'}</div>
+            <div style={{ marginTop: 4 }}><CompanyBadge info={job.company_info} /></div>
           </div>
           <button className="secondary" onClick={viewDescription} style={{ flex: '0 0 auto' }}>View JD</button>
         </div>

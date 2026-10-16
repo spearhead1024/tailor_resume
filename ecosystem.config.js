@@ -45,6 +45,21 @@ module.exports = {
       restart_delay: 5000,
     },
     {
+      // Checks every company (new ones within seconds of a job being added, then the
+      // backlog) for size / age / publicly traded, to flag startups. Free sources only.
+      name: 'company-intel',
+      cwd: '/var/@TailorResume/backend',
+      script: '.venv/bin/python',
+      args: 'core/company_intel.py',
+      interpreter: 'none',
+      env: {
+        PYTHONUNBUFFERED: '1',
+      },
+      max_memory_restart: '384M',
+      autorestart: true,
+      restart_delay: 5000,
+    },
+    {
       // Mirrors VPS_1 (Resume-Generator-v2) profiles/users/applications into the local
       // vps1_* cache tables every hour, so the Profiles/Users/Applied tabs read them
       // instantly from SQLite instead of calling VPS_1 on every page load.

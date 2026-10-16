@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from .db import session_scope
 from .db import migration as _migration
 from .db.models import (
+    CompanyRow,
     GeneratedResumeRow,
     InterviewColumnRow,
     InterviewRow,
@@ -132,6 +133,22 @@ def _hash_auth_token(token: str) -> str:
 
 def _job_compare_key(value: str) -> str:
     return ''.join(ch.lower() if ch.isalnum() else ' ' for ch in str(value or '')).strip()
+
+
+_COMPANY_SUFFIXES = {
+    'inc', 'incorporated', 'llc', 'l l c', 'ltd', 'limited', 'corp', 'corporation', 'co',
+    'company', 'plc', 'gmbh', 'ag', 'sa', 'srl', 'bv', 'pty', 'pvt', 'lp', 'llp', 'holdings',
+}
+
+
+def company_key_for(name: str) -> str:
+    """Identity key for company intelligence: lowercase alphanumerics, single-spaced,
+    with trailing legal suffixes removed ("Acme, Inc." -> "acme"). Coarser than the
+    jobs' company_key so name variants of one company share a single record."""
+    words = _job_compare_key(name).split()
+    while len(words) > 1 and words[-1] in _COMPANY_SUFFIXES:
+        words.pop()
+    return ' '.join(words)[:255]
 
 
 def _company_fold_key(value: str) -> str:
@@ -1166,6 +1183,23 @@ def _normalize_openai_call(entry: dict) -> dict:
 
 # ---------- Storage ----------
 
+
+def _ensure_company_row(session: Session, company_name: str, job_company_key: str) -> None:
+    """Create the company-intel row for this company if missing (status 'pending'),
+    and remember which jobs.company_key spellings belong to it."""
+    key = company_key_for(company_name)
+    if not key:
+        return
+    row = session.get(CompanyRow, key)
+    if row is None:
+        session.add(CompanyRow(key=key, name=str(company_name or '').strip()[:255], status='pending',
+                               data={'job_company_keys': [job_company_key] if job_company_key else []}))
+        session.flush()
+        return
+    keys = list((row.data or {}).get('job_company_keys') or [])
+    if job_company_key and job_company_key not in keys:
+        row.data = {**(row.data or {}), 'job_company_keys': keys + [job_company_key]}
+
 class Storage:
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = Path(data_dir)
@@ -1889,6 +1923,10 @@ class Storage:
                     'created_by_username': d.get('created_by_username', ''),
                 })
 
+        infos = self.company_info_for_names([j['company'] for j in jobs])
+        for j in jobs:
+            j['company_info'] = infos.get(j['company'])
+
         return {
             'jobs': jobs,
             'total': int(total),
@@ -1896,6 +1934,117 @@ class Storage:
             'page_size': page_size,
             'counts': counts,
         }
+
+    # ── Company intelligence (startup / size / age) ─────────────────────────
+    @staticmethod
+    def _company_public(row: CompanyRow) -> dict:
+        d = dict(row.data or {})
+        d.pop('job_company_keys', None)
+        return {**d, 'key': row.key, 'name': row.name, 'status': row.status,
+                'checked_at': row.checked_at.isoformat() + 'Z' if row.checked_at else ''}
+
+    def company_info_for_names(self, names: list[str]) -> dict[str, dict]:
+        """{company name -> public company info} for the given names (missing → absent)."""
+        by_key: dict[str, list[str]] = {}
+        for n in names or []:
+            k = company_key_for(n)
+            if k:
+                by_key.setdefault(k, []).append(n)
+        if not by_key:
+            return {}
+        out: dict[str, dict] = {}
+        with session_scope(self.db_path) as session:
+            rows = session.scalars(select(CompanyRow).where(CompanyRow.key.in_(list(by_key)))).all()
+            for row in rows:
+                info = self._company_public(row)
+                for n in by_key.get(row.key, []):
+                    out[n] = info
+        return out
+
+    def get_company(self, key: str) -> dict | None:
+        with session_scope(self.db_path) as session:
+            row = session.get(CompanyRow, key)
+            if row is None:
+                return None
+            return {**self._company_public(row), 'job_company_keys': list((row.data or {}).get('job_company_keys') or [])}
+
+    def companies_to_check(self, limit: int = 10, *, stale_days: int = 90, retry_hours: int = 24) -> list[dict]:
+        """Next companies for the worker: pending first (newest first, so companies
+        from just-added jobs jump ahead of the backfill), then errors to retry, then
+        stale results. Manually locked companies are never re-checked."""
+        now = datetime.utcnow()
+        out: list[dict] = []
+        with session_scope(self.db_path) as session:
+            q = [
+                select(CompanyRow).where(CompanyRow.status == 'pending').order_by(CompanyRow.created_at.desc()),
+                select(CompanyRow).where(CompanyRow.status == 'error',
+                                         CompanyRow.checked_at < now - timedelta(hours=retry_hours)),
+                select(CompanyRow).where(CompanyRow.status == 'done',
+                                         CompanyRow.checked_at < now - timedelta(days=stale_days)),
+            ]
+            for stmt in q:
+                for row in session.scalars(stmt.limit(limit * 3)).all():
+                    if len(out) >= limit:
+                        return out
+                    if (row.data or {}).get('locked'):
+                        continue
+                    out.append({'key': row.key, 'name': row.name,
+                                'job_company_keys': list((row.data or {}).get('job_company_keys') or [])})
+        return out
+
+    def jobs_for_company(self, job_company_keys: list[str], limit: int = 25) -> list[dict]:
+        if not job_company_keys:
+            return []
+        with session_scope(self.db_path) as session:
+            rows = session.scalars(select(JobRow).where(JobRow.company_key.in_(job_company_keys))
+                                   .order_by(JobRow.submitted_at.desc()).limit(limit)).all()
+            return [_normalize_job(dict(r.data or {})) for r in rows]
+
+    def save_company(self, key: str, data: dict, status: str = 'done') -> None:
+        """Store a check result. Preserves job_company_keys; never overwrites a locked row
+        unless `data` itself carries locked=True (a manual override)."""
+        with session_scope(self.db_path) as session:
+            row = session.get(CompanyRow, key)
+            if row is None:
+                return
+            cur = dict(row.data or {})
+            if cur.get('locked') and not data.get('locked'):
+                return
+            row.data = {**data, 'job_company_keys': cur.get('job_company_keys') or []}
+            row.status = status
+            row.checked_at = datetime.utcnow()
+
+    def set_company_pending(self, key: str) -> bool:
+        with session_scope(self.db_path) as session:
+            row = session.get(CompanyRow, key)
+            if row is None:
+                return False
+            d = dict(row.data or {})
+            d.pop('locked', None)
+            row.data = d
+            row.status = 'pending'
+            row.created_at = datetime.utcnow()   # jump the queue
+            return True
+
+    def seed_companies_from_jobs(self) -> int:
+        """Register every company that already has jobs (idempotent backfill)."""
+        added = 0
+        with session_scope(self.db_path) as session:
+            existing = set(session.scalars(select(CompanyRow.key)).all())
+            for company, ck in session.execute(select(JobRow.company, JobRow.company_key)).all():
+                k = company_key_for(company)
+                if k and k not in existing:
+                    session.add(CompanyRow(key=k, name=str(company or '').strip()[:255], status='pending',
+                                           created_at=datetime(2000, 1, 1),   # backfill sorts behind new jobs
+                                           data={'job_company_keys': [ck] if ck else []}))
+                    existing.add(k)
+                    added += 1
+                elif k:
+                    row = session.get(CompanyRow, k)
+                    keys = list((row.data or {}).get('job_company_keys') or [])
+                    if ck and ck not in keys:
+                        row.data = {**(row.data or {}), 'job_company_keys': keys + [ck]}
+        return added
 
     def export_recent_jobs(
         self,
@@ -2039,6 +2188,9 @@ class Storage:
         row.scrape_status = normalized.get('scrape_status', 'done')
         row.submitted_at = _parse_iso_datetime(normalized.get('submitted_at', ''))
         row.created_by_user_id = str(normalized.get('created_by_user_id', '')).strip()
+        # Every job write registers its company for the startup/size check (the
+        # company-intel worker fills it in within seconds). Cheap: one PK lookup.
+        _ensure_company_row(session, normalized.get('company', ''), row.company_key)
 
     def add_job_report(self, job_id: str, report: dict) -> None:
         jid = str(job_id or '').strip()

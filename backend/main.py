@@ -39,6 +39,7 @@ from routers import push as push_router
 from routers import teams as teams_router
 from routers import live as live_router
 from routers import notifications as notifications_router
+from routers import companies as companies_router
 
 FRONTEND_DIST = PROJECT_ROOT.parent / "frontend" / "dist"
 
@@ -64,6 +65,7 @@ app.add_middleware(
 # Mount /api/* routers
 app.include_router(auth_router.router)
 app.include_router(jobs_router.router)
+app.include_router(companies_router.router)
 app.include_router(profiles_router.router)
 app.include_router(resumes_router.router)
 app.include_router(users_router.router)

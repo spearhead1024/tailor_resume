@@ -563,7 +563,11 @@ def bid_queue(profile_id: str, user: dict = Depends(get_current_user)):
     if not has_role(user, "admin", "bidder"):
         raise HTTPException(status_code=403, detail="Forbidden")
     _check_profile_access(user, profile_id)
-    return _eligible_bid_items(_get_profile(profile_id))
+    items = _eligible_bid_items(_get_profile(profile_id))
+    infos = storage.company_info_for_names([it["company"] for it in items])
+    for it in items:
+        it["company_info"] = infos.get(it["company"])
+    return items
 
 
 @router.get("/bid-job/{job_id}")
@@ -581,6 +585,7 @@ def bid_job_detail(job_id: str, user: dict = Depends(get_current_user)):
         "region": job.get("region", "ANY"),
         "link": job.get("link", ""),
         "description": job.get("description", ""),
+        "company_info": storage.company_info_for_names([job.get("company", "")]).get(job.get("company", "")),
     }
 
 

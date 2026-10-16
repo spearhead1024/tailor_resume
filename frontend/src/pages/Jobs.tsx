@@ -5,6 +5,7 @@ import { api } from '../api/client';
 import { useAuth, hasRole } from '../lib/auth';
 import { useToast } from '../lib/toast';
 import { etDateLong, etDateShort, etDateKey, todayETKey } from '../lib/etTime';
+import CompanyBadge from '../lib/CompanyBadge';
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const BLANK_JOB = { company: '', job_title: '', description: '', link: '', region: 'US', note: '' };
@@ -97,6 +98,9 @@ export default function Jobs() {
     queryKey: ['jobs', params],
     queryFn: () => api.get<JobsResponse>(`/api/jobs?${params}`),
     placeholderData: keepPreviousData,
+    // While any visible company is still being checked (a just-added job), poll so
+    // its startup/size badge fills in on its own; stop once all are resolved.
+    refetchInterval: (q) => (q.state.data?.jobs || []).some((j: any) => j.company_info?.status === 'pending') ? 5000 : false,
   });
 
   const jobs = data?.jobs || [];
@@ -430,6 +434,10 @@ export default function Jobs() {
                           <span title={`Reported ${job.reports_count}×`} style={{ color: 'var(--danger,#dc2626)', marginRight: 5 }}>⚑</span>
                         )}
                         {job.company}
+                        <div style={{ marginTop: 2 }}>
+                          <CompanyBadge info={job.company_info} isAdmin={isAdmin} compact
+                            onChanged={() => qc.invalidateQueries({ queryKey: ['jobs'] })} />
+                        </div>
                       </td>
                       <td>{job.link ? <a href={job.link} target="_blank" rel="noreferrer">{job.job_title}</a> : job.job_title}</td>
                       <td>{job.region}</td>

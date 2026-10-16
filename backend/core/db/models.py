@@ -219,3 +219,21 @@ class DeviceSessionRow(Base):
     last_seen: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow, index=True)
     revoked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
+
+
+class CompanyRow(Base):
+    """Size/age intelligence per company, used to flag startups.
+
+    `key` is the company name lowercased with punctuation and legal suffixes
+    (Inc, LLC, Ltd…) stripped, so "Acme" and "Acme, Inc." share one row. Rows are
+    created (status 'pending') whenever a job is written, and filled in by the
+    company-intel worker (core/company_intel.py). `data` holds the findings:
+    employees / size label, founded year, public flag, verdict, sources."""
+    __tablename__ = 'companies'
+
+    key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), default='')
+    status: Mapped[str] = mapped_column(String(16), default='pending', index=True)   # pending | done | error
+    checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+    data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
