@@ -3,24 +3,30 @@ import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useAuth, hasRole } from '../lib/auth';
 
-// The admin's chosen set of users to show in the Metrics tables. Persisted so it
-// survives navigating away and back (and reloads). `null` (no saved value) means
-// "not chosen yet" → show everyone; an explicit list (even empty) is honored.
-const USER_FILTER_KEY = 'metrics_selected_users';
-function loadUserFilter(): string[] | null {
+// The admin's set of users to HIDE in the Metrics tables. Persisted so it survives
+// navigating away and back (and reloads).
+//
+// This stores EXCLUDED user ids (not selected ones) on purpose: an include-list goes
+// stale — a bidder created AFTER the admin last saved the filter (e.g. remy_1) would
+// never be in the saved set and would stay hidden forever. With an exclude-list, any
+// user not explicitly hidden shows by default, so new bidders appear automatically.
+// (New key: the old `metrics_selected_users` include-lists are ignored/discarded.)
+const USER_FILTER_KEY = 'metrics_hidden_users_v2';
+function loadHiddenUsers(): string[] {
   try {
     const raw = localStorage.getItem(USER_FILTER_KEY);
-    if (raw == null) return null;
+    if (raw == null) return [];
     const v = JSON.parse(raw);
-    return Array.isArray(v) ? v.map(String) : null;
-  } catch { return null; }
+    return Array.isArray(v) ? v.map(String) : [];
+  } catch { return []; }
 }
-function saveUserFilter(ids: string[] | null) {
+function saveHiddenUsers(ids: string[]) {
   try {
-    if (ids == null) localStorage.removeItem(USER_FILTER_KEY);
-    else localStorage.setItem(USER_FILTER_KEY, JSON.stringify(ids));
+    localStorage.setItem(USER_FILTER_KEY, JSON.stringify(ids));
   } catch { /* ignore quota / disabled storage */ }
 }
+// One-time cleanup: drop the legacy include-list key so it can't linger.
+try { localStorage.removeItem('metrics_selected_users'); } catch { /* */ }
 
 type Cell = { applied: number; total: number };
 type Row = {
@@ -139,12 +145,13 @@ function aggregateAcrossRows(arrays: Cell[][]): Cell[] {
   return out;
 }
 
-/** Searchable multi-select of users for the Metrics filter. `selected === null`
- *  means "all users". Picking users produces an explicit id list. */
-function UserFilter({ users, selected, onChange }: {
+/** Searchable multi-select of users for the Metrics filter. Works on a HIDDEN set:
+ *  a checked box = shown (not hidden). `hidden` lists the ids to hide; `onChange`
+ *  emits the new hidden list. Users not in `hidden` (incl. brand-new bidders) show. */
+function UserFilter({ users, hidden, onChange }: {
   users: { id: string; name: string }[];
-  selected: string[] | null;
-  onChange: (next: string[] | null) => void;
+  hidden: string[];
+  onChange: (nextHidden: string[]) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
@@ -158,19 +165,18 @@ function UserFilter({ users, selected, onChange }: {
   }, [open]);
   useEffect(() => { if (open) { setQ(''); setTimeout(() => inputRef.current?.focus(), 0); } }, [open]);
 
-  const set = new Set(selected ?? users.map((u) => u.id));  // null = all selected
-  const allSelected = selected === null || selected.length === users.length;
+  const hiddenSet = new Set(hidden);
+  const shownCount = users.filter((u) => !hiddenSet.has(u.id)).length;
+  const allShown = shownCount === users.length;
   const terms = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const shown = terms.length ? users.filter((u) => terms.every((t) => u.name.toLowerCase().includes(t))) : users;
 
   const toggle = (id: string) => {
-    const next = new Set(set);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    // Collapse "everything selected" back to null (the all-users sentinel).
-    onChange(next.size === users.length ? null : [...next]);
+    const next = new Set(hiddenSet);
+    if (next.has(id)) next.delete(id); else next.add(id);   // toggling a checkbox flips hidden membership
+    onChange([...next]);
   };
-  const count = allSelected ? users.length : (selected?.length ?? 0);
-  const label = allSelected ? 'All users' : `${count} of ${users.length} users`;
+  const label = allShown ? 'All users' : `${shownCount} of ${users.length} users`;
 
   return (
     <div ref={ref} className="tz-picker" style={{ display: 'inline-block' }}>
@@ -184,16 +190,16 @@ function UserFilter({ users, selected, onChange }: {
             onChange={(e) => setQ(e.target.value)} />
           <div style={{ display: 'flex', gap: 8, padding: '2px 4px 6px', fontSize: '0.8rem' }}>
             <button className="link" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
-              onClick={() => onChange(null)}>Select all</button>
+              onClick={() => onChange([])}>Select all</button>
             <span className="muted">·</span>
             <button className="link" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
-              onClick={() => onChange([])}>Clear</button>
+              onClick={() => onChange(users.map((u) => u.id))}>Clear</button>
           </div>
           <div className="tz-list">
             {shown.length === 0 && <div className="muted" style={{ padding: 8, fontSize: '0.82rem' }}>No matches</div>}
             {shown.map((u) => (
               <label key={u.id} className="tz-opt" style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-                <input type="checkbox" checked={set.has(u.id)} onChange={() => toggle(u.id)} />
+                <input type="checkbox" checked={!hiddenSet.has(u.id)} onChange={() => toggle(u.id)} />
                 {u.name}
               </label>
             ))}
@@ -213,10 +219,11 @@ export default function Metrics() {
   const canSeeJobs = isAdmin || hasRole(user, 'job_adder');
   const [view, setView] = useState<'apps' | 'jobs'>(canSeeApps ? 'apps' : 'jobs');
   const [weekStart, setWeekStart] = useState<string>(todayIsoMonday());
-  // Admin-only user filter. null = all users. Persisted so it survives leaving
-  // and returning to the tab.
-  const [selectedUserIds, setSelectedUserIds] = useState<string[] | null>(() => loadUserFilter());
-  const applyUserFilter = (next: string[] | null) => { setSelectedUserIds(next); saveUserFilter(next); };
+  // Admin-only user filter, stored as the set of HIDDEN user ids (see the note by
+  // loadHiddenUsers). Anyone not in this set shows — so a new bidder appears without
+  // the admin touching the filter. Persisted across navigation/reloads.
+  const [hiddenUserIds, setHiddenUserIds] = useState<string[]>(() => loadHiddenUsers());
+  const applyHiddenUsers = (next: string[]) => { setHiddenUserIds(next); saveHiddenUsers(next); };
 
   const { data, isLoading, isFetching } = useQuery({
     queryKey: ['metrics', weekStart],
@@ -258,22 +265,24 @@ export default function Metrics() {
     return [...m.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
   }, [allGroups, allJobRows]);
 
-  // Smart default (admins only): the FIRST time this admin opens Metrics with no
-  // saved selection, pre-select all users EXCEPT admins and intern_bidder. Once a
-  // selection exists (from this default or a manual edit) it is left untouched and
-  // restored on later visits. `didSeedDefault` guards against re-seeding on refetch.
+  // Smart default (admins only): the FIRST time this admin opens Metrics with nothing
+  // saved yet, HIDE admins + intern_bidder by default (add them to the hidden set).
+  // Everyone else — including any bidder created later — shows automatically. Once the
+  // admin has saved anything (even an empty hidden set), this never re-seeds.
   const didSeedDefault = useRef(false);
   useEffect(() => {
     if (!isAdmin || didSeedDefault.current) return;
-    if (loadUserFilter() !== null) { didSeedDefault.current = true; return; }  // already have a saved choice
-    if (userOptions.length === 0 || allAppUsers.length === 0) return;          // wait for data
-    const defaults = userOptions.filter((u) => !isDefaultExcluded(u.id, u.name)).map((u) => u.id);
+    if (localStorage.getItem(USER_FILTER_KEY) != null) { didSeedDefault.current = true; return; }  // already chosen
+    if (userOptions.length === 0 || allAppUsers.length === 0) return;                                // wait for data
+    const toHide = userOptions.filter((u) => isDefaultExcluded(u.id, u.name)).map((u) => u.id);
     didSeedDefault.current = true;
-    applyUserFilter(defaults.length === userOptions.length ? null : defaults);
+    applyHiddenUsers(toHide);
   }, [isAdmin, userOptions, allAppUsers]);
 
-  // Apply the admin's saved user filter. null = all users. Non-admins never filter.
-  const showUser = (uid: string) => !isAdmin || selectedUserIds === null || selectedUserIds.includes(uid);
+  // Apply the admin's filter: a user shows unless they're in the hidden set. New users
+  // (not yet in the set) show by default. Non-admins never filter.
+  const hiddenSet = useMemo(() => new Set(hiddenUserIds), [hiddenUserIds]);
+  const showUser = (uid: string) => !isAdmin || !hiddenSet.has(uid);
   const groups = isAdmin ? allGroups.filter((g) => showUser(g.user_id)) : allGroups;
   const jobRows = isAdmin ? allJobRows.filter((r) => showUser(r.user_id)) : allJobRows;
 
@@ -331,7 +340,7 @@ export default function Metrics() {
         </button>
         {isAdmin && userOptions.length > 0 && (
           <div style={{ marginLeft: 'auto' }}>
-            <UserFilter users={userOptions} selected={selectedUserIds} onChange={applyUserFilter} />
+            <UserFilter users={userOptions} hidden={hiddenUserIds} onChange={applyHiddenUsers} />
           </div>
         )}
         <span className="muted" style={{ fontSize: '0.82rem', marginLeft: isAdmin ? 0 : 'auto' }}>
