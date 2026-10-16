@@ -841,35 +841,63 @@ HARD RULES
 Return the JSON now, inside a single ```json fenced code block."""
 
 
+# A detected/work-history "company" that is really an EDUCATION line (e.g.
+# "Baylor University … | Bachelor's Degree in Computer Science") or a leftover
+# template placeholder must never seed the FIXED WORK HISTORY — ChatGPT would then
+# generate a single fake "Computer Science Student" role. This guards the prompt.
+_NOT_A_COMPANY_RE = re.compile(
+    r"(?i)\b(university|college|institute|bachelor|master|degree|__role__|__headline__)\b"
+)
+
+
+def _looks_like_real_company(name: str, duration: str = "") -> bool:
+    txt = f"{name} {duration}"
+    if not str(name or "").strip():
+        return False
+    return not _NOT_A_COMPANY_RE.search(txt)
+
+
 def _prompt_companies(profile: dict) -> list[dict]:
     """The FIXED WORK HISTORY companies that seed the prompt. Prefer the
-    DOCX-detected list (VPS1 flow); fall back to the profile's own work_history
-    so a profile with no detection still produces a usable prompt."""
+    DOCX-detected list (VPS1 flow), but fall back to the profile's own
+    work_history — and crucially use whichever source has MORE valid companies,
+    so a corrupted single detected entry (e.g. an education line mis-parsed as a
+    company) never overrides a clean multi-company work_history."""
     gs = profile.get("generation_settings", {}) or {}
     default_bullets = int(gs.get("bullets_per_company_default") or 5)
     overrides = {
         str(o.get("company_name") or "").strip().lower(): int(o.get("bullets") or default_bullets)
         for o in (gs.get("bullets_per_company") or []) if isinstance(o, dict)
     }
-    detected = profile.get("detected_work_history") or []
-    rows: list[dict] = []
-    if detected:
-        for item in detected:
+
+    def _from_detected() -> list[dict]:
+        out: list[dict] = []
+        for item in profile.get("detected_work_history") or []:
             name = str(item.get("company_name") or "").strip()
-            if not name:
+            duration = str(item.get("duration") or "").strip()
+            if not _looks_like_real_company(name, duration):
                 continue
             bullets = int(item.get("bullets") or 0) or overrides.get(name.lower()) or default_bullets
-            rows.append({"company_name": name, "duration": str(item.get("duration") or "").strip(), "bullets": bullets})
-        return rows
-    # Fallback: profile.work_history (+ legacy bullet_counts as per-company targets)
-    bullet_counts = gs.get("bullet_counts", []) or []
-    for i, w in enumerate(profile.get("work_history", []) or []):
-        name = str(w.get("company_name") or "").strip()
-        if not name:
-            continue
-        bullets = int(bullet_counts[i]) if i < len(bullet_counts) and bullet_counts[i] else default_bullets
-        rows.append({"company_name": name, "duration": str(w.get("duration") or "").strip(), "bullets": bullets})
-    return rows
+            out.append({"company_name": name, "duration": duration, "bullets": bullets})
+        return out
+
+    def _from_work_history() -> list[dict]:
+        bullet_counts = gs.get("bullet_counts", []) or []
+        out: list[dict] = []
+        for i, w in enumerate(profile.get("work_history", []) or []):
+            name = str(w.get("company_name") or "").strip()
+            duration = str(w.get("duration") or "").strip()
+            if not _looks_like_real_company(name, duration):
+                continue
+            bullets = int(bullet_counts[i]) if i < len(bullet_counts) and bullet_counts[i] else default_bullets
+            out.append({"company_name": name, "duration": duration, "bullets": bullets})
+        return out
+
+    detected = _from_detected()
+    work = _from_work_history()
+    # Use whichever source yields more real companies. work_history is the reliable
+    # structured field; detected is a best-effort DOCX parse, so ties go to work_history.
+    return detected if len(detected) > len(work) else work
 
 
 def _build_prompt(profile: dict, job: dict) -> str:

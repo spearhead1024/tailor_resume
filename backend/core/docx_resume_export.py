@@ -880,17 +880,24 @@ def _replace_role_paragraph(paragraph: Paragraph, role_value: str) -> bool:
 
 def _replace_role_placeholders(doc: Document, resume: dict) -> bool:
     jobs = resume.get("work_history", []) or []
+    # Align roles to __role__ markers BY POSITION (marker i → work_history[i]).
+    # Do NOT drop empty role_titles first — that shifts every later company's role
+    # onto the wrong marker (the "same role repeated" bug). An empty/ missing role
+    # falls back to the headline for THAT marker only, and extra markers beyond the
+    # role list also use the headline rather than repeating the last role.
     role_values = [_plain_resume_text(job.get("role_title", "")) for job in jobs]
-    role_values = [value for value in role_values if value]
-    fallback_role = role_values[0] if role_values else _plain_resume_text(resume.get("headline", ""))
-    if not fallback_role:
+    fallback_role = _plain_resume_text(resume.get("headline", "")) \
+        or next((v for v in role_values if v), "")
+    if not fallback_role and not any(role_values):
         return False
     role_index = 0
     changed = False
     for paragraph in _all_story_paragraphs(doc):
         if not _paragraph_contains_any_marker(paragraph, EXP_ROLE_PLACEHOLDERS):
             continue
-        role_value = role_values[min(role_index, len(role_values) - 1)] if role_values else fallback_role
+        role_value = role_values[role_index] if role_index < len(role_values) else ""
+        if not role_value:
+            role_value = fallback_role
         role_index += 1
         if _replace_role_paragraph(paragraph, role_value):
             changed = True

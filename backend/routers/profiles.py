@@ -135,6 +135,11 @@ def _extract_work_history_from_resume_text(text: str) -> list[dict]:
         # "company" names like "__role__ | Jul 2024".
         if re.search(r"_{2,3}[a-z_]+_{2,3}", line, re.IGNORECASE):
             continue
+        # Skip education lines that leak into the experience scan (e.g.
+        # "Baylor University (2012 - 2016) | Bachelor's Degree…") — mis-parsing one
+        # as a company seeds the prompt with a fake role.
+        if re.search(r"(?i)\b(university|college|institute|bachelor|master|degree)\b", line):
+            continue
         parsed = _parse_company_line(line)
         if parsed:
             company, location, duration = parsed
