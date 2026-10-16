@@ -1291,6 +1291,14 @@ export default function Interviews() {
   const [modal, setModal] = useState<{ rowId: string; colId: string; title: string; subtitle: string; value: string; readOnly: boolean; kind: 'text' | 'chat' } | null>(null);  // JD editor / Chat thread
   const [confirmDel, setConfirmDel] = useState<string | null>(null);   // rowId pending delete-confirmation
   const [flashRow, setFlashRow] = useState<string | null>(null);       // row just re-sorted by a Scheduled_at edit → scroll to + flash it
+  // A Scheduled_at edit does NOT re-sort the row immediately (that yanks it out from
+  // under the user while they are still on it). Instead we HOLD the row at its old
+  // chronological position — { rowId, oldMs } — and only release the hold (letting it
+  // slide to its new spot) once the user's focus leaves the row (selects another row
+  // or clicks elsewhere). See releaseHeldSort below.
+  const [heldSort, setHeldSort] = useState<{ rowId: string; oldMs: number } | null>(null);
+  const heldSortRef = useRef<{ rowId: string; oldMs: number } | null>(null);
+  heldSortRef.current = heldSort;
   const [locks, setLocks] = useState<Record<string, LockInfo>>({});    // "rowId|colId" → who is editing it
   const liveRef = useRef<BoardLive | null>(null);
   // The "next upcoming call" highlight is derived from Date.now() at render time. Tick every minute
@@ -1413,40 +1421,18 @@ export default function Interviews() {
     const t = window.setTimeout(() => setFlashRow(null), 1500);
     return () => window.clearTimeout(t);
   }, [flashRow]);
-  // FLIP animation for reordering: when a Scheduled_at edit moves a row to its new
-  // chronological slot, the row would otherwise JUMP instantly and the user loses
-  // track of it. After each render we snapshot every visible row's Y position; when a
-  // row's position changed vs the previous render, we invert it to its old spot then
-  // transition transform→0 so it visibly SLIDES into place. Paired with the blue flash
-  // + scroll-to on the edited row (flashRow), the move is easy to follow.
-  //
-  // NB: this hook (and its refs) MUST live above the `if (loading) return` guards
-  // below — a hook placed after an early return runs a different number of times
-  // across renders and crashes the whole page ("rendered more hooks…").
-  const flipPos = useRef<Map<string, number>>(new Map());
-  useLayoutEffect(() => {
-    const prev = flipPos.current;
-    const next = new Map<string, number>();
-    const rows = Array.from(document.querySelectorAll<HTMLTableRowElement>('tr.iv-row[data-rid]'));
-    for (const tr of rows) {
-      const id = tr.getAttribute('data-rid') || '';
-      const top = tr.getBoundingClientRect().top;
-      next.set(id, top);
-      const old = prev.get(id);
-      if (old !== undefined) {
-        const delta = old - top;
-        if (Math.abs(delta) > 1) {
-          tr.style.transition = 'none';
-          tr.style.transform = `translateY(${delta}px)`;
-          requestAnimationFrame(() => {
-            tr.style.transition = 'transform 320ms cubic-bezier(0.22, 1, 0.36, 1)';
-            tr.style.transform = '';
-          });
-        }
-      }
-    }
-    flipPos.current = next;
-  });   // no dep array: runs after every render; only rows that actually moved animate
+  // Release a held (just-rescheduled) row once the user's focus moves to a DIFFERENT
+  // row — then it slides to its new chronological slot. Keeps the row put while the
+  // user is still working on it, then repositions the moment they move away.
+  useEffect(() => {
+    const held = heldSortRef.current;
+    if (!held) return;
+    // Focus left the held row when: the selection cleared (clicked empty/deselected),
+    // OR the active cell is on a different row. Either way, release → it re-sorts.
+    const activeRowId = sel ? gridRef.current?.rows?.[sel.r1]?.id : undefined;
+    if (!sel || (activeRowId && activeRowId !== held.rowId)) { setHeldSort(null); setFlashRow(held.rowId); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sel]);
   useEffect(() => {
     const up = () => { dragging.current = false; };
     document.addEventListener('mouseup', up);
@@ -1816,11 +1802,18 @@ export default function Interviews() {
     // hidden, but now that it shows under Creater it would mean correcting the Index on an old row
     // silently re-dated it to today. A creation date is a fact about the past; nothing you type later
     // can change it.
+    // Editing Scheduled_at would re-sort the row instantly, yanking it out from under
+    // the user. Instead HOLD it at its current chronological position: capture the OLD
+    // sched ms BEFORE the change, and keep the row sorted there until focus leaves it
+    // (releaseHeldSort). Only then does it slide to its new slot + flash.
+    if (colId === 'c_sched') {
+      const prevRow = (grid?.rows || []).find((r) => r.id === rowId);
+      const prevSched = String(prevRow?.cells?.c_sched ?? '').trim();
+      const oldMs = prevSched ? new Date(prevSched).getTime() : NaN;
+      setHeldSort({ rowId, oldMs });
+    }
     const changes: CellChange[] = [{ rowId, colId, value }];
     recordCells(changes);
-    // Editing Scheduled_at re-sorts the row to a new position — flag it so the effect above scrolls
-    // to + flashes it, making the change (and where the row went) obvious instead of looking unchanged.
-    if (colId === 'c_sched') setFlashRow(rowId);
   };
   /** `extra` lets the calendar book a slot: same row creation, but pre-filled with the time clicked.
    *  Returns the created row so the caller can act on it — the calendar opens its detail popup, so a
@@ -1829,9 +1822,10 @@ export default function Interviews() {
     try {
       const rows = grid?.rows ?? [];   // full rows (not the filtered view) so Index numbering is correct
       const at = rows.length;
-      // auto-fill the next Index (max existing + 1) and Created_at (now → shown on Index hover)
-      const maxIdx = rows.reduce((m, r) => { const n = parseInt(String(r.cells?.c_index ?? ''), 10); return Number.isFinite(n) ? Math.max(m, n) : m; }, 0);
-      const row = await api.post<Row>('/api/interviews/rows', { cells: { c_index: String(maxIdx + 1), c_created: new Date().toISOString(), ...extra } });
+      // Index is assigned by the SERVER (smallest unused number, unique + gap-free across
+      // plain and chain indices) — do NOT compute it here. The frontend's old parseInt of
+      // "13_16_19" read 13 and disagreed with the server, producing colliding numbers.
+      const row = await api.post<Row>('/api/interviews/rows', { cells: { c_created: new Date().toISOString(), ...extra } });
       // upsert, NOT append: the server already broadcast this row to every admin — including us — and
       // that socket message usually beats this response home. Appending blindly added it a second time,
       // which is why adding one row produced two on the author's board and one on everybody else's.
@@ -1850,6 +1844,18 @@ export default function Interviews() {
     setGrid((gg) => (gg ? { ...gg, rows: removeRow(gg.rows, rowId) } : gg));
     setSel(null); setEditing(null);
     try { await api.delete(`/api/interviews/rows/${rowId}`); if (row) { undoStack.current.push({ k: 'delRow', row, at }); redoStack.current = []; } } catch { toast('Failed to delete row', 'error'); }
+  };
+  // Create a follow-up ("passed") row: the backend clones the source verbatim (incl.
+  // the full Chat & Feedback thread), chains the index, and appends it at the bottom.
+  // The socket echo upserts the new row into the grid.
+  const cloneRow = async (rowId: string) => {
+    try {
+      const row = await api.post<Row>(`/api/interviews/rows/${rowId}/clone`, {});
+      setGrid((gg) => (gg ? { ...gg, rows: gg.rows.some((r) => r.id === row.id) ? gg.rows : [...gg.rows, row] } : gg));
+      toast('Follow-up row created', 'success');
+    } catch (e: any) {
+      toast(e?.response?.data?.detail || 'Failed to create follow-up row', 'error');
+    }
   };
   // Keep one empty row available by default: if an admin opens an empty board, seed a blank row (once).
   const seededRef = useRef(false);
@@ -2066,9 +2072,13 @@ export default function Interviews() {
     if (isNaN(t.getTime())) return thisWeek(userTz).from;
     return addDays(base, -((t.getUTCDay() + 6) % 7));       // Mon=0
   })();
-  // Always sorted by Scheduled_at (earliest first). Changing a row's Scheduled_at re-renders → re-sorts,
-  // so the row moves to its correct place. Unscheduled rows (incl. newly-added) stay at the bottom, visible.
-  const withMs = matched.map((r) => ({ r, ms: schedMs(r) }));
+  // Sorted by Scheduled_at (earliest first). A row whose time was JUST edited is held
+  // at its OLD position (heldSort.oldMs) until the user's focus leaves it, so it does
+  // not jump out from under them mid-edit. Unscheduled rows stay at the bottom.
+  const withMs = matched.map((r) => ({
+    r,
+    ms: (heldSort && heldSort.rowId === r.id) ? heldSort.oldMs : schedMs(r),
+  }));
   const scheduled = withMs.filter((x) => !isNaN(x.ms)).sort((a, b) => a.ms - b.ms).map((x) => x.r);
   const unscheduled = withMs.filter((x) => isNaN(x.ms)).map((x) => x.r);
   // "Recent N" keeps the latest N schedules; unscheduled rows are always shown (the limit never hides them).
@@ -2371,6 +2381,9 @@ export default function Interviews() {
                     mirror of the row-number gutter on the left. It only appears on the hovered row. */}
                 {isAdmin && (
                   <td className="iv-rowend">
+                    <button className="ghost iv-del" title="Create follow-up row (copies everything incl. Chat & Feedback)"
+                      style={{ marginRight: 2 }}
+                      onClick={(e) => { e.stopPropagation(); void cloneRow(row.id); }}>⧉</button>
                     <button className="ghost iv-del" title="Delete row"
                       onClick={(e) => { e.stopPropagation(); setConfirmDel(row.id); }}>✕</button>
                   </td>

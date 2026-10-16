@@ -271,6 +271,7 @@ def _default_grid() -> dict:
         # "no call is happening", and their position in the list tells them apart.
         {"id": "c_status", "name": "Status", "type": "select", "width": 120, "options": [
             s("Not Scheduled", "#9B9B9B"), s("Scheduled", "#447ACB"),
+            s("Passed", "#2E8B57"),
             s("Done", "#4F9768"), s("Not Done", "#CB7B37"), s("Failed", "#BE524B"),
             s("OnSite", "#865DBB"), s("On-hold", "#C19138"), s("Account", "#BA4A78"),
             s("Filled", "#A27763"), s("Closed", "#9B9B9B")]},
@@ -372,6 +373,7 @@ def _bootstrap() -> None:
         storage.append_interview_columns(_REQUIRED_COLS)  # add newly-required columns
         _migrate_sched_db()                               # legacy wall-clock Scheduled_at → UTC
         _migrate_option_colors()                          # repaint Status/Approved pills (see below)
+        _ensure_status_options()                          # add "Passed" to legacy boards' Status
         _bootstrapped = True
 
 
@@ -381,12 +383,42 @@ def _bootstrap() -> None:
 # out green, Scheduled/Done/OnSite all one blue). Matches by label; leaves any admin-added option alone.
 _OPTION_COLORS = {
     "c_status": {
-        "Not Scheduled": "#9B9B9B", "Scheduled": "#447ACB", "Done": "#4F9768",
+        "Not Scheduled": "#9B9B9B", "Scheduled": "#447ACB", "Passed": "#2E8B57", "Done": "#4F9768",
         "Not Done": "#CB7B37", "Failed": "#BE524B", "OnSite": "#865DBB",
         "On-hold": "#C19138", "Account": "#BA4A78", "Filled": "#A27763", "Closed": "#9B9B9B",
     },
     "c_approved": {"Confirmed": "#4F9768", "Pending": "#C19138", "Rejected": "#BE524B"},
 }
+
+# Status options that must exist on EVERY board (added to legacy boards on bootstrap).
+# "Passed" drives the auto-clone follow-up flow, so it has to be selectable everywhere.
+_ENSURE_STATUS_OPTIONS = [("Passed", "#2E8B57")]
+
+
+def _ensure_status_options() -> None:
+    """Append any missing must-have Status options (e.g. Passed) to existing boards.
+    Idempotent — only adds a label that isn't already present."""
+    cols = storage.get_interview_columns()
+    changed = False
+    for col in cols:
+        if col.get("id") != "c_status":
+            continue
+        opts = col.get("options") or []
+        have = {str(o.get("label", "")).strip() for o in opts}
+        # Insert "Passed" right after "Scheduled" when possible, else append.
+        for label, color in _ENSURE_STATUS_OPTIONS:
+            if label in have:
+                continue
+            new_opt = {"label": label, "color": color}
+            idx = next((i for i, o in enumerate(opts) if str(o.get("label", "")).strip() == "Scheduled"), None)
+            if idx is not None:
+                opts.insert(idx + 1, new_opt)
+            else:
+                opts.append(new_opt)
+            changed = True
+        col["options"] = opts
+    if changed:
+        storage.replace_interview_columns(cols)
 
 
 def _migrate_option_colors() -> None:
@@ -659,6 +691,198 @@ def put_schema(body: dict, user: dict = Depends(_access)):
     return grid
 
 
+# ── Call-index helpers ──────────────────────────────────────────────────────
+# An index may be a plain number ("13") OR a passed-clone chain ("13_16_19"), where
+# EVERY part is a distinct call number. We treat the whole board as one pool of used
+# numbers (all parts of every index) and hand out the SMALLEST unused positive int,
+# so the pool stays unique and gap-free (fills holes left by deletes).
+
+def _index_parts(value: object) -> list[int]:
+    out: list[int] = []
+    for part in str(value or "").split("_"):
+        part = part.strip()
+        if part.isdigit():
+            out.append(int(part))
+    return out
+
+
+def _used_index_numbers(rows: list[dict]) -> set[int]:
+    used: set[int] = set()
+    for r in rows:
+        used.update(_index_parts((r.get("cells") or {}).get("c_index", "")))
+    return used
+
+
+def _next_index_number(rows: list[dict]) -> int:
+    """Smallest positive integer not already used anywhere on the board."""
+    used = _used_index_numbers(rows)
+    n = 1
+    while n in used:
+        n += 1
+    return n
+
+
+def _dedupe_and_compact_indexes(rows: list[dict]) -> list[tuple[str, str, str]]:
+    """Make every call number UNIQUE and GAP-FREE across all rows, preserving chain
+    SHAPE (a "13_16_19" row stays a 3-part chain; only the numbers may change).
+
+    Returns [(row_id, old_index, new_index)] for rows whose index changed. Two passes:
+      1. Dedupe: walk slots in row order; keep a number the first time it's seen,
+         reassign any later duplicate to the smallest-unused number.
+      2. Compact: if the resulting set has gaps, remap the LARGEST numbers down into
+         the holes so the whole set becomes exactly 1..N.
+    Rows with a non-numeric/blank index are left untouched (no parts to number)."""
+    # Ordered list of (row, part-index-within-chain, number).
+    slots: list[tuple[dict, int, int]] = []
+    for r in rows:
+        parts = _index_parts((r.get("cells") or {}).get("c_index", ""))
+        for pi, num in enumerate(parts):
+            slots.append((r, pi, num))
+
+    # Pass 1 — dedupe, keeping the first occurrence of each number.
+    assigned: dict[tuple[str, int], int] = {}   # (row_id, part_pos) → number
+    seen: set[int] = set()
+
+    def _smallest_unused() -> int:
+        n = 1
+        while n in seen:
+            n += 1
+        return n
+
+    for r, pi, num in slots:
+        key = (r["id"], pi)
+        if num not in seen:
+            assigned[key] = num
+            seen.add(num)
+        else:
+            n = _smallest_unused()
+            assigned[key] = n
+            seen.add(n)
+
+    # Pass 2 — compact: fill any gaps by moving the largest numbers into the holes.
+    if seen:
+        target = set(range(1, len(seen) + 1))
+        gaps = sorted(target - seen)                       # holes to fill (ascending)
+        highs = sorted(seen - target, reverse=True)        # numbers above N to move down
+        remap = {}
+        for high, gap in zip(highs, gaps):
+            remap[high] = gap
+        if remap:
+            for key, num in list(assigned.items()):
+                if num in remap:
+                    assigned[key] = remap[num]
+
+    # Rebuild each row's index string from its (possibly changed) parts, in order.
+    by_row: dict[str, dict[int, int]] = {}
+    for (rid, pi), num in assigned.items():
+        by_row.setdefault(rid, {})[pi] = num
+    changes: list[tuple[str, str, str]] = []
+    for r in rows:
+        rid = r["id"]
+        if rid not in by_row:
+            continue
+        old_index = str((r.get("cells") or {}).get("c_index", "") or "")
+        parts = by_row[rid]
+        new_index = "_".join(str(parts[i]) for i in sorted(parts))
+        if new_index != old_index:
+            changes.append((rid, old_index, new_index))
+    return changes
+
+
+@router.post("/reindex")
+def reindex_board(user: dict = Depends(_access)):
+    """One-time cleanup: make all call indices unique + gap-free (keeping chains).
+    Admin-only. Backs up the DB first. Returns the list of changed indices."""
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Only admins can reindex the board.")
+    _bootstrap()
+    grid = _load_grid()
+    changes = _dedupe_and_compact_indexes(grid["rows"])
+    if not changes:
+        return {"changed": 0, "changes": []}
+    # Back up the SQLite DB before rewriting indices (best-effort; never blocks the fix).
+    try:
+        import shutil
+        from datetime import datetime as _dt
+        src = storage.db_path
+        bak = src.with_name(f"{src.name}.bak-reindex-{_dt.now().strftime('%Y%m%d-%H%M%S')}")
+        shutil.copy2(src, bak)
+        log.info("reindex: DB backed up to %s", bak.name)
+    except Exception:
+        log.warning("reindex: DB backup failed; proceeding (indices will still be corrected)")
+    for rid, _old, new_index in changes:
+        updated = storage.patch_interview_row(rid, {"c_index": new_index})
+        if updated is not None:
+            after = dict(updated.get("cells") or {})
+            _broadcast_row({"id": rid, "cells": after}, live_notify.row_audience(after))
+    return {"changed": len(changes),
+            "changes": [{"row_id": rid, "old": old, "new": new} for rid, old, new in changes]}
+
+
+_CLONE_CLEAR = ("c_sched", "c_link", "c_min", "c_type")   # emptied on the follow-up row
+
+
+def _has_passed_child(rows: list[dict], parent_index: str) -> bool:
+    """True if a follow-up row already exists for this index (its index is
+    "<parent>_<n>"). Used to guard against spawning duplicate follow-ups."""
+    base = str(parent_index or "").strip()
+    if not base:
+        return False
+    for r in rows:
+        idx = str((r.get("cells") or {}).get("c_index", "")).strip()
+        if idx != base and idx.startswith(base + "_"):
+            return True
+    return False
+
+
+def _build_clone_cells(src_cells: dict, rows: list[dict], valid: set[str]) -> dict:
+    """The follow-up row's cells: a verbatim copy of the source (INCLUDING the full
+    c_feedback chat JSON), with the fields the spec resets."""
+    cells = {k: v for k, v in dict(src_cells or {}).items() if k in valid}
+    # Chain the index: "<source>_<smallest unused number>".
+    src_index = str(src_cells.get("c_index", "") or "").strip()
+    new_num = _next_index_number(rows)
+    cells["c_index"] = f"{src_index}_{new_num}" if src_index else str(new_num)
+    # Emptied fields.
+    for cid in _CLONE_CLEAR:
+        if cid in valid:
+            cells[cid] = ""
+    # Reset workflow + stamp.
+    if "c_approved" in valid:
+        cells["c_approved"] = "pending"
+    if "c_status" in valid:
+        cells["c_status"] = ""          # fresh follow-up, no outcome yet
+    if "c_created" in valid:
+        cells["c_created"] = datetime.now(timezone.utc).isoformat()
+    return cells
+
+
+@router.post("/rows/{row_id}/clone")
+def clone_row(row_id: str, user: dict = Depends(_access)):
+    """Create a follow-up row from a 'passed' call: copies every cell verbatim
+    (incl. the Chat & Feedback thread), chains the index, clears schedule/link/
+    duration/type, sets Approved=pending, and appends it at the bottom. Admin-only.
+    Guards against duplicate follow-ups (one child per source row)."""
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Only admins can create follow-up rows.")
+    _bootstrap()
+    grid = _load_grid()
+    valid = {c["id"] for c in grid["columns"]}
+    src = storage.get_interview_row(row_id)
+    if src is None or not _owns_row(user, src):
+        raise HTTPException(status_code=404, detail="Row not found")
+    src_cells = dict(src.get("cells") or {})
+    src_index = str(src_cells.get("c_index", "") or "").strip()
+    if _has_passed_child(grid["rows"], src_index):
+        raise HTTPException(status_code=409, detail="A follow-up row already exists for this call.")
+    cells = _build_clone_cells(src_cells, grid["rows"], valid)
+    rid = _new_id("r")
+    row = storage.insert_interview_row(rid, cells, None)   # append at bottom
+    _broadcast_row(row, live_notify.row_audience(cells))
+    live_notify.on_row_changed(rid, {}, cells, user)
+    return _public_row(row, True)
+
+
 @router.post("/rows")
 def add_row(body: dict | None = None, user: dict = Depends(_access)):
     if not user.get("is_admin"):     # only admins add rows (callers are read-only; appliers use the Schedule flow)
@@ -683,14 +907,12 @@ def add_row(body: dict | None = None, user: dict = Depends(_access)):
     # delete) keeps its original date rather than being back-dated to the moment it was restored.
     if "c_created" in valid and not str(cells.get("c_created", "") or "").strip():
         cells["c_created"] = datetime.now(timezone.utc).isoformat()
-    # Index — the running call number. Auto-assign the next one so a row added ANY way (the Schedule
-    # button, the API, a seed) gets a number, not a blank cell. `max(existing numeric) + 1`, so it
-    # never collides even after deletes. An explicit value is respected (undo of a delete keeps its
-    # original number). Legacy non-numeric indexes (e.g. "5_304_311") are simply ignored by the max.
+    # Index — the call number. Auto-assign the SMALLEST unused positive integer (across
+    # every plain index AND every part of a "13_16_19" chain), so numbers stay unique and
+    # gap-free — filling holes left by deletes rather than only ever climbing. An explicit
+    # value is respected (undo of a delete keeps its original number).
     if "c_index" in valid and not str(cells.get("c_index", "") or "").strip():
-        nums = [int(n) for r in grid["rows"]
-                if (n := str((r.get("cells") or {}).get("c_index", "")).strip()).isdigit()]
-        cells["c_index"] = str((max(nums) + 1) if nums else 1)
+        cells["c_index"] = str(_next_index_number(grid["rows"]))
     # Sensible starting state for a fresh call: not yet scheduled, not yet agreed, an Intro as the
     # first call type. Only fills a BLANK cell — an explicit value (e.g. re-inserting a row on undo)
     # wins — and only if the column still exists and the option is still valid, so renaming/removing a
@@ -807,6 +1029,27 @@ def patch_row(row_id: str, body: dict, user: dict = Depends(_access)):
     _broadcast_row({"id": row_id, "cells": after},
                    live_notify.row_audience(after) | live_notify.row_audience(before))
     live_notify.on_row_changed(row_id, before, after, user)
+
+    # Auto-clone on "Passed": when an admin marks a call Passed, spawn its follow-up
+    # row (copied verbatim incl. Chat & Feedback), once. Guarded so re-selecting
+    # Passed or editing the passed row never spawns a second follow-up. Best-effort —
+    # a clone failure must never fail the status edit itself.
+    if (is_admin and "c_status" in patch
+            and str(after.get("c_status", "")).strip().lower() == "passed"
+            and str(before.get("c_status", "")).strip().lower() != "passed"):
+        try:
+            grid = _load_grid()
+            valid = {c["id"] for c in grid["columns"]}
+            src_index = str(after.get("c_index", "") or "").strip()
+            if not _has_passed_child(grid["rows"], src_index):
+                clone_cells = _build_clone_cells(after, grid["rows"], valid)
+                crid = _new_id("r")
+                crow = storage.insert_interview_row(crid, clone_cells, None)
+                _broadcast_row(crow, live_notify.row_audience(clone_cells))
+                live_notify.on_row_changed(crid, {}, clone_cells, user)
+        except Exception:
+            log.exception("Passed auto-clone failed for row %s", row_id)
+
     return _public_row(updated, is_admin)
 
 

@@ -631,6 +631,11 @@ tbody tr:hover td { background: var(--panel-2); color: var(--text); }
   background: rgba(35,131,226,0.30); animation: iv-row-flash 1.5s ease-out forwards;
 }
 @keyframes iv-row-flash { from { opacity: 1; } to { opacity: 0; } }
+/* When a rescheduled row is released to its new slot, gently settle its cell content
+   in (a small ease) so the move reads as deliberate rather than an instant jump. Only
+   this one row animates — the whole-table slide caused jitter and was removed. */
+.iv-row--flash td > * { animation: iv-row-settle 340ms cubic-bezier(0.22, 1, 0.36, 1); }
+@keyframes iv-row-settle { from { transform: translateY(-6px); opacity: 0.55; } to { transform: none; opacity: 1; } }
 .iv-input { width: 100%; border: none; background: transparent; color: #D4D4D4; font: inherit; font-size: 14px; padding: 6px 8px; outline: none; box-sizing: border-box; user-select: text; }
 .iv-input:focus { background: transparent; }   /* the cell's selection border shows the edit state */
 .iv-input[type=number] { -moz-appearance: textfield; }
