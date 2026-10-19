@@ -85,6 +85,16 @@ _NOT_COMPANY_DOMAINS = {
     "freshteam.com", "zohorecruit.com", "manatal.com", "comeet.com", "polymer.co", "ripplematch.com",
     "otta.com", "welcometothejungle.com", "simplify.jobs", "hiringcafe.com", "remoteok.com",
     "weworkremotely.com", "remotive.com", "flexjobs.com", "monster.com", "careerbuilder.com",
+    # Hosting / site-builder / career-site platforms (a company's page ON them, not its domain)
+    "salesforce-sites.com", "force.com", "site.com", "wixsite.com", "squarespace.com", "webflow.io",
+    "vercel.app", "netlify.app", "github.io", "herokuapp.com", "azurewebsites.net", "cloudfront.net",
+    "amazonaws.com", "hs-sites.com", "hubspot.com", "hubspotpagebuilder.com", "myshopify.com",
+    "wordpress.com", "carrd.co", "framer.website", "framer.app", "typeform.com", "formstack.com",
+    "jotform.com", "careerplug.com", "hrmdirect.com", "applicantpro.com", "isolvedhire.com",
+    "paycor.com", "clearcompany.com", "silkroad.com", "brassring.com", "avature.net",
+    "phenompeople.com", "eightfold.ai", "jobs2web.com", "hirehive.com", "recruiterbox.com",
+    "grnh.se", "ukg.net", "lnkd.in", "t.co", "goo.gl", "tinyurl.com", "ow.ly", "workforcenow.adp.com",
+    "myworkday.com", "ashbyhq.io", "gh.io", "hireology.com", "wd1.myworkdayjobs.com", "paycom.com",
 }
 _ENTERPRISE_ATS = {"myworkdayjobs.com", "workday.com", "myworkdaysite.com", "icims.com", "oraclecloud.com",
                    "taleo.net", "successfactors.com", "successfactors.eu", "adp.com", "ultipro.com",
@@ -135,8 +145,10 @@ def company_key_words(name: str) -> list[str]:
 _URL_RE = re.compile(r"(?i)\b(?:https?://|www\.)([a-z0-9][a-z0-9.-]+\.[a-z]{2,})")
 
 
-def _homepage_is(domain: str, name: str) -> bool:
-    """Fetch the homepage and check its title/site_name mentions the company."""
+def _homepage_is(domain: str, name: str, loose: bool = False) -> bool:
+    """Fetch the homepage and check its title/site_name mentions the company.
+    `loose` (used when the domain came from the company's own job-board slug) also
+    accepts the first significant word of the name ("Nexer" for "Nexer Czech Republic")."""
     r = _get(f"https://{domain}", allow_redirects=True, headers=BROWSER)
     if r is None or "html" not in r.headers.get("content-type", ""):
         return False
@@ -144,8 +156,12 @@ def _homepage_is(domain: str, name: str) -> bool:
     bits = re.findall(r"<title[^>]*>(.*?)</title>", html, re.S)
     bits += re.findall(r'property="og:(?:site_name|title)"\s+content="([^"]*)"', html)
     c = _compact(name)
+    words = [w for w in company_key_words(name) if len(w) >= 4]
     for b in bits:
-        if c and c in re.sub(r"[^a-z0-9]", "", b):
+        flat = re.sub(r"[^a-z0-9]", "", b)
+        if c and c in flat:
+            return True
+        if loose and words and words[0] in flat:
             return True
     return False
 
@@ -164,7 +180,15 @@ def find_domain(name: str, jobs: list[dict], hints: list[str]) -> tuple[str, str
             d = registrable_domain(host)
             if d and d not in _NOT_COMPANY_DOMAINS and domain_matches_name(d, name):
                 return d, "job description"
-    # 3. Guess name.com / .ai / .io … and confirm via the homepage title.
+    # 3. The company's slug on its job board (nexergroup.teamtailor.com, jobs.lever.co/acme)
+    #    names its domain more often than not — confirm via the homepage.
+    for j in jobs:
+        slug = ats_slug(j.get("link") or "")
+        if slug and len(slug) >= 3:
+            for tld in ("com", "io", "ai", "co"):
+                if _homepage_is(f"{slug}.{tld}", name, loose=True):
+                    return f"{slug}.{tld}", "job board slug"
+    # 4. Guess name.com / .ai / .io … and confirm via the homepage title.
     c = _compact(name)
     if len(c) < 3:
         return "", ""
@@ -180,6 +204,65 @@ def find_domain(name: str, jobs: list[dict], hints: list[str]) -> tuple[str, str
         if _homepage_is(d, name):
             return d, "website"
     return "", ""
+
+
+_ABOUT_PATHS = ("", "/about", "/about-us", "/company")
+
+
+def website_facts(domain: str) -> dict:
+    """Read the company's own homepage / About / Careers pages and pull the same
+    facts as from job text: "founded in 2005", "over 600 employees", stock ticker."""
+    from bs4 import BeautifulSoup
+    texts: list[str] = []
+    for path in _ABOUT_PATHS:
+        r = _get(f"https://{domain}{path}", allow_redirects=True, headers=BROWSER)
+        if r is None or "html" not in r.headers.get("content-type", ""):
+            continue
+        try:
+            soup = BeautifulSoup(r.text[:400000], "html.parser")
+            for t in soup(["script", "style", "noscript", "svg"]):
+                t.decompose()
+            texts.append(re.sub(r"\s+", " ", soup.get_text(" ")))
+        except Exception:
+            continue
+        if len(texts) >= 3:
+            break
+    if not texts:
+        return {}
+    facts = from_job_text(texts)
+    # "© 2008–2026 Acme" — the earliest copyright year is a floor on the company's age.
+    years = [int(y) for t in texts for y in re.findall(r"(?:©|&copy;|copyright)\s*((?:19|20)\d{2})\s*[-–—]\s*(?:19|20)\d{2}", t, re.I)]
+    if years and not facts.get("founded"):
+        facts["copyright_since"] = min(years)
+    return facts
+
+
+def wayback_verified_since(domain: str, name: str) -> int | None:
+    """The first year the Internet Archive shows THIS company's name on its domain.
+    Unlike the raw registration date, this can't be fooled by an aged domain bought
+    later — the old pages would show someone else's name. Names that are a single
+    short word ("Granola") are skipped: an old granola-food site would match."""
+    c = _compact(name)
+    if len(company_key_words(name)) < 2 and len(c) < 9:
+        return None
+    r = _get("https://web.archive.org/cdx/search/cdx", params={
+        "url": domain, "output": "json", "fl": "timestamp", "filter": "statuscode:200",
+        "collapse": "timestamp:4", "limit": "30"})
+    if r is None:
+        return None
+    try:
+        stamps = [row[0] for row in r.json()[1:]]
+    except Exception:
+        return None
+    for ts in stamps[:4]:   # oldest years first; stop at the first that shows the name
+        snap = _get(f"https://web.archive.org/web/{ts}id_/http://{domain}/", headers=BROWSER)
+        if snap is None:
+            continue
+        head = snap.text[:30000].lower()
+        title = " ".join(re.findall(r"<title[^>]*>(.*?)</title>", head, re.S))
+        if c in re.sub(r"[^a-z0-9]", "", title) or c in re.sub(r"[^a-z0-9]", "", head[:8000]):
+            return int(ts[:4])
+    return None
 
 
 def domain_age_year(domain: str) -> tuple[int | None, str]:
@@ -209,6 +292,29 @@ def domain_age_year(domain: str) -> tuple[int | None, str]:
 
 
 # ── Public ATS boards: open-role count as a size estimate ──────────────────
+_SLUG_SUBDOMAIN_HOSTS = ("teamtailor.com", "recruitee.com", "bamboohr.com", "breezy.hr", "applytojob.com",
+                         "workable.com", "freshteam.com", "zohorecruit.com", "pinpointhq.com", "rippling-ats.com",
+                         "notion.site", "jobs.personio.de", "personio.de", "jobvite.com", "hire.trakstar.com")
+
+
+def ats_slug(link: str) -> str:
+    """The company's own slug on a job board: acme.teamtailor.com → acme,
+    jobs.lever.co/acme → acme. '' when the link carries none."""
+    u = urlparse(link or "")
+    host, parts = u.netloc.lower().removeprefix("www."), [p for p in u.path.split("/") if p]
+    board = ats_board(link)
+    if board:
+        return re.sub(r"[^a-z0-9-]", "", board[1].lower())
+    for h in _SLUG_SUBDOMAIN_HOSTS:
+        if host.endswith("." + h):
+            sub = host[: -len(h) - 1].split(".")[-1]
+            if sub not in {"www", "jobs", "careers", "apply", "app", "boards", "my"}:
+                return re.sub(r"[^a-z0-9-]", "", sub)
+    if host in {"jobs.smartrecruiters.com", "careers.smartrecruiters.com"} and parts:
+        return re.sub(r"[^a-z0-9-]", "", parts[0].lower())
+    return ""
+
+
 def ats_board(link: str) -> tuple[str, str] | None:
     """(ats, slug) for job links on boards with a free public API."""
     u = urlparse(link or "")
@@ -341,34 +447,79 @@ _GENERIC_TAIL = {"software", "technologies", "technology", "tech", "group", "int
                  "se", "ag", "the", "worldwide", "networks", "labs", "industries"}
 
 
+_LISTED_CACHE = Path(__file__).resolve().parent.parent.parent / "data" / "listed_companies.json"
+_LISTED_FILES = (("nasdaqlisted.txt", 6, 3), ("otherlisted.txt", 4, 6))   # (file, ETF col, test-issue col)
+
+
+def _fetch_listed_files() -> dict[str, str]:
+    """Nasdaq's symbol directory: FTP first (no bot wall), HTTPS as a fallback."""
+    import ftplib
+    import io
+    out: dict[str, str] = {}
+    try:
+        f = ftplib.FTP("ftp.nasdaqtrader.com", timeout=30)
+        f.login()
+        for name, _, _ in _LISTED_FILES:
+            buf = io.BytesIO()
+            f.retrbinary(f"RETR symboldirectory/{name}", buf.write)
+            out[name] = buf.getvalue().decode("utf-8", "replace")
+        f.quit()
+    except Exception as exc:
+        log.warning("Nasdaq FTP failed (%s); trying HTTPS", exc)
+    for name, _, _ in _LISTED_FILES:
+        if "|" not in out.get(name, ""):
+            r = _get(f"https://www.nasdaqtrader.com/dynamic/SymDir/{name}",
+                     headers={"User-Agent": BROWSER["User-Agent"]})
+            if r is not None and "|" in r.text:
+                out[name] = r.text
+    return {k: v for k, v in out.items() if "|" in v}
+
+
+def _parse_listed(files: dict[str, str]) -> set[str]:
+    from core.storage import company_key_for
+    keys: set[str] = set()
+    for name, etf_col, test_col in _LISTED_FILES:
+        for line in files.get(name, "").splitlines()[1:]:
+            cols = line.split("|")
+            if len(cols) <= max(etf_col, test_col) or cols[etf_col] == "Y" or cols[test_col] == "Y":
+                continue
+            issuer = _SECURITY_TAIL.sub("", cols[1].split(" - ")[0]).strip(" ,.")
+            k = company_key_for(issuer)
+            if not k:
+                continue
+            keys.add(k)
+            # Jobs use the short brand ("Unity", "Cellebrite") while the listing says
+            # "Unity Software Inc." / "Cellebrite DI Ltd." — also index without generic tails.
+            words = k.split()
+            while len(words) > 1 and words[-1] in _GENERIC_TAIL:
+                words.pop()
+                keys.add(" ".join(words))
+    return keys
+
+
 def is_publicly_listed(name: str) -> bool:
+    """True if the company is listed on Nasdaq/NYSE/other US exchanges. The list is
+    refreshed daily; a failed download keeps the last good copy (memory, then disk)
+    and waits an hour before retrying, so a blocked source never empties it."""
+    import json
     from core.storage import company_key_for
     with _listed_lock:
-        if time.time() - _listed["at"] > 86400 or not _listed["keys"]:
-            keys: set[str] = set()
-            for url, etf_col, test_col in (
-                    ("https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt", 6, 3),
-                    ("https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt", 4, 6)):
-                r = _get(url, headers={"User-Agent": BROWSER["User-Agent"]})
-                if r is None:
-                    continue
-                for line in r.text.splitlines()[1:]:
-                    cols = line.split("|")
-                    if len(cols) <= max(etf_col, test_col) or cols[etf_col] == "Y" or cols[test_col] == "Y":
-                        continue
-                    issuer = _SECURITY_TAIL.sub("", cols[1].split(" - ")[0]).strip(" ,.")
-                    k = company_key_for(issuer)
-                    if k:
-                        keys.add(k)
-                        # Jobs use the short brand ("Unity", "Cellebrite") while the listing
-                        # says "Unity Software Inc." / "Cellebrite DI Ltd." — also index the
-                        # name with generic trailing words removed.
-                        words = k.split()
-                        while len(words) > 1 and words[-1] in _GENERIC_TAIL:
-                            words.pop()
-                            keys.add(" ".join(words))
-            if keys:
+        if time.time() - _listed["at"] > 86400:
+            keys = _parse_listed(_fetch_listed_files())
+            if len(keys) > 1000:
                 _listed.update(at=time.time(), keys=keys)
+                try:
+                    _LISTED_CACHE.write_text(json.dumps(sorted(keys)))
+                except Exception:
+                    pass
+            else:
+                if not _listed["keys"] and _LISTED_CACHE.exists():
+                    try:
+                        _listed["keys"] = set(json.loads(_LISTED_CACHE.read_text()))
+                    except Exception:
+                        pass
+                _listed["at"] = time.time() - 86400 + 3600     # retry in an hour
+                log.warning("public-company list refresh failed; using %d cached names", len(_listed["keys"]))
         return company_key_for(name) in _listed["keys"]
 
 
@@ -447,7 +598,10 @@ def finalize(d: dict) -> dict:
         d["founded_label"] = "Age unknown"
 
     small = d.get("size_lt100")
-    young = isinstance(founded, int) and founded >= cutoff
+    # A real founding year counts on its own (startup = small OR young). An ESTIMATED
+    # one (domain / archive / copyright) does not overrule a known 100+ headcount —
+    # an 11,200-person company with a domain from its 2020 rebrand is no startup.
+    young = isinstance(founded, int) and founded >= cutoff and (d.get("founded_exact") or small is not False)
     old = isinstance(founded, int) and founded < cutoff
     reasons = []
     if d.get("public"):
@@ -511,9 +665,8 @@ def enrich(name: str, jobs: list[dict]) -> dict:
         set_size(emp=text["employees"], plus=text.get("employees_plus", False), src="job description")
     if text.get("founded"):
         set_founded(text["founded"], "job description", True)
-    if text.get("public"):
-        d["public"] = True
-        d["sources"].append("job description: stock ticker")
+    # (A stock ticker in the text is NOT used: job ads cite customers' and partners'
+    #  tickers. Only the official exchange listings / Wikidata decide "public".)
     if text.get("employees") or text.get("founded"):
         d["sources"].append("job description")
 
@@ -533,6 +686,20 @@ def enrich(name: str, jobs: list[dict]) -> dict:
     # Website domain (YC knows it; otherwise find it).
     domain, how = (registrable_domain(yc["website"]), "YC") if yc and yc.get("website") else find_domain(name, jobs, hints)
     d["domain"] = domain
+    guessed_domain = how == "website"     # found by guessing name.tld, not from evidence
+
+    # The company's own website (About / Careers pages).
+    if domain:
+        site = website_facts(domain)
+        # Only the founding year is taken from marketing pages: "founded in 2005" is
+        # reliably about the company, while headcounts there often describe customers
+        # ("built for teams of 1,000 employees") and tickers often belong to partners.
+        if site.get("founded"):
+            set_founded(site["founded"], f"{domain} website", True)
+        if site.get("founded"):
+            d["sources"].append(f"{domain} website")
+        if site.get("copyright_since"):
+            d["copyright_since"] = site["copyright_since"]
 
     # Always asked: it is also the main "publicly traded" check.
     wd = wikidata_lookup(name, domain)
@@ -547,17 +714,7 @@ def enrich(name: str, jobs: list[dict]) -> dict:
         d["public"] = True
         d["sources"].append("listed on Nasdaq/NYSE")
 
-    # Estimates.
-    if domain and not founded_src:
-        # Asymmetric on purpose: a RECENT domain is good evidence of a young company,
-        # but an OLD domain proves nothing — startups often buy aged domains
-        # (granola.com dates from 1995). So only a recent date sets the age.
-        year, how_age = domain_age_year(domain)
-        if year and year >= datetime.utcnow().year - MAX_AGE_YEARS:
-            set_founded(year, how_age, False)
-            d["sources"].append(f"{domain}: {how_age}")
-        elif year:
-            d["sources"].append(f"{domain}: {how_age} (may predate company — not used)")
+    # Estimates — size first, so the domain-age step below can see size signals.
     if open_roles is not None:
         band, lt = size_band_from_open_roles(open_roles)
         set_size(band=band, lt100=lt, src="open roles on job board")
@@ -568,6 +725,28 @@ def enrich(name: str, jobs: list[dict]) -> dict:
         set_size(band="100+ employees (est., enterprise hiring system)", lt100=False, src="hiring system")
     if any(l in _STARTUP_BOARDS for l in links):
         set_size(band="<100 employees (est., startup job board)", lt100=True, src="startup job board")
+
+    if domain and not founded_src:
+        since = wayback_verified_since(domain, name)
+        if since:
+            set_founded(since, f"on {domain} since {since} (Internet Archive)", False)
+            d["sources"].append(f"{domain}: company name archived since {since}")
+    if domain and not founded_src and d.get("copyright_since"):
+        set_founded(d["copyright_since"], f"{domain} copyright since {d['copyright_since']}", False)
+        d["sources"].append(f"{domain}: © since {d['copyright_since']}")
+    if domain and not founded_src:
+        # Asymmetric on purpose: a RECENT domain is good evidence of a young company,
+        # but an OLD domain proves nothing — startups often buy aged domains
+        # (granola.com dates from 1995). So only a recent date sets the age.
+        # And a GUESSED domain may be a side-site of an old company (akamai.dev, 2019),
+        # so its age can't overrule evidence that the company is big.
+        year, how_age = domain_age_year(domain)
+        big = d.get("size_lt100") is False or (d.get("employees") or 0) >= MAX_EMPLOYEES
+        if year and year >= datetime.utcnow().year - MAX_AGE_YEARS and not (guessed_domain and big):
+            set_founded(year, how_age, False)
+            d["sources"].append(f"{domain}: {how_age}")
+        elif year:
+            d["sources"].append(f"{domain}: {how_age} (not used)")
 
     d["size_source"], d["founded_source"] = size_src, founded_src
     d["public"] = bool(d.get("public"))
@@ -594,8 +773,17 @@ def main() -> None:
     from auth import storage   # same storage instance setup as the API
     added = storage.seed_companies_from_jobs()
     log.info("company-intel started; registered %d existing companies for checking", added)
+    last_seed = time.time()
     with ThreadPoolExecutor(max_workers=4) as pool:
         while True:
+            # Safety net: every 10 min, register any company whose job reached the DB
+            # without going through the registration hook (e.g. a sync process still
+            # running older code). Guarantees every company gets checked.
+            if time.time() - last_seed > 600:
+                n = storage.seed_companies_from_jobs()
+                if n:
+                    log.info("registered %d companies that were missing", n)
+                last_seed = time.time()
             batch = storage.companies_to_check(limit=8)
             if not batch:
                 time.sleep(5)

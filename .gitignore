@@ -40,3 +40,6 @@ data/notif_state.json*
 data/_dbrecovery/
 data/notifications.json*
 data/notif_snooze.json*
+# Public-company list cache rebuilt daily by the company-intel worker
+data/listed_companies.json
+data/scheduler.lock
