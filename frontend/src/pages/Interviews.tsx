@@ -483,6 +483,12 @@ function EditInput({ type = 'text', initial, seeded, placeholder, onCommit, onDo
   const dirty = useRef(false);   // true once the user actually edits (typing, or the date/time picker changing the value)
   // commit once; skip a write that didn't change anything (but a seeded/typed edit always commits)
   const commit = (v: string) => { if (done.current) return; done.current = true; if (seeded || v !== initial) onCommit(v); };
+  // Opened by typing: put the caret AFTER the typed letters so the next ones follow them.
+  useEffect(() => {
+    const el = ref.current;
+    if (!seeded || !el) return;
+    try { el.setSelectionRange(el.value.length, el.value.length); } catch { /* date/time inputs */ }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const el = ref.current;
     // Save a pending edit on real click-away (unmount without a blur). Gated on `dirty` so React
@@ -1046,10 +1052,16 @@ function OptionsEditor({ options, onChange }: { options: Opt[]; onChange: (o: Op
   const setAt = (i: number, patch: Partial<Opt>) => onChange(options.map((o, idx) => (idx === i ? { ...o, ...patch } : o)));
   const remove = (i: number) => onChange(options.filter((_, idx) => idx !== i));
   const add = () => onChange([...options, { label: 'New', color: PALETTE[options.length % PALETTE.length] }]);
+  // Key each row by its label (+ occurrence, for duplicate labels), NOT its index. The label
+  // input is uncontrolled (defaultValue), so with index keys deleting option #2 left row #2's
+  // input still showing the deleted text while the LAST row vanished — the data was right but
+  // the screen wasn't. A renamed option gets a new key and simply re-mounts with its new label.
+  const seen: Record<string, number> = {};
+  const keyOf = (o: Opt) => { const n = (seen[o.label] = (seen[o.label] ?? -1) + 1); return `${o.label}\u0000${n}`; };
   return (
     <div>
       {options.map((o, i) => (
-        <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
+        <div key={keyOf(o)} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
           <SwatchPicker value={o.color} onChange={(color) => setAt(i, { color })} />
           <input defaultValue={o.label} onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== o.label) setAt(i, { label: v }); }} style={{ flex: 1 }} />
           <button className="ghost" onClick={() => remove(i)} style={{ padding: '0 6px' }}>✕</button>
@@ -1314,6 +1326,12 @@ export default function Interviews() {
   const selRef = useRef(sel); useEffect(() => { selRef.current = sel; }, [sel]);
   const aSubRef = useRef(aSub); useEffect(() => { aSubRef.current = aSub; }, [aSub]);
   const editingRef = useRef(editing); useEffect(() => { editingRef.current = editing; }, [editing]);
+  // A "type to edit" that has been requested but whose editor isn't on screen yet. Set
+  // SYNCHRONOUSLY in the key handler (editingRef only catches up after React renders), so
+  // letters typed during that render are appended to the seed instead of starting a NEW
+  // edit that replaced it — which is what swallowed the first letter.
+  const pendingSeedRef = useRef<{ r: number; c: number; s: number; seed: string } | null>(null);
+  useEffect(() => { if (!editing) pendingSeedRef.current = null; }, [editing]);
   // Grid keys/clipboard go inert while ANY overlay is open — the editor, the delete confirm, or the
   // profile card. The card belongs in here too: opening it deliberately does NOT clear the cell
   // selection, so without this, reading a profile and pressing Delete would wipe the cell still
@@ -1443,6 +1461,19 @@ export default function Interviews() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (modalRef.current) return;                                       // JD/Feedback modal is open → grid keys inert
+      // An edit was just started by typing but its input hasn't mounted/focused yet: keep the
+      // letters, in order, by appending them to the seed the editor will open with.
+      const pend = pendingSeedRef.current;
+      if (pend && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const ae = document.activeElement as HTMLElement | null;
+        if (!(ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName))) {
+          e.preventDefault();
+          const next = { ...pend, seed: pend.seed + e.key };
+          pendingSeedRef.current = next;
+          setEditing(next);
+          return;
+        }
+      }
       if (editingRef.current) return;                                     // the editor owns its own keys
       const t = e.target as HTMLElement | null;
       if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;        // typing in a field
@@ -1510,7 +1541,9 @@ export default function Interviews() {
       }
       if (editable && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {  // typing → edit, seeded with the char
         e.preventDefault();
-        setEditing({ r: s.r1, c: s.c1, s: aSubRef.current, seed: e.key });
+        const next = { r: s.r1, c: s.c1, s: aSubRef.current, seed: e.key };
+        pendingSeedRef.current = next;
+        setEditing(next);
       }
     };
     document.addEventListener('keydown', onKey);
