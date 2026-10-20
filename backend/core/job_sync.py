@@ -208,6 +208,9 @@ def _build_payload(job: dict, status: str) -> dict:
         "approved_at":    now_iso if status == "approved" else "",
         "sync_remote_id": str(job.get("id") or ""),
         "scrape_status":  "done" if str(job.get("description_preview") or "").strip() else "queued",
+        # Who added the job on VPS1. Display-only: created_by_user_id stays empty so
+        # VPS1 accounts are never confused with local users (access + metrics use the id).
+        "created_by_username": str(job.get("created_by_username") or "").strip(),
     }
 
 
@@ -403,6 +406,37 @@ def sync_once() -> dict:
 # Main loop
 # ---------------------------------------------------------------------------
 
+def backfill_added_by(approved: list[dict] | None = None, max_detail_lookups: int = 300) -> int:
+    """Fill in the VPS1 adder's username on synced jobs that were stored without it.
+
+    Matches by the VPS1 job id (sync_remote_id): first from the approved list, then
+    — for jobs no longer approved on VPS1 — one detail lookup each (capped per run,
+    so a large backlog is filled over a few cycles without hammering VPS1)."""
+    missing = [j for j in storage.get_jobs()
+               if j.get("source") == "sync" and j.get("sync_remote_id")
+               and not str(j.get("created_by_username") or "").strip()]
+    if not missing:
+        return 0
+    if approved is None:
+        approved = _fetch_all_approved()
+    by_id = {str(j.get("id") or ""): str(j.get("created_by_username") or "").strip()
+             for j in approved or [] if j.get("id")}
+    filled = lookups = 0
+    for local in missing:
+        rid = str(local["sync_remote_id"])
+        name = by_id.get(rid, "")
+        if not name and lookups < max_detail_lookups:
+            lookups += 1
+            detail = _fetch_detail(rid)
+            name = str((detail or {}).get("created_by_username") or "").strip()
+        if name:
+            storage.update_job(local["id"], {"created_by_username": name})
+            filled += 1
+    log.info("Added-by backfill: filled %d of %d synced jobs (%d detail lookups)",
+             filled, len(missing), lookups)
+    return filled
+
+
 def main() -> None:
     log.info(
         "Job sync started — interval=%ds remote API=%s user=%s",
@@ -415,6 +449,7 @@ def main() -> None:
             reject_incomplete_approved()
             retry_rejected()
             sync_once()
+            backfill_added_by()
         except Exception as exc:
             log.error("Unhandled error in sync cycle: %s", exc)
         time.sleep(SYNC_INTERVAL_SECONDS)

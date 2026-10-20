@@ -21,6 +21,54 @@ function formatJobError(err: any, fallback: string): string {
 function formatDay(iso: string): string { return etDateLong(iso, 'Unknown date'); }
 function formatDate(iso: string): string { return etDateShort(iso, '—'); }
 
+// Status dropdown and Edit button share one size so the row's actions line up.
+const JOB_ACTION_CTRL: React.CSSProperties = {
+  height: 32, boxSizing: 'border-box', padding: '0 0.6rem', fontSize: '0.85rem', lineHeight: 1,
+  width: 120, margin: 0,
+};
+
+type DupConflict = { kind: string; message: string; existing_id?: string; existing_company?: string; existing_title?: string };
+
+/** Live duplicate check while a job is being typed: the same rules the server
+ *  applies on save (same link, same company + title, one per company/region/month,
+ *  blacklist), run ~0.5s after the user stops typing — so a duplicate is caught
+ *  before they fill in the description and click Save. */
+function useDuplicateCheck(fields: { company: string; job_title: string; link: string; region: string }, excludeId = '') {
+  const [state, setState] = useState<{ checking: boolean; conflicts: DupConflict[] }>({ checking: false, conflicts: [] });
+  const seq = React.useRef(0);
+  const { company, job_title, link, region } = fields;
+  useEffect(() => {
+    if (!company.trim() && !link.trim()) { setState({ checking: false, conflicts: [] }); return; }
+    const my = ++seq.current;
+    setState((s) => ({ ...s, checking: true }));
+    const t = window.setTimeout(async () => {
+      try {
+        const r = await api.post<{ duplicate: boolean; conflicts: DupConflict[] }>('/api/jobs/check-duplicate',
+          { company, job_title, link, region, exclude_job_id: excludeId });
+        if (my === seq.current) setState({ checking: false, conflicts: r.conflicts || [] });
+      } catch {
+        if (my === seq.current) setState({ checking: false, conflicts: [] });   // never block on a failed check
+      }
+    }, 500);
+    return () => window.clearTimeout(t);
+  }, [company, job_title, link, region, excludeId]);
+  return state;
+}
+
+function DuplicateNotice({ checking, conflicts }: { checking: boolean; conflicts: DupConflict[] }) {
+  if (checking && !conflicts.length) return <div className="muted" style={{ fontSize: '0.82rem', margin: '-4px 0 10px' }}>Checking for duplicates…</div>;
+  if (!conflicts.length) return null;
+  return (
+    <div style={{ margin: '-4px 0 12px', padding: '0.55rem 0.75rem', borderRadius: 8, fontSize: '0.85rem',
+      background: 'rgba(220,38,38,0.10)', border: '1px solid rgba(220,38,38,0.45)', color: 'var(--danger,#f87171)' }}>
+      <strong>Can't save — duplicate:</strong>
+      <ul style={{ margin: '4px 0 0', paddingLeft: '1.1rem' }}>
+        {conflicts.map((c, i) => <li key={i}>{c.message}</li>)}
+      </ul>
+    </div>
+  );
+}
+
 interface JobsResponse {
   jobs: any[];
   total: number;
@@ -59,8 +107,12 @@ export default function Jobs() {
   // Form / edit state
   const [showForm, setShowForm] = useState(false);
   const [newJob, setNewJob] = useState({ ...BLANK_JOB });
+  const newDup = useDuplicateCheck(showForm ? newJob : BLANK_JOB);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState<any>({});
+  const editDup = useDuplicateCheck(
+    editingId ? { company: editDraft.company || '', job_title: editDraft.job_title || '', link: editDraft.link || '', region: editDraft.region || '' } : BLANK_JOB,
+    editingId || '');
 
   // Consume the ?company= deep-link param once, then strip it from the URL so
   // it doesn't stick on later navigation.
@@ -336,6 +388,7 @@ export default function Jobs() {
               </select>
             </div>
           </div>
+          <DuplicateNotice checking={newDup.checking} conflicts={newDup.conflicts} />
           <div className="field"><label>Description</label><textarea rows={8} value={newJob.description} onChange={(e) => setNewJob({ ...newJob, description: e.target.value })} /></div>
           <div className="field">
             <label>Application questions (one per line)</label>
@@ -343,11 +396,11 @@ export default function Jobs() {
               placeholder={'Why are you a strong fit for this role?\nTell us about your most relevant experience.\nWhy do you want to work here?'} />
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <button onClick={() => handleCreate(false)} disabled={!newJob.company || !newJob.job_title || createMutation.isPending}>
+            <button onClick={() => handleCreate(false)} disabled={!newJob.company || !newJob.job_title || createMutation.isPending || newDup.conflicts.length > 0}>
               {createMutation.isPending ? <span className="spinner" /> : 'Save'}
             </button>
             <button className="secondary" onClick={() => handleCreate(true)}
-              disabled={!newJob.company || !newJob.job_title || createMutation.isPending}
+              disabled={!newJob.company || !newJob.job_title || createMutation.isPending || newDup.conflicts.length > 0}
               title="Save this job and keep the form open for the next one">
               {createMutation.isPending ? <span className="spinner" /> : 'Save & Add Another'}
             </button>
@@ -404,7 +457,7 @@ export default function Jobs() {
                     onChange={toggleAll} />
                 </th>
               )}
-              <th>Company</th><th>Job title</th><th>Region</th><th>Status</th>
+              <th>Company</th><th style={{ width: '22%' }}>Job title</th><th>Region</th><th>Status</th>
               <th style={{ whiteSpace: 'nowrap' }}>AddedAt</th>
               {isAdmin && <th style={{ whiteSpace: 'nowrap' }}>Added by</th>}
               {isAdmin && <th></th>}
@@ -439,13 +492,13 @@ export default function Jobs() {
                             onChanged={() => qc.invalidateQueries({ queryKey: ['jobs'] })} />
                         </div>
                       </td>
-                      <td>{job.link ? <a href={job.link} target="_blank" rel="noreferrer">{job.job_title}</a> : job.job_title}</td>
+                      <td style={{ maxWidth: 260, overflowWrap: 'anywhere' }}>{job.link ? <a href={job.link} target="_blank" rel="noreferrer">{job.job_title}</a> : job.job_title}</td>
                       <td>{job.region}</td>
                       <td><span className={`pill ${job.status}`}>{job.status}</span></td>
                       <td style={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }}>{formatDate(job.submitted_at || job.approved_at)}</td>
                       {isAdmin && (
                         <td style={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }}>
-                          {job.created_by_username || (job.source === 'sync' ? <span className="muted">Sync</span> : <span className="muted">—</span>)}
+                          {job.created_by_username || <span className="muted">—</span>}
                         </td>
                       )}
                       {isAdmin && (
@@ -457,13 +510,14 @@ export default function Jobs() {
                                 if (next === 'deleted' && !confirm(`Mark "${job.company} — ${job.job_title}" as deleted? It will be permanently hidden and never re-synced.`)) return;
                                 updateMutation.mutate({ id: job.id, payload: { status: next } });
                               }}
-                              style={{ padding: '0.25rem 0.4rem', fontSize: '0.82rem' }}>
+                              style={JOB_ACTION_CTRL}>
                               <option value="approved">approved</option>
                               <option value="pending">pending</option>
                               <option value="rejected">rejected</option>
                               <option value="deleted">deleted</option>
                             </select>
-                            <button className="secondary" onClick={() => editingId === job.id ? setEditingId(null) : startEdit(job)}>
+                            <button className="secondary" style={{ ...JOB_ACTION_CTRL, width: 76 }}
+                              onClick={() => editingId === job.id ? setEditingId(null) : startEdit(job)}>
                               {editingId === job.id ? 'Cancel' : 'Edit'}
                             </button>
                           </div>
@@ -522,13 +576,14 @@ export default function Jobs() {
                               </select>
                             </div>
                           </div>
+                          <DuplicateNotice checking={editDup.checking} conflicts={editDup.conflicts} />
                           <div className="field"><label>Description</label><textarea rows={6} value={editDraft.description} onChange={(e) => setEditDraft({ ...editDraft, description: e.target.value })} /></div>
                           <div className="field">
                             <label>Application questions (one per line)</label>
                             <textarea rows={4} value={editDraft.note} onChange={(e) => setEditDraft({ ...editDraft, note: e.target.value })} />
                           </div>
                           <div style={{ display: 'flex', gap: 8 }}>
-                            <button onClick={() => updateMutation.mutate({ id: job.id, payload: editDraft })} disabled={updateMutation.isPending}>
+                            <button onClick={() => updateMutation.mutate({ id: job.id, payload: editDraft })} disabled={updateMutation.isPending || editDup.conflicts.length > 0}>
                               {updateMutation.isPending ? <span className="spinner" /> : 'Save changes'}
                             </button>
                             <button className="secondary" onClick={() => setEditingId(null)}>Cancel</button>

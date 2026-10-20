@@ -183,6 +183,34 @@ def get_job(job_id: str, user: dict = Depends(get_current_user)):
     return job
 
 
+@router.post("/check-duplicate")
+def check_duplicate(body: dict, user: dict = Depends(require_jobs_access)):
+    """Live pre-save check for the add/edit form: runs the SAME rules as saving
+    (same link, same company + title, one job per company per region per month,
+    blacklist) and returns every conflict instead of rejecting. Read-only.
+
+    Body: {company, job_title, link, region, exclude_job_id?} — exclude_job_id is
+    the job being edited, so it never conflicts with itself. Editing skips the
+    one-per-month rule, matching update_job."""
+    payload = {k: str((body or {}).get(k) or "").strip() for k in ("company", "job_title", "link", "region")}
+    exclude = str((body or {}).get("exclude_job_id") or "").strip()
+    conflicts: list[dict] = []
+    checks = [lambda: _check_duplicate(payload, exclude_job_id=exclude)]
+    if not exclude and payload["company"]:
+        checks.append(lambda: _check_company_week(payload))
+    for check in checks:
+        try:
+            check()
+        except HTTPException as exc:
+            if isinstance(exc.detail, dict):
+                conflicts.append(exc.detail)
+    if payload["company"] or payload["link"] or payload["job_title"]:
+        reason = storage.job_block_reason(payload)
+        if reason is not None:
+            conflicts.append({"kind": "blacklist", "message": f"Blocked — {reason} (Settings → Blacklist)."})
+    return {"duplicate": bool(conflicts), "conflicts": conflicts}
+
+
 @router.post("")
 def create_job(body: JobUpsertRequest, user: dict = Depends(require_jobs_access)):
     payload = dict(body.payload)
