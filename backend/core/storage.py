@@ -27,6 +27,8 @@ from sqlalchemy.orm import Session
 from .db import session_scope
 from .db import migration as _migration
 from .db.models import (
+    AutofillAnswerRow,
+    AutofillLabelRow,
     BidSkipRow,
     CompanyRow,
     GeneratedResumeRow,
@@ -2027,6 +2029,50 @@ class Storage:
             row.status = 'pending'
             row.created_at = datetime.utcnow()   # jump the queue
             return True
+
+    # ── Autofill (answers learned per profile + shared label knowledge) ──
+    def autofill_answers(self, profile_id: str) -> list[dict]:
+        with session_scope(self.db_path) as session:
+            rows = session.scalars(select(AutofillAnswerRow)
+                                   .where(AutofillAnswerRow.profile_id == profile_id)
+                                   .order_by(AutofillAnswerRow.question)).all()
+            return [{'question_key': r.question_key, 'question': r.question, 'answer': r.answer,
+                     'updated_by_username': r.updated_by_username,
+                     'updated_at': r.updated_at.strftime('%Y-%m-%dT%H:%M:%SZ') if r.updated_at else ''}
+                    for r in rows]
+
+    def save_autofill_answer(self, profile_id: str, question_key: str, question: str, answer: str,
+                             *, username: str = '') -> None:
+        with session_scope(self.db_path) as session:
+            row = session.get(AutofillAnswerRow, (profile_id, question_key))
+            if row is None:
+                row = AutofillAnswerRow(profile_id=profile_id, question_key=question_key)
+                session.add(row)
+            row.question = question[:500]
+            row.answer = answer[:2000]
+            row.updated_by_username = username
+            row.updated_at = datetime.utcnow()
+
+    def delete_autofill_answer(self, profile_id: str, question_key: str) -> bool:
+        with session_scope(self.db_path) as session:
+            row = session.get(AutofillAnswerRow, (profile_id, question_key))
+            if row is None:
+                return False
+            session.delete(row)
+            return True
+
+    def autofill_labels(self) -> dict[str, str]:
+        with session_scope(self.db_path) as session:
+            return {r.label_key: r.field for r in session.scalars(select(AutofillLabelRow)).all()}
+
+    def save_autofill_label(self, label_key: str, field: str) -> None:
+        with session_scope(self.db_path) as session:
+            row = session.get(AutofillLabelRow, label_key)
+            if row is None:
+                session.add(AutofillLabelRow(label_key=label_key, field=field))
+            else:
+                row.field = field
+                row.updated_at = datetime.utcnow()
 
     # ── Bid skips (per-profile "not for this profile" on a job) ──────────
     def skip_bid_job(self, profile_id: str, job_id: str, *, user_id: str = '', username: str = '') -> None:

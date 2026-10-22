@@ -41,7 +41,7 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 BID_ACTIVITY_LOG = LOG_DIR / "bid_activity.jsonl"     # every event, one JSON per line
 BID_SUSPICIOUS_LOG = LOG_DIR / "bid_suspicious.log"   # human-readable cheat flags
 
-_BID_ACTIONS = {"copy_prompt", "generate", "download", "open_link", "mark_applied", "report", "skip"}
+_BID_ACTIONS = {"copy_prompt", "generate", "download", "open_link", "mark_applied", "report", "skip", "autofill"}
 # Steps a bidder is expected to have done before marking a job applied.
 _BID_REQUIRED_BEFORE_APPLY = ["copy_prompt", "generate", "download", "open_link"]
 

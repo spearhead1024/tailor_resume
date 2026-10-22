@@ -251,3 +251,30 @@ class BidSkipRow(Base):
     skipped_by_username: Mapped[str] = mapped_column(String(255), default='')
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
 
+
+class AutofillAnswerRow(Base):
+    """An application-form answer the extension learned for one profile.
+
+    `question_key` is the normalized question text (lowercase, alphanumerics,
+    single spaces, without "required"/"optional") so the same question on any
+    site maps to one row. Captured when a bidder clicks "Remember answers" in
+    the side panel; admins can edit or delete them in the Profiles tab."""
+    __tablename__ = 'autofill_answers'
+
+    profile_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    question_key: Mapped[str] = mapped_column(String(300), primary_key=True)
+    question: Mapped[str] = mapped_column(String(500), default='')
+    answer: Mapped[str] = mapped_column(String(2000), default='')
+    updated_by_username: Mapped[str] = mapped_column(String(255), default='')
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class AutofillLabelRow(Base):
+    """Shared (all profiles) knowledge that a form label means a known profile
+    field — e.g. "given name" → first_name. Learned when a bidder types a
+    profile's own value into a field the scanner didn't recognize."""
+    __tablename__ = 'autofill_labels'
+
+    label_key: Mapped[str] = mapped_column(String(300), primary_key=True)
+    field: Mapped[str] = mapped_column(String(64), default='')
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)

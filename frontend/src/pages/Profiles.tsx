@@ -695,6 +695,9 @@ export default function Profiles() {
                 </div>
               )}
 
+              {/* ── Autofill answers the extension learned for this profile (admin) ── */}
+              {isAdmin && selected.id && <LearnedAnswers profileId={selected.id} />}
+
               {/* ── Uploaded DOCX template (admin) ── */}
               {isAdmin && (
                 <div style={{ marginTop: '1.25rem', borderTop: '1px solid var(--border)', paddingTop: '1rem' }}>
@@ -781,6 +784,83 @@ export default function Profiles() {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+
+/* ---- Autofill answers learned by the extension ("Remember answers"), per profile ---- */
+type LearnedAnswer = { question_key: string; question: string; answer: string; updated_by_username: string; updated_at: string };
+
+function LearnedAnswers({ profileId }: { profileId: string }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [open, setOpen] = useState(false);
+  const [edit, setEdit] = useState<{ key: string; value: string } | null>(null);
+  const qk = ['autofill-answers', profileId];
+  const { data = [], isLoading } = useQuery({
+    queryKey: qk,
+    queryFn: () => api.get<LearnedAnswer[]>(`/api/autofill/answers?profile_id=${encodeURIComponent(profileId)}`),
+    enabled: open,
+  });
+  const save = async (key: string, answer: string) => {
+    try {
+      await api.patch('/api/autofill/answers', { profile_id: profileId, question_key: key, answer });
+      setEdit(null); qc.invalidateQueries({ queryKey: qk });
+    } catch (e: any) { toast(e?.response?.data?.detail || 'Save failed', 'error'); }
+  };
+  const remove = async (a: LearnedAnswer) => {
+    if (!window.confirm(`Forget the answer to "${a.question}"?`)) return;
+    try {
+      await api.delete(`/api/autofill/answers?profile_id=${encodeURIComponent(profileId)}&question_key=${encodeURIComponent(a.question_key)}`);
+      qc.invalidateQueries({ queryKey: qk });
+    } catch (e: any) { toast(e?.response?.data?.detail || 'Delete failed', 'error'); }
+  };
+  return (
+    <div style={{ marginTop: '1.25rem', borderTop: '1px solid var(--border)', paddingTop: '1rem' }}>
+      <button type="button" className="ghost" onClick={() => setOpen(!open)}>
+        {open ? '▾' : '▸'} Autofill answers learned by the extension
+      </button>
+      {open && (
+        <div style={{ marginTop: 10 }}>
+          {isLoading ? <span className="spinner" /> : data.length === 0 ? (
+            <div className="muted" style={{ fontSize: '0.85rem' }}>
+              Nothing learned yet — bidders teach the extension by filling a question by hand and clicking <strong>Remember</strong> in the side panel.
+            </div>
+          ) : (
+            <table style={{ width: '100%', fontSize: '0.85rem', borderCollapse: 'collapse' }}>
+              <thead><tr className="muted" style={{ textAlign: 'left' }}><th style={{ padding: '4px 6px' }}>Question</th><th style={{ padding: '4px 6px' }}>Answer</th><th style={{ padding: '4px 6px' }}>By</th><th /></tr></thead>
+              <tbody>
+                {data.map((a) => (
+                  <tr key={a.question_key} style={{ borderTop: '1px solid var(--border)' }}>
+                    <td style={{ padding: '6px', maxWidth: 360 }}>{a.question}</td>
+                    <td style={{ padding: '6px', minWidth: 160 }}>
+                      {edit?.key === a.question_key ? (
+                        <input autoFocus value={edit.value} onChange={(e) => setEdit({ key: a.question_key, value: e.target.value })}
+                          onKeyDown={(e) => { if (e.key === 'Enter' && edit.value.trim()) save(a.question_key, edit.value.trim()); if (e.key === 'Escape') setEdit(null); }} />
+                      ) : a.answer}
+                    </td>
+                    <td className="muted" style={{ padding: '6px', whiteSpace: 'nowrap' }}>{a.updated_by_username}</td>
+                    <td style={{ padding: '6px', whiteSpace: 'nowrap', textAlign: 'right' }}>
+                      {edit?.key === a.question_key ? (
+                        <>
+                          <button type="button" style={{ padding: '2px 10px', fontSize: '0.8rem' }} disabled={!edit.value.trim()} onClick={() => save(a.question_key, edit.value.trim())}>Save</button>{' '}
+                          <button type="button" className="ghost" style={{ padding: '2px 10px', fontSize: '0.8rem' }} onClick={() => setEdit(null)}>Cancel</button>
+                        </>
+                      ) : (
+                        <>
+                          <button type="button" className="secondary" style={{ padding: '2px 10px', fontSize: '0.8rem' }} onClick={() => setEdit({ key: a.question_key, value: a.answer })}>Edit</button>{' '}
+                          <button type="button" className="ghost" style={{ padding: '2px 10px', fontSize: '0.8rem' }} onClick={() => remove(a)}>Delete</button>
+                        </>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
     </div>
   );
 }
