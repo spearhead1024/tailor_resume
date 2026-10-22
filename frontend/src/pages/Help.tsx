@@ -16,7 +16,7 @@ type ExtMeta = {
 };
 
 const BASE = 'https://tailorresume.duckdns.org';
-type Sub = 'extension' | 'guide' | 'shortcuts';
+type Sub = 'extension' | 'guide';
 
 export default function Help() {
   const [sub, setSub] = useState<Sub>('extension');
@@ -40,12 +40,10 @@ export default function Help() {
       <div style={{ display: 'flex', gap: 4, marginBottom: '1.25rem', borderBottom: '1px solid var(--border)' }}>
         {tabBtn('extension', '🧩 Extension')}
         {tabBtn('guide', '🎬 Guide')}
-        {tabBtn('shortcuts', '⌨️ Shortcuts')}
       </div>
 
       {sub === 'extension' && <ExtensionGuide />}
       {sub === 'guide' && <GuideVideo />}
-      {sub === 'shortcuts' && <ShortcutsSettings />}
     </div>
   );
 }
@@ -66,9 +64,10 @@ function ExtensionGuide() {
   return (
     <div>
       <p className="muted">
-        The TailorResume Assistant adds a bar to the top of every tab so bidders can find &amp; download the
-        right resume for the job page they're viewing, copy profile fields, report jobs, and screenshot —
-        without leaving the page.
+        The TailorResume Assistant docks a Bid side panel next to the job page: pick a profile and a job,
+        copy the ChatGPT prompt, generate &amp; download the CV, <strong>autofill the application form</strong> (CV
+        attached), then mark applied, report or skip — without leaving the page. Questions it can't answer yet: fill them
+        once and click <strong>Remember</strong>; next time they fill themselves for that profile.
       </p>
 
       <div className="card" style={{ marginBottom: '1rem' }}>
@@ -143,7 +142,7 @@ function ExtensionGuide() {
             <li>Open <code>chrome://extensions</code>.</li>
             <li>Turn <strong>Developer mode</strong> ON (top-right).</li>
             <li>Click <strong>Load unpacked</strong> → select the <strong>extracted folder</strong>.</li>
-            <li>Pin the TailorResume icon, click it, and <strong>sign in</strong> with your TailorResume username &amp; password.</li>
+            <li>Pin the TailorResume icon and click it — the <strong>side panel</strong> opens. <strong>Sign in</strong> with your TailorResume username &amp; password, pick a profile, and bid without leaving the job page.</li>
           </ol>
           <div className="card" style={{ background: 'var(--panel-2)', fontSize: '0.82rem' }}>
             ⚠️ Don't drag the <code>.crx</code> onto the page — Chrome blocks self-hosted <code>.crx</code> drag-installs
@@ -151,7 +150,7 @@ function ExtensionGuide() {
           </div>
           <p className="muted" style={{ fontSize: '0.82rem', marginTop: 10 }}>
             <strong>Updating:</strong> when this page shows a newer version, re-download the .zip, replace the folder's
-            contents, and click the ↻ reload icon on the extension card. The bar also nudges you when an update is available.
+            contents, and click the ↻ reload icon on the extension card.
           </p>
         </div>
       )}
@@ -313,144 +312,6 @@ function GuideVideo() {
   );
 }
 
-// ─── Subtab 3: customize keyboard shortcuts ─────────────────────────────────
-type CatalogItem = { id: string; label: string; default: string; group: string };
-type ShortcutsResp = { bindings: Record<string, string>; catalog: CatalogItem[] };
-
-function ShortcutsSettings() {
-  const toast = useToast();
-  const { data, isLoading, refetch } = useQuery({
-    queryKey: ['shortcuts'],
-    queryFn: () => api.get<ShortcutsResp>('/api/auth/shortcuts'),
-  });
-  const [draft, setDraft] = useState<Record<string, string>>({});
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => { if (data?.bindings) setDraft({ ...data.bindings }); }, [data?.bindings]);
-
-  const catalog = data?.catalog || [];
-  const groups = useMemo(() => {
-    const m = new Map<string, CatalogItem[]>();
-    for (const c of catalog) { if (!m.has(c.group)) m.set(c.group, []); m.get(c.group)!.push(c); }
-    return Array.from(m.entries());
-  }, [catalog]);
-
-  // key → list of action ids using it (to flag conflicts)
-  const conflicts = useMemo(() => {
-    const byKey = new Map<string, string[]>();
-    for (const id in draft) {
-      const k = draft[id];
-      if (!k) continue;
-      if (!byKey.has(k)) byKey.set(k, []);
-      byKey.get(k)!.push(id);
-    }
-    const bad = new Set<string>();
-    for (const [, ids] of byKey) if (ids.length > 1) ids.forEach((i) => bad.add(i));
-    return bad;
-  }, [draft]);
-
-  const dirty = useMemo(() => {
-    if (!data?.bindings) return false;
-    return catalog.some((c) => (draft[c.id] || '') !== (data.bindings[c.id] || ''));
-  }, [draft, data?.bindings, catalog]);
-
-  function setKey(id: string, raw: string) {
-    const k = (raw || '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(-1);
-    setDraft((d) => ({ ...d, [id]: k }));
-  }
-  function resetDefaults() {
-    const d: Record<string, string> = {};
-    for (const c of catalog) d[c.id] = c.default;
-    setDraft(d);
-  }
-
-  async function save() {
-    // all must be filled and unique
-    const missing = catalog.filter((c) => !draft[c.id]);
-    if (missing.length) { toast(`Set a key for: ${missing.map((m) => m.label).join(', ')}`, 'error'); return; }
-    if (conflicts.size) { toast('Two actions share a key — fix the highlighted ones.', 'error'); return; }
-    setSaving(true);
-    try {
-      await api.put('/api/auth/shortcuts', { bindings: draft });
-      toast('Shortcuts saved — they apply in the extension on your next page focus.', 'success');
-      await refetch();
-    } catch (e: any) {
-      toast(e?.response?.data?.detail || 'Save failed', 'error');
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  if (isLoading) return <div><span className="spinner" /> Loading…</div>;
-
-  return (
-    <div>
-      <div className="card" style={{ background: 'var(--panel-2)', fontSize: '0.86rem', marginBottom: '1rem' }}>
-        Every shortcut is <strong>Alt + a key you choose</strong>. In the extension bar:
-        <ul style={{ margin: '6px 0 0', lineHeight: 1.6 }}>
-          <li><strong>Clicking</strong> a copy field <strong>copies</strong> it to the clipboard.</li>
-          <li>Its <strong>shortcut pastes</strong> the value straight into whatever input you've clicked into on the page — including most embedded application forms.</li>
-        </ul>
-        Each key must be unique. Changes apply in the extension automatically (when its tab next gets focus).
-        Shortcuts are <strong>Alt + key</strong> on every platform — on macOS hold <strong>Option</strong>.
-      </div>
-
-      <div className="card">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
-          <div className="section-title" style={{ margin: 0 }}>Your shortcuts</div>
-          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
-            <button className="secondary" onClick={resetDefaults} disabled={saving}>Reset to defaults</button>
-            <button onClick={save} disabled={saving || !dirty || conflicts.size > 0}>
-              {saving ? <><span className="spinner" /> Saving…</> : 'Save shortcuts'}
-            </button>
-          </div>
-        </div>
-
-        {groups.map(([group, items]) => (
-          <div key={group} style={{ marginBottom: 16 }}>
-            <div style={{
-              fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.06em',
-              color: 'var(--muted)', fontWeight: 700, marginBottom: 8,
-            }}>{group}</div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 8 }}>
-              {items.map((c) => {
-                const bad = conflicts.has(c.id);
-                return (
-                  <div key={c.id} style={{
-                    display: 'flex', alignItems: 'center', gap: 8,
-                    border: `1px solid ${bad ? 'var(--danger, #ef4444)' : 'var(--border)'}`,
-                    borderRadius: 8, padding: '6px 10px',
-                  }}>
-                    <span style={{ flex: 1, fontSize: '0.86rem' }}>{c.label}</span>
-                    <span className="muted" style={{ fontSize: '0.82rem' }}>Alt&nbsp;+</span>
-                    <input
-                      value={(draft[c.id] || '').toUpperCase()}
-                      onChange={(e) => setKey(c.id, e.target.value)}
-                      maxLength={1}
-                      spellCheck={false}
-                      style={{
-                        width: 38, textAlign: 'center', textTransform: 'uppercase',
-                        fontWeight: 700, padding: '4px', borderColor: bad ? 'var(--danger, #ef4444)' : undefined,
-                      }}
-                    />
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        ))}
-
-        {conflicts.size > 0 && (
-          <div style={{ color: 'var(--danger, #ef4444)', fontSize: '0.84rem', marginTop: 4 }}>
-            Some keys are used by more than one action (highlighted). Give each a unique key to save.
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ── Exact, OS-specific auto-update setup ────────────────────────────────────
 function AutoUpdateGuide({ extId }: { extId: string }) {
   const [os, setOs] = useState<'win' | 'mac' | 'linux'>(() => {
     const p = navigator.platform.toLowerCase();

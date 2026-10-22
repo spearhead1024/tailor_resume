@@ -1,6 +1,6 @@
 {
-  "version": "0.4.2",
+  "version": "0.7.1",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "v0.4.2 \u2014 fixes 'repeated N times' screenshots: removed the scroll-and-stitch entirely. Full-page capture is now a single DevTools pass (no tiling); if the debugger permission isn't active it cleanly saves the visible area and tells you to enable it.",
-  "built_at": "2026-06-16T16:44:42Z"
+  "changelog": "v0.7.1 \u2014 Autofill fixes: Remember now works (it failed every time in 0.7.0) and is also captured on Mark as Applied; on Lever/Ashby posting pages Autofill presses Apply and fills the form itself; works on forms embedded in company career sites; the report separates required questions from optional ones; essays are never remembered. The panel no longer navigates away when opened mid-application, and it follows the tab \u2014 open a queued job yourself and the panel selects it.",
+  "built_at": "2026-10-22T03:04:03Z"
 }

@@ -1,8 +1,5 @@
-// Shared API client for the service worker. All network calls go through the
-// background worker (not content scripts) so page CSP can't block them and the
-// JWT never touches page context.
-//
-// Config + token live in chrome.storage.local.
+// API client for the side panel. Session (JWT + user) lives in
+// chrome.storage.local so it survives the panel closing.
 
 const DEFAULT_API_BASE = 'https://tailorresume.duckdns.org';
 
@@ -23,10 +20,6 @@ export async function clearSession() {
   await chrome.storage.local.remove(['token', 'user']);
 }
 
-export async function setApiBase(apiBase) {
-  await chrome.storage.local.set({ apiBase: (apiBase || DEFAULT_API_BASE).replace(/\/+$/, '') });
-}
-
 class ApiError extends Error {
   constructor(message, status) {
     super(message);
@@ -34,18 +27,14 @@ class ApiError extends Error {
   }
 }
 
-async function request(path, { method = 'GET', body, isForm = false, raw = false } = {}) {
+export async function request(path, { method = 'GET', body, raw = false } = {}) {
   const { apiBase, token } = await getConfig();
   const headers = {};
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  let payload = body;
-  if (body && !isForm) {
-    headers['Content-Type'] = 'application/json';
-    payload = JSON.stringify(body);
-  }
+  if (body) headers['Content-Type'] = 'application/json';
   let resp;
   try {
-    resp = await fetch(`${apiBase}${path}`, { method, headers, body: payload });
+    resp = await fetch(`${apiBase}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
   } catch (e) {
     throw new ApiError('Network error — is the server reachable?', 0);
   }
@@ -65,22 +54,5 @@ async function request(path, { method = 'GET', body, isForm = false, raw = false
   }
   return data;
 }
-
-export const api = {
-  login: (identifier, password) =>
-    request('/api/auth/login', { method: 'POST', body: { identifier, password, ttl_days: 30 } }),
-  me: () => request('/api/auth/me'),
-  profilesMeta: () => request('/api/todo?for=apply'),
-  profileFull: (id) => request(`/api/profiles/${encodeURIComponent(id)}`),
-  findResumeByUrl: (profileId, url) =>
-    request(`/api/resumes/by-job-url?profile_id=${encodeURIComponent(profileId)}&url=${encodeURIComponent(url)}`),
-  resumePdf: (resumeId) => request(`/api/resumes/${encodeURIComponent(resumeId)}/pdf`, { raw: true }),
-  markApplied: (resumeId) => request(`/api/resumes/${encodeURIComponent(resumeId)}/apply`, { method: 'POST' }),
-  reportJob: (jobId, reason) =>
-    request(`/api/jobs/${encodeURIComponent(jobId)}/reports`, { method: 'POST', body: { reason } }),
-  uploadScreenshot: (form) => request('/api/screenshots', { method: 'POST', body: form, isForm: true }),
-  extensionVersion: () => request('/api/extension/version'),
-  shortcuts: () => request('/api/auth/shortcuts'),
-};
 
 export { ApiError };
