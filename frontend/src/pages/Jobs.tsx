@@ -229,6 +229,18 @@ export default function Jobs() {
   }
   const bulkApprove = () => runBulk('Approved', (id) => api.patch(`/api/jobs/${id}`, { payload: { status: 'approved' } }));
   const bulkReject = () => runBulk('Rejected', (id) => api.patch(`/api/jobs/${id}`, { payload: { status: 'rejected' } }));
+  // Copy the job links of the selected jobs, one per line, in the order shown on the page.
+  const copyLinks = async () => {
+    const links = jobs.filter((j: any) => selected.has(j.id)).map((j: any) => String(j.link || '').trim()).filter(Boolean);
+    const missing = selected.size - links.length;
+    if (!links.length) { toast('None of the selected jobs has a link', 'error'); return; }
+    try {
+      await navigator.clipboard.writeText(links.join('\n'));
+      toast(`Copied ${links.length} link${links.length === 1 ? '' : 's'}${missing ? ` (${missing} without a link skipped)` : ''}`, 'success');
+    } catch {
+      toast('Could not copy — the browser blocked clipboard access', 'error');
+    }
+  };
   const bulkDelete = () => { if (!confirm(`Delete ${selected.size} selected job(s)?`)) return; runBulk('Deleted', (id) => api.delete(`/api/jobs/${id}`)); };
 
   // Group the current page by the selected dimension.
@@ -442,6 +454,7 @@ export default function Jobs() {
             <strong>{selected.size} selected</strong>
             <button className="secondary" onClick={bulkApprove} disabled={bulkBusy}>Approve</button>
             <button className="secondary" onClick={bulkReject} disabled={bulkBusy}>Reject</button>
+            <button className="secondary" onClick={copyLinks} disabled={bulkBusy} title="Copy the job links of the selected jobs, one per line">⧉ Copy links</button>
             <button className="danger" onClick={bulkDelete} disabled={bulkBusy}>Delete</button>
             <button className="ghost" style={{ marginLeft: 'auto' }} onClick={() => setSelected(new Set())} disabled={bulkBusy}>Clear</button>
             {bulkBusy && <span className="spinner" />}
