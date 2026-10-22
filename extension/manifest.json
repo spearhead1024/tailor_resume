@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TailorResume Assistant",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "Bid from a docked side panel: pick a profile and a job, build the CV, autofill the application form (CV attached), then mark applied, report or skip.",
   "minimum_chrome_version": "114",
   "update_url": "https://tailorresume.duckdns.org/api/extension/update.xml",

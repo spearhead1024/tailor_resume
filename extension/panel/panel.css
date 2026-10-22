@@ -203,3 +203,9 @@ select.profile-select { font-weight: 600; font-size: 13px; padding: 8px 10px; ba
    its search dropdown) above the cards that follow it. */
 #jobCard { position: relative; z-index: 5; }
 
+/* Profile picker + refresh on one line (refresh is a 32px icon, like download) */
+.profile-row { display: flex; gap: 6px; align-items: stretch; min-width: 0; }
+.profile-row .profile-select { flex: 1 1 auto; min-width: 0; }
+.profile-row .icon { height: auto; min-height: 32px; }
+.icon.spinning svg { animation: spin .8s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .icon.spinning svg { animation-duration: 1.6s; } }

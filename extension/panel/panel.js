@@ -40,6 +40,7 @@ const I = {
   school: svg('<path d="M2 9l10-5 10 5-10 5z"/><path d="M6 11v5c2 2 10 2 12 0v-5"/><path d="M22 9v6"/>'),
   // Actions
   download: svg('<path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/>'),
+  refresh: svg('<polyline points="23 4 23 10 17 10"/><path d="M20.5 15a9 9 0 1 1-2.1-9.4L23 10"/>'),
   wand: svg('<path d="M15 4V2M15 10V8M11 6h2M17 6h2"/><path d="M3 21l11-11"/><path d="M12.5 8.5l3 3"/>'),
   sparkle: svg('<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/>'),
 };
@@ -53,6 +54,7 @@ const S = {
   jobId: '', job: null,
   resumeId: '', ats: null, atsScore: 0, atsOpen: false,
   busy: '',            // '' | prompt | gen | dl | apply | report | skip
+  refreshing: false,
   confirm: '',         // '' | report | skip
   fill: { busy: '', report: null },   // autofill: busy '' | fill | learn
   error: '', message: '',
@@ -305,6 +307,29 @@ async function loadProfiles() {
   await loadQueue({ open: true });
 }
 
+// Re-read the to-bid counts and the queue in place — the current job, the pasted
+// JSON and the job tab all stay put (unlike a full reload, nothing navigates).
+async function refresh() {
+  if (S.refreshing) return;
+  S.refreshing = true; patchRefresh();
+  try {
+    const data = await api('/api/resumes/bid/profiles');
+    S.profiles = (data.profiles || []).filter((p) => p.status !== 'inactive');
+    if (!S.profiles.some((p) => p.id === S.profileId)) {
+      S.profileId = S.profiles[0]?.id || '';
+      await chrome.storage.local.set({ [PROFILE_KEY]: S.profileId });
+    }
+    patchProfile(); patchCopy();
+    await loadQueue();
+    toast('Refreshed');
+  } finally { S.refreshing = false; patchRefresh(); }
+}
+function patchRefresh() {
+  const b = $('#refreshBtn'); if (!b) return;
+  b.disabled = S.refreshing;
+  b.classList.toggle('spinning', S.refreshing);
+}
+
 async function selectProfile(id) {
   S.profileId = id;
   await chrome.storage.local.set({ [PROFILE_KEY]: id });
@@ -456,7 +481,10 @@ function renderMain() {
       <div id="alerts"></div>
       <!-- Two columns when the panel is dragged wide (see panel.css); stacked otherwise. -->
       <div class="col">
-        <select id="profileSelect" class="profile-select" title="Profile"></select>
+        <div class="profile-row">
+          <select id="profileSelect" class="profile-select" title="Profile"></select>
+          <button class="icon secondary" id="refreshBtn" data-action="refresh" title="Refresh profiles and jobs">${I.refresh}</button>
+        </div>
         <section class="card" id="copyCard"></section>
       </div>
       <div class="col">
@@ -679,6 +707,7 @@ async function onClick(e) {
       case 'cancelConfirm': S.confirm = ''; patchBuild(); break;
       case 'reportSubmit': await reportJob(); break;
       case 'skipSubmit': await skipJob(); break;
+      case 'refresh': setError(''); setMessage(''); await refresh(); break;
       case 'autofill': await autofill(); break;
       case 'remember': await rememberAnswers(); break;
       case 'copyField': {
