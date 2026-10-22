@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, Fragment } from 'react';
+import { useUrlState } from '../lib/urlState';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useToast } from '../lib/toast';
@@ -193,7 +194,7 @@ export default function Users() {
   const users = allUsers.filter((u: any) => u.source !== 'VPS_1');
 
   const [showForm, setShowForm] = useState(false);
-  const [roleFilter, setRoleFilter] = useState<Role | 'teams'>('teams');   // sub-tab: Teams or a role
+  const [roleFilter, setRoleFilter] = useUrlState<Role | 'teams'>('tab', 'teams');   // sub-tab: Teams or a role (in the URL)
   const [newTeamName, setNewTeamName] = useState('');
 
   const afterTeams = () => { qc.invalidateQueries({ queryKey: ['teams'] }); qc.invalidateQueries({ queryKey: ['users'] }); };
@@ -215,7 +216,7 @@ export default function Users() {
   const [expanded, setExpanded] = useState<string | null>(null);       // user whose full profile is open (admin-only view)
   const [pwFor, setPwFor] = useState<Record<string, string>>({});       // per-user "set new password" input
   const cvInputRef = useRef<HTMLInputElement>(null);                     // admin CV upload (one row expanded at a time)
-  const [techQuery, setTechQuery] = useState('');                       // caller sub-tab: filter by tech stack
+  const [techQuery, setTechQuery] = useUrlState('tech', '');            // caller sub-tab: filter by tech stack
   const [newUser, setNewUser] = useState<{
     username: string; full_name: string; email: string; password: string;
     roles: Role[]; status: string;

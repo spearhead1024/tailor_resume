@@ -1,4 +1,5 @@
 import { type CSSProperties, type MouseEvent as ReactMouseEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useUrlJson, useUrlState } from '../lib/urlState';
 import { createPortal } from 'react-dom';
 import { api } from '../api/client';
 import { useToast } from '../lib/toast';
@@ -1241,10 +1242,11 @@ export default function Interviews() {
   // Default view: everything from MONDAY OF THIS WEEK onwards — the week you're working in plus what's
   // still to come. Open-ended on purpose: no To date, so a call booked for next month is still there.
   // It's a normal filter, so the From picker shows it and Clear drops it to show all history.
-  const [flt, setFlt] = useState<Record<string, string>>(() => ({
+  // Filters live in the URL (lib/urlState) — a refresh or a shared link keeps them.
+  const [flt, setFlt] = useUrlJson<Record<string, string>>('f', {
     dateFrom: thisWeek(me?.timezone || undefined).from,
-  }));
-  const [colFlt, setColFlt] = useState<Record<string, string[]>>({});  // per-column multi-select (checkable) filters
+  });
+  const [colFlt, setColFlt] = useUrlJson<Record<string, string[]>>('cols', {});  // per-column multi-select (checkable) filters
   // Rows added in this session. A brand-new row is empty, so it matches no filter and would vanish
   // the instant it was created — you'd click Add and see nothing. It used to be worse: adding WIPED
   // your filters. Exempt the new row from the filters instead, so your filter survives and the row
@@ -1252,12 +1254,13 @@ export default function Interviews() {
   const [justAdded, setJustAdded] = useState<Set<string>>(() => new Set());
   // 0 = no cap. The default view is scoped by the From date above, not by a recent-N count; the box is
   // still there to cap the list by hand when you want.
-  const [limit, setLimit] = useState(0);
+  const [limit, setLimit] = useUrlState('limit', 0);
   const [liveUp, setLiveUp] = useState(true);                      // socket connected? (shown in the toolbar)
-  // Table or calendar — the SAME rows, the same socket, the same filters, drawn two ways. Remembered,
-  // because whichever one you work in is the one you want back tomorrow.
-  const [view, setView] = useState<'table' | 'calendar'>(
-    () => (localStorage.getItem('iv.view') === 'calendar' ? 'calendar' : 'table'));
+  // Table or calendar — the SAME rows, the same socket, the same filters, drawn two ways. In the URL,
+  // and the last one used is also the default, because whichever one you work in is the one you
+  // want back tomorrow.
+  const [view, setView] = useUrlState<'table' | 'calendar'>('view',
+    localStorage.getItem('iv.view') === 'calendar' ? 'calendar' : 'table');
   useEffect(() => { localStorage.setItem('iv.view', view); }, [view]);
   // A board read is in flight, and these live messages arrived while it was — replayed onto the
   // response so the snapshot can't roll them back. See loadGrid / the socket effect.

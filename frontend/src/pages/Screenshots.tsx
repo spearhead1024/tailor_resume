@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useUrlState } from '../lib/urlState';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
@@ -66,12 +67,13 @@ function Thumb({ shot, active, onClick }: { shot: Shot; active: boolean; onClick
 export default function Screenshots() {
   const navigate = useNavigate();
 
-  const [profileId, setProfileId] = useState('');
-  const [bidder, setBidder] = useState('');
-  const [query, setQuery] = useState('');
-  const [debounced, setDebounced] = useState('');
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo] = useState('');
+  // Filters live in the URL (lib/urlState) so a refresh keeps them.
+  const [profileId, setProfileId] = useUrlState('profile', '');
+  const [bidder, setBidder] = useUrlState('bidder', '');
+  const [query, setQuery] = useUrlState('q', '');
+  const [debounced, setDebounced] = useState(query.trim().toLowerCase());
+  const [dateFrom, setDateFrom] = useUrlState('from', '');
+  const [dateTo, setDateTo] = useUrlState('to', '');
   const [selected, setSelected] = useState(0);
   const [zoom, setZoom] = useState(false); // true = fit-width (scroll), false = fit-screen
 
@@ -215,7 +217,7 @@ export default function Screenshots() {
             <button className="secondary" style={{ fontSize: '0.82rem' }} onClick={() => openFull(current.id)}>↗ Full size</button>
             {current.company && (
               <button className="secondary" style={{ fontSize: '0.82rem' }} title="Find this job in the Jobs tab"
-                onClick={() => navigate(`/jobs?company=${encodeURIComponent(current.company)}`)}>Job</button>
+                onClick={() => navigate(`/jobs?company=${encodeURIComponent(current.company)}&status=&from=&to=`)}>Job</button>
             )}
           </div>
 

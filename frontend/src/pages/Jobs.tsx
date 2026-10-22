@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient, useMutation, keepPreviousData } from '@tanstack/react-query';
-import { useSearchParams } from 'react-router-dom';
+import { useUrlState, useOnChange } from '../lib/urlState';
 import { api } from '../api/client';
 import { useAuth, hasRole } from '../lib/auth';
 import { useToast } from '../lib/toast';
@@ -9,6 +9,12 @@ import CompanyBadge from '../lib/CompanyBadge';
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const BLANK_JOB = { company: '', job_title: '', description: '', link: '', region: 'US', note: '' };
+// The add-job form starts on the region last used, so adding a batch of EU jobs
+// doesn't mean re-picking EU every time (a personal default → localStorage, not URL).
+const LAST_REGION_KEY = 'jobs.lastRegion';
+const lastRegion = () => { try { return localStorage.getItem(LAST_REGION_KEY) || 'US'; } catch { return 'US'; } };
+const rememberRegion = (r: string) => { try { localStorage.setItem(LAST_REGION_KEY, r); } catch { /* storage blocked */ } };
+const blankJob = () => ({ ...BLANK_JOB, region: lastRegion() });
 type GroupBy = 'day' | 'region' | 'status' | 'company';
 
 function formatJobError(err: any, fallback: string): string {
@@ -85,28 +91,24 @@ export default function Jobs() {
   // Admins and job_adders both review/dismiss reported jobs.
   const canReview = hasRole(user, 'admin', 'job_adder');
 
-  // Deep-link from the Applied tab: ?company=… opens this job across all dates.
-  const [searchParams, setSearchParams] = useSearchParams();
-  const jumpCompany = searchParams.get('company') || '';
-
-  // Filters (server-side)
-  const [query, setQuery] = useState('');
-  const [debouncedQuery, setDebouncedQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState(jumpCompany ? '' : 'approved');
-  const [regionFilter, setRegionFilter] = useState('');
-  const [companyFilter, setCompanyFilter] = useState(jumpCompany);
-  // Default to today (ET) so the Jobs tab opens on today's intake — unless we
-  // arrived via a company deep-link, in which case show all dates.
-  const [dateFrom, setDateFrom] = useState(jumpCompany ? '' : todayETKey());
-  const [dateTo, setDateTo] = useState(jumpCompany ? '' : todayETKey());
-  const [reportedOnly, setReportedOnly] = useState(false);
-  const [groupBy, setGroupBy] = useState<GroupBy>('day');
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
+  // Filters (server-side) live in the URL (lib/urlState) — they survive a refresh,
+  // and a link like /jobs?company=Acme&status=&from=&to= opens one company across all dates.
+  const [query, setQuery] = useUrlState('q', '');
+  const [debouncedQuery, setDebouncedQuery] = useState(query.trim());
+  const [statusFilter, setStatusFilter] = useUrlState('status', 'approved');
+  const [regionFilter, setRegionFilter] = useUrlState('region', '');
+  const [companyFilter, setCompanyFilter] = useUrlState('company', '');
+  // Default to today (ET) so the Jobs tab opens on today's intake.
+  const [dateFrom, setDateFrom] = useUrlState('from', todayETKey());
+  const [dateTo, setDateTo] = useUrlState('to', todayETKey());
+  const [reportedOnly, setReportedOnly] = useUrlState('reported', false);
+  const [groupBy, setGroupBy] = useUrlState<GroupBy>('group', 'day');
+  const [page, setPage] = useUrlState('page', 1);
+  const [pageSize, setPageSize] = useUrlState('size', 20);
 
   // Form / edit state
   const [showForm, setShowForm] = useState(false);
-  const [newJob, setNewJob] = useState({ ...BLANK_JOB });
+  const [newJob, setNewJob] = useState(blankJob);
   const newDup = useDuplicateCheck(showForm ? newJob : BLANK_JOB);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState<any>({});
@@ -114,21 +116,14 @@ export default function Jobs() {
     editingId ? { company: editDraft.company || '', job_title: editDraft.job_title || '', link: editDraft.link || '', region: editDraft.region || '' } : BLANK_JOB,
     editingId || '');
 
-  // Consume the ?company= deep-link param once, then strip it from the URL so
-  // it doesn't stick on later navigation.
-  useEffect(() => {
-    if (jumpCompany) setSearchParams({}, { replace: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   // Debounce the free-text search so we don't refetch on every keystroke.
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQuery(query.trim()), 350);
     return () => clearTimeout(t);
   }, [query]);
 
-  // Reset to page 1 whenever a filter changes.
-  useEffect(() => { setPage(1); }, [debouncedQuery, statusFilter, regionFilter, companyFilter, dateFrom, dateTo, reportedOnly, pageSize]);
+  // Back to page 1 whenever a filter changes (not on load — the URL's page stands).
+  useOnChange([debouncedQuery, statusFilter, regionFilter, companyFilter, dateFrom, dateTo, reportedOnly, pageSize], () => setPage(1));
 
   const params = useMemo(() => {
     const sp = new URLSearchParams();
@@ -268,7 +263,7 @@ export default function Jobs() {
     const label = newJob.company || 'job';
     try {
       await createMutation.mutateAsync({ ...newJob, status });
-      setNewJob({ ...BLANK_JOB });
+      setNewJob(blankJob());
       if (keepOpen) toast(`Saved "${label}" — ready for the next one`, 'success');
       else { setShowForm(false); toast(`Saved "${label}"`, 'success'); }
     } catch (e: any) {
@@ -321,7 +316,7 @@ export default function Jobs() {
           title={isAdmin ? 'Fetch new jobs from the remote server now' : 'Only an admin can fetch new jobs'}>
           {syncMutation.isPending ? <span className="spinner" /> : '⟳ Fetch new jobs'}
         </button>
-        <button onClick={() => { setShowForm(!showForm); setNewJob({ ...BLANK_JOB }); }}>
+        <button onClick={() => { setShowForm(!showForm); setNewJob(blankJob()); }}>
           {showForm ? 'Cancel' : '+ New Job'}
         </button>
       </div>
@@ -395,7 +390,7 @@ export default function Jobs() {
           <div className="row">
             <div className="field"><label>Link</label><input value={newJob.link} onChange={(e) => setNewJob({ ...newJob, link: e.target.value })} /></div>
             <div className="field"><label>Region</label>
-              <select value={newJob.region} onChange={(e) => setNewJob({ ...newJob, region: e.target.value })}>
+              <select value={newJob.region} onChange={(e) => { rememberRegion(e.target.value); setNewJob({ ...newJob, region: e.target.value }); }}>
                 <option value="US">US</option><option value="EU">EU</option><option value="ASIA">ASIA</option><option value="GLOBAL">GLOBAL</option>
               </select>
             </div>

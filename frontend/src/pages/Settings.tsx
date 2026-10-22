@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useUrlState } from '../lib/urlState';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useToast } from '../lib/toast';
@@ -96,7 +97,7 @@ export default function Settings() {
     queryFn: () => api.get<any>('/api/settings'),
   });
 
-  const [subTab, setSubTab] = useState<SubTab>('general');
+  const [subTab, setSubTab] = useUrlState<SubTab>('tab', 'general');   // in the URL — a refresh stays on this sub-tab
 
   const [deadline, setDeadline] = useState('12');
   const [deadlineDirty, setDeadlineDirty] = useState(false);

@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { useUrlState } from '../lib/urlState';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useToast } from '../lib/toast';
@@ -39,8 +40,9 @@ function deviceIcon(type: string): string {
 export default function Devices() {
   const qc = useQueryClient();
   const toast = useToast();
-  const [filter, setFilter] = useState<'all' | 'active' | 'revoked'>('active');
-  const [userFilter, setUserFilter] = useState<string>('');
+  // Filters live in the URL (lib/urlState) so a refresh keeps them.
+  const [filter, setFilter] = useUrlState<'all' | 'active' | 'revoked'>('status', 'active');
+  const [userFilter, setUserFilter] = useUrlState('user', '');
 
   const { data: devices = [], isLoading } = useQuery({
     queryKey: ['devices'],

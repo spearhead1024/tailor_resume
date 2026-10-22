@@ -64,6 +64,12 @@ function TopNav() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const loc = useLocation();
+  // Remember each tab's last query (its filters / sub-tab, see lib/urlState) for this
+  // browser session, so switching tabs and coming back reopens the same view.
+  useEffect(() => {
+    try { sessionStorage.setItem(`nav:${loc.pathname}`, loc.search); } catch { /* storage blocked */ }
+  }, [loc.pathname, loc.search]);
+  const lastQuery = (path: string) => { try { return sessionStorage.getItem(`nav:${path}`) || ''; } catch { return ''; } };
   if (!user) return null;
   const linkClass = (path: string) => loc.pathname.startsWith(path) ? 'active' : '';
   const visible = visibleTabs(user);
@@ -72,7 +78,7 @@ function TopNav() {
       <div className="brand">TailorResume</div>
       <div className="nav-links">
         {visible.map((t) => (
-          <Link key={t.path} to={t.path} className={linkClass(t.path)}>{t.label}</Link>
+          <Link key={t.path} to={t.path + lastQuery(t.path)} className={linkClass(t.path)}>{t.label}</Link>
         ))}
       </div>
       <div className="spacer" />

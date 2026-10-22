@@ -1,4 +1,5 @@
 import { useMemo, useState, useRef, useEffect } from 'react';
+import { useUrlState } from '../lib/urlState';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useAuth, hasRole } from '../lib/auth';
@@ -217,8 +218,9 @@ export default function Metrics() {
   // and admins see BOTH; others see only the one matching their role.
   const canSeeApps = isAdmin || hasRole(user, 'bidder');
   const canSeeJobs = isAdmin || hasRole(user, 'job_adder');
-  const [view, setView] = useState<'apps' | 'jobs'>(canSeeApps ? 'apps' : 'jobs');
-  const [weekStart, setWeekStart] = useState<string>(todayIsoMonday());
+  // View + week live in the URL (lib/urlState) so a refresh keeps them.
+  const [view, setView] = useUrlState<'apps' | 'jobs'>('view', canSeeApps ? 'apps' : 'jobs');
+  const [weekStart, setWeekStart] = useUrlState('week', todayIsoMonday());
   // Admin-only user filter, stored as the set of HIDDEN user ids (see the note by
   // loadHiddenUsers). Anyone not in this set shows — so a new bidder appears without
   // the admin touching the filter. Persisted across navigation/reloads.

@@ -1,8 +1,9 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useAuth } from '../lib/auth';
 import { useToast } from '../lib/toast';
+import { useUrlState } from '../lib/urlState';
 import SourceBadge from '../lib/SourceBadge';
 import { CONTRACTS, CURRENCIES, PERIODS, contractText, salaryText } from '../lib/profile-terms';
 
@@ -163,6 +164,21 @@ export default function Profiles() {
     mutationFn: (id: string) => api.delete(`/api/profiles/${id}`),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['profiles'] }); setSelected(null); },
   });
+
+  // The open profile's id lives in the URL (?id=…) so a refresh reopens it: restore
+  // it once the list loads, then keep the URL in step with the selection.
+  const [selId, setSelId] = useUrlState('id', '');
+  const restored = useRef(false);
+  useEffect(() => {
+    if (restored.current || isLoading) return;
+    restored.current = true;
+    const p = selId && profiles.find((x: any) => x.id === selId);
+    if (p) handleSelect(p); else if (selId) setSelId('');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoading, profiles]);
+  useEffect(() => {
+    if (restored.current) setSelId(selected?.id || '');
+  }, [selected?.id, setSelId]);
 
   if (isLoading) return <div><span className="spinner" /> Loading…</div>;
 

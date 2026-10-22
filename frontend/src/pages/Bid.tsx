@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useToast } from '../lib/toast';
+import { useUrlState } from '../lib/urlState';
 import CompanyBadge, { type CompanyInfo } from '../lib/CompanyBadge';
 
 type Edu = { university: string; degree: string; duration: string; location: string };
@@ -498,7 +499,8 @@ export default function Bid() {
     queryFn: () => api.get<{ role: string; profiles: BidProfile[] }>('/api/resumes/bid/profiles'),
   });
   const profiles: BidProfile[] = data?.profiles || [];
-  const [profileId, setProfileId] = useState('');
+  // The selected profile and job live in the URL (lib/urlState) — a refresh keeps them.
+  const [profileId, setProfileId] = useUrlState('profile', '');
 
   useEffect(() => {
     if (profiles.length === 0) return;
@@ -523,11 +525,12 @@ export default function Bid() {
   // picker can override it. Reset to the top whenever the queue changes (profile
   // switch, or a job leaves the queue after apply) unless the current pick is still
   // present.
-  const [selectedJobId, setSelectedJobId] = useState('');
+  const [selectedJobId, setSelectedJobId] = useUrlState('job', '');
   useEffect(() => {
+    if (queueLoading || !profileId) return;   // don't drop the job restored from the URL before the queue arrives
     if (queue.length === 0) { setSelectedJobId(''); return; }
     if (!queue.find((j) => j.id === selectedJobId)) setSelectedJobId(queue[0].id);
-  }, [queue, selectedJobId]);
+  }, [queue, queueLoading, profileId, selectedJobId, setSelectedJobId]);
   const currentJob = queue.find((j) => j.id === selectedJobId) || queue[0];
 
   const advance = () => {
@@ -563,7 +566,7 @@ export default function Bid() {
       <div style={{ display: 'flex', gap: 12, margin: '1rem 0', flexWrap: 'wrap' }}>
         <div style={{ flex: '1 1 260px', minWidth: 220 }}>
           <div className="muted" style={{ fontSize: '0.66rem', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>Select profile</div>
-          <select value={profileId} onChange={(e) => setProfileId(e.target.value)} style={{ width: '100%' }}>
+          <select value={profileId} onChange={(e) => { setProfileId(e.target.value); setSelectedJobId(''); }} style={{ width: '100%' }}>
             {profiles.map((p) => (
               <option key={p.id} value={p.id}>
                 {`${p.name} · ${p.status === 'restricted' ? 'Restricted' : 'Active'} · ${p.bid_count} to bid`}

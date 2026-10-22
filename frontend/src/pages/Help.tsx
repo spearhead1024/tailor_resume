@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
+import { useUrlState } from '../lib/urlState';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useAuth, hasRole } from '../lib/auth';
@@ -19,7 +20,7 @@ const BASE = 'https://tailorresume.duckdns.org';
 type Sub = 'extension' | 'guide';
 
 export default function Help() {
-  const [sub, setSub] = useState<Sub>('extension');
+  const [sub, setSub] = useUrlState<Sub>('tab', 'extension');   // in the URL — a refresh stays on this sub-tab
 
   const tabBtn = (k: Sub, label: string) => (
     <button
@@ -54,7 +55,7 @@ function ExtensionGuide() {
     queryKey: ['extension', 'version'],
     queryFn: () => api.get<ExtMeta>('/api/extension/version'),
   });
-  const [tab, setTab] = useState<'quick' | 'auto'>('quick');
+  const [tab, setTab] = useUrlState<'quick' | 'auto'>('install', 'quick');
 
   if (isLoading) return <div><span className="spinner" /> Loading…</div>;
 
