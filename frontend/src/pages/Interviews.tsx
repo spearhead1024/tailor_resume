@@ -1692,8 +1692,14 @@ export default function Interviews() {
     if (!list.length) return;
     const byRow: Record<string, Record<string, any>> = {};
     for (const ch of list) (byRow[ch.rowId] = byRow[ch.rowId] || {})[ch.colId] = ch.value;
+    // Marking a call Passed makes the server create its follow-up row (patch_row) — say so,
+    // so nobody reaches for the ⧉ button to make a second one.
+    const isPassed = (v: any) => String(v ?? '').trim().toLowerCase() === 'passed';
+    const newlyPassed = new Set(Object.keys(byRow).filter((rowId) => 'c_status' in byRow[rowId] && isPassed(byRow[rowId].c_status)
+      && !isPassed(grid?.rows.find((r) => r.id === rowId)?.cells?.c_status) && !followupOf(rowId)));
     setGrid((g) => (g ? { ...g, rows: g.rows.map((r) => (byRow[r.id] ? { ...r, cells: { ...r.cells, ...byRow[r.id] } } : r)) } : g));
     Object.keys(byRow).forEach((rowId) => api.patch(`/api/interviews/rows/${rowId}`, { cells: byRow[rowId] })
+      .then(() => { if (newlyPassed.has(rowId) && isAdmin) toastRef.current('Marked Passed — its follow-up row was created at the bottom', 'success'); })
       .catch((err: any) => {
         // The write was REFUSED — someone else holds a lock on that cell (409), the workflow rules say
         // no (400), the row is gone (404). We already applied it locally, so without this the board goes
@@ -1881,16 +1887,42 @@ export default function Interviews() {
     setSel(null); setEditing(null);
     try { await api.delete(`/api/interviews/rows/${rowId}`); if (row) { undoStack.current.push({ k: 'delRow', row, at }); redoStack.current = []; } } catch { toast('Failed to delete row', 'error'); }
   };
+  // A call's follow-up row: index "<parent>_<n>" (the direct child — shortest — in a chain).
+  const followupOf = (rowId: string): Row | null => {
+    const rows = grid?.rows || [];
+    const base = String(rows.find((r) => r.id === rowId)?.cells?.c_index ?? '').trim();
+    if (!base) return null;
+    const kids = rows.filter((r) => String(r.cells?.c_index ?? '').trim().startsWith(base + '_'));
+    return kids.sort((a, b) => String(a.cells.c_index).length - String(b.cells.c_index).length)[0] || null;
+  };
+  // Scroll to a row and flash it — exempt from the filters so it can't be hidden.
+  const goToRow = (id: string) => { setJustAdded((s) => new Set(s).add(id)); setFlashRow(id); };
   // Create a follow-up ("passed") row: the backend clones the source verbatim (incl.
   // the full Chat & Feedback thread), chains the index, and appends it at the bottom.
-  // The socket echo upserts the new row into the grid.
+  // One follow-up per call — and marking a call Passed already creates it — so when one
+  // exists, the button takes you to it instead of failing with "already exists".
+  const cloning = useRef(new Set<string>());
   const cloneRow = async (rowId: string) => {
+    const existing = followupOf(rowId);
+    if (existing) { goToRow(existing.id); toast(`Follow-up row #${existing.cells.c_index} already exists — here it is`, 'info'); return; }
+    if (cloning.current.has(rowId)) return;               // a second click while the first is in flight
+    cloning.current.add(rowId);
     try {
       const row = await api.post<Row>(`/api/interviews/rows/${rowId}/clone`, {});
       setGrid((gg) => (gg ? { ...gg, rows: gg.rows.some((r) => r.id === row.id) ? gg.rows : [...gg.rows, row] } : gg));
-      toast('Follow-up row created', 'success');
+      goToRow(row.id);
+      toast(`Follow-up row #${row.cells?.c_index ?? ''} created`, 'success');
     } catch (e: any) {
-      toast(e?.response?.data?.detail || 'Failed to create follow-up row', 'error');
+      const d = e?.response?.data?.detail;
+      if (d && typeof d === 'object' && d.row_id) {     // created a moment ago (e.g. by marking Passed) — go to it
+        if (!grid?.rows.some((r) => r.id === d.row_id)) void loadGrid();
+        goToRow(d.row_id);
+        toast(d.message || 'This call already has a follow-up row', 'info');
+      } else {
+        toast((typeof d === 'string' && d) || 'Failed to create follow-up row', 'error');
+      }
+    } finally {
+      cloning.current.delete(rowId);
     }
   };
   // Keep one empty row available by default: if an admin opens an empty board, seed a blank row (once).
@@ -2415,15 +2447,19 @@ export default function Interviews() {
                 })}
                 {/* Delete sits AFTER the last column, in a transparent margin outside the panel — the
                     mirror of the row-number gutter on the left. It only appears on the hovered row. */}
-                {isAdmin && (
+                {isAdmin && (() => {
+                  const fu = followupOf(row.id);
+                  return (
                   <td className="iv-rowend">
-                    <button className="ghost iv-del" title="Create follow-up row (copies everything incl. Chat & Feedback)"
+                    <button className="ghost iv-del"
+                      title={fu ? `Go to its follow-up row (#${fu.cells.c_index})` : 'Create follow-up row (copies everything incl. Chat & Feedback)'}
                       style={{ marginRight: 2 }}
-                      onClick={(e) => { e.stopPropagation(); void cloneRow(row.id); }}>⧉</button>
+                      onClick={(e) => { e.stopPropagation(); void cloneRow(row.id); }}>{fu ? '↪' : '⧉'}</button>
                     <button className="ghost iv-del" title="Delete row"
                       onClick={(e) => { e.stopPropagation(); setConfirmDel(row.id); }}>✕</button>
                   </td>
-                )}
+                  );
+                })()}
               </tr>
             ))}
             {isAdmin && (

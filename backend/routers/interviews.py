@@ -822,17 +822,21 @@ def reindex_board(user: dict = Depends(_access)):
 _CLONE_CLEAR = ("c_sched", "c_link", "c_min", "c_type")   # emptied on the follow-up row
 
 
-def _has_passed_child(rows: list[dict], parent_index: str) -> bool:
-    """True if a follow-up row already exists for this index (its index is
-    "<parent>_<n>"). Used to guard against spawning duplicate follow-ups."""
+def _followup_of(rows: list[dict], parent_index: str) -> dict | None:
+    """The follow-up row of this index (its index is "<parent>_<n>"), or None. With a
+    chain (80 → 80_106 → 80_106_108) the direct child — the shortest index — wins."""
     base = str(parent_index or "").strip()
     if not base:
-        return False
-    for r in rows:
-        idx = str((r.get("cells") or {}).get("c_index", "")).strip()
-        if idx != base and idx.startswith(base + "_"):
-            return True
-    return False
+        return None
+    kids = [r for r in rows
+            if str((r.get("cells") or {}).get("c_index", "")).strip().startswith(base + "_")]
+    return min(kids, key=lambda r: len(str(r["cells"].get("c_index", ""))), default=None)
+
+
+def _has_passed_child(rows: list[dict], parent_index: str) -> bool:
+    """True if a follow-up row already exists for this index. Guards against
+    spawning duplicate follow-ups."""
+    return _followup_of(rows, parent_index) is not None
 
 
 def _build_clone_cells(src_cells: dict, rows: list[dict], valid: set[str]) -> dict:
@@ -873,8 +877,15 @@ def clone_row(row_id: str, user: dict = Depends(_access)):
         raise HTTPException(status_code=404, detail="Row not found")
     src_cells = dict(src.get("cells") or {})
     src_index = str(src_cells.get("c_index", "") or "").strip()
-    if _has_passed_child(grid["rows"], src_index):
-        raise HTTPException(status_code=409, detail="A follow-up row already exists for this call.")
+    existing = _followup_of(grid["rows"], src_index)
+    if existing is not None:
+        # Usually created a moment ago by marking the call Passed (see patch_row). Name it, so
+        # the board can jump to it instead of just saying no.
+        ex_index = str(existing["cells"].get("c_index", ""))
+        raise HTTPException(status_code=409, detail={
+            "message": f"This call already has a follow-up row (#{ex_index}).",
+            "row_id": existing["id"], "index": ex_index,
+        })
     cells = _build_clone_cells(src_cells, grid["rows"], valid)
     rid = _new_id("r")
     row = storage.insert_interview_row(rid, cells, None)   # append at bottom
