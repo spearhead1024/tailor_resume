@@ -454,16 +454,21 @@ function renderMain() {
   $('#app').innerHTML = `
     <main class="main" id="main">
       <div id="alerts"></div>
-      <select id="profileSelect" class="profile-select" title="Profile"></select>
-      <section class="card" id="copyCard"></section>
-      <section class="card" id="jobCard">
-        <div class="combo">
-          <input id="jobSearch" autocomplete="off" spellcheck="false">
-          <div class="combo-list" id="jobList" hidden></div>
-        </div>
-        <div id="jobLine"></div>
-      </section>
-      <section class="card" id="buildCard"></section>
+      <!-- Two columns when the panel is dragged wide (see panel.css); stacked otherwise. -->
+      <div class="col">
+        <select id="profileSelect" class="profile-select" title="Profile"></select>
+        <section class="card" id="copyCard"></section>
+      </div>
+      <div class="col">
+        <section class="card" id="jobCard">
+          <div class="combo">
+            <input id="jobSearch" autocomplete="off" spellcheck="false">
+            <div class="combo-list" id="jobList" hidden></div>
+          </div>
+          <div id="jobLine"></div>
+        </section>
+        <section class="card" id="buildCard"></section>
+      </div>
     </main>`;
   $('#app').onclick = onClick;
   $('#profileSelect').addEventListener('change', (e) => { setError(''); setMessage(''); selectProfile(e.target.value); });
@@ -598,7 +603,7 @@ function patchBuild() {
   el.innerHTML = `
     <div class="card-head"><span class="card-title">Build resume</span>
       ${S.resumeId && score ? `<button class="ats-badge ${tone}" data-action="toggleAts" title="${S.ats ? 'How this score is calculated' : 'ATS score'}">ATS ${score}${S.ats ? (S.atsOpen ? ' ▴' : ' ▾') : ''}</button>` : ''}</div>
-    <div class="row">
+    <div class="build-row">
       <button class="grow" data-action="copyPrompt" ${b ? 'disabled' : ''}>${b === 'prompt' ? spin : I.sparkle} Copy GPT Prompt</button>
       <button class="grow" data-action="generate" ${b ? 'disabled' : ''}>${b === 'gen' ? spin : 'Generate CV'}</button>
       <button class="icon secondary" data-action="download" ${S.resumeId && !b ? '' : 'disabled'} title="${S.resumeId ? 'Download the CV (PDF)' : 'Generate the CV first'}">${b === 'dl' ? spin : I.download}</button>
