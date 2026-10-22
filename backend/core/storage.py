@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from .db import session_scope
 from .db import migration as _migration
 from .db.models import (
+    BidSkipRow,
     CompanyRow,
     GeneratedResumeRow,
     InterviewColumnRow,
@@ -2026,6 +2027,17 @@ class Storage:
             row.status = 'pending'
             row.created_at = datetime.utcnow()   # jump the queue
             return True
+
+    # ── Bid skips (per-profile "not for this profile" on a job) ──────────
+    def skip_bid_job(self, profile_id: str, job_id: str, *, user_id: str = '', username: str = '') -> None:
+        with session_scope(self.db_path) as session:
+            if session.get(BidSkipRow, (profile_id, job_id)) is None:
+                session.add(BidSkipRow(profile_id=profile_id, job_id=job_id,
+                                       skipped_by_user_id=user_id, skipped_by_username=username))
+
+    def skipped_bid_job_ids(self, profile_id: str) -> set[str]:
+        with session_scope(self.db_path) as session:
+            return set(session.scalars(select(BidSkipRow.job_id).where(BidSkipRow.profile_id == profile_id)).all())
 
     def seed_companies_from_jobs(self) -> int:
         """Register every company that already has jobs (idempotent backfill)."""

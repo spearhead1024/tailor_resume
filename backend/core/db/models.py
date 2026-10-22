@@ -237,3 +237,17 @@ class CompanyRow(Base):
     checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
     data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class BidSkipRow(Base):
+    """A bidder skipped a job for one profile (e.g. its location doesn't suit the
+    profile's region). Skipped (profile, job) pairs drop out of that profile's Bid
+    queue only — the job stays live for every other profile."""
+    __tablename__ = 'bid_skips'
+
+    profile_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    skipped_by_user_id: Mapped[str] = mapped_column(String(64), default='')
+    skipped_by_username: Mapped[str] = mapped_column(String(255), default='')
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+

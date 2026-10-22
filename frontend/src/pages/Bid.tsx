@@ -194,7 +194,7 @@ function BidJobView({ job, profile, onAdvance }: { job: BidJob; profile: BidProf
   const [resumeId, setResumeId] = useState(job.resume_id || '');
   const [jsonText, setJsonText] = useState('');
   const [downloaded, setDownloaded] = useState(false);
-  const [busy, setBusy] = useState<'' | 'prompt' | 'gen' | 'dl' | 'apply' | 'report'>('');
+  const [busy, setBusy] = useState<'' | 'prompt' | 'gen' | 'dl' | 'apply' | 'report' | 'skip'>('');
 
   const [descOpen, setDescOpen] = useState(false);
   const [detail, setDetail] = useState<JobDetail | null>(null);
@@ -325,6 +325,23 @@ function BidJobView({ job, profile, onAdvance }: { job: BidJob; profile: BidProf
     }
   };
 
+  // Skip: this job isn't right for this profile (e.g. its location doesn't suit the
+  // profile's region) — it leaves this profile's queue only; other profiles keep it.
+  const skipJob = async () => {
+    if (busy) return;
+    if (!window.confirm('Are you sure skip this job?')) return;
+    setBusy('skip');
+    try {
+      await api.post('/api/resumes/bid/skip', { profile_id: profile.id, job_id: job.id });
+      track('skip');
+      toast(`Skipped — ${job.company}`, 'success');
+      refresh();
+    } catch (e: any) {
+      toast(e?.response?.data?.detail || 'Failed to skip job', 'error');
+      setBusy('');
+    }
+  };
+
   const innerBox: CSSProperties = { border: '1px solid var(--border, #2a3344)', borderRadius: 12, padding: '0.85rem 0.95rem', marginTop: 12 };
 
   return (
@@ -377,13 +394,16 @@ function BidJobView({ job, profile, onAdvance }: { job: BidJob; profile: BidProf
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
             <StepBadge n={3} state={s3} /><strong>Finish</strong>
           </div>
-          <div className="muted" style={{ fontSize: '0.8rem', marginLeft: 36, marginBottom: 10 }}>Mark as applied or report this job.</div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          <div className="muted" style={{ fontSize: '0.8rem', marginLeft: 36, marginBottom: 10 }}>Mark as applied, report this job, or skip it for this profile.</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
             <button onClick={markApplied} title="Mark this job as applied">
               {busy === 'apply' ? <span className="spinner" /> : 'Mark as Applied'}
             </button>
             <button className="danger" onClick={reportJob}>
               {busy === 'report' ? <span className="spinner" /> : 'Report Job'}
+            </button>
+            <button className="secondary" onClick={skipJob} title="Not for this profile — removes the job from this profile's queue only">
+              {busy === 'skip' ? <span className="spinner" /> : 'Skip Job'}
             </button>
           </div>
         </div>

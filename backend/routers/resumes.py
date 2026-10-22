@@ -41,7 +41,7 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 BID_ACTIVITY_LOG = LOG_DIR / "bid_activity.jsonl"     # every event, one JSON per line
 BID_SUSPICIOUS_LOG = LOG_DIR / "bid_suspicious.log"   # human-readable cheat flags
 
-_BID_ACTIONS = {"copy_prompt", "generate", "download", "open_link", "mark_applied", "report"}
+_BID_ACTIONS = {"copy_prompt", "generate", "download", "open_link", "mark_applied", "report", "skip"}
 # Steps a bidder is expected to have done before marking a job applied.
 _BID_REQUIRED_BEFORE_APPLY = ["copy_prompt", "generate", "download", "open_link"]
 
@@ -460,6 +460,8 @@ def _eligible_bid_items(
     # shared list, query by the indexed profile_id (≈50 rows) instead of loading
     # every generated resume (~3.8k rows / ~1.8s) — the slow Bid tab's main cost.
     profile_resumes = resumes if resumes is not None else storage.get_generated_resumes_for_profile(pid)
+    # Jobs a bidder skipped for this profile ("Skip job") never come back to it.
+    applied_jobs |= storage.skipped_bid_job_ids(pid)
     for r in profile_resumes:
         if r.get("profile_id") != pid:
             continue
@@ -571,6 +573,23 @@ def bid_queue(profile_id: str, user: dict = Depends(get_current_user)):
     for it in items:
         it["company_info"] = infos.get(it["company"])
     return items
+
+
+@router.post("/bid/skip")
+def bid_skip(body: dict, user: dict = Depends(get_current_user)):
+    """Skip a job for one profile — it leaves that profile's Bid queue for good
+    (other profiles still see it). Body: {profile_id, job_id}."""
+    if not has_role(user, "admin", "bidder"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    profile_id = str((body or {}).get("profile_id") or "").strip()
+    job_id = str((body or {}).get("job_id") or "").strip()
+    if not profile_id or not job_id:
+        raise HTTPException(status_code=400, detail="profile_id and job_id are required")
+    _check_profile_access(user, profile_id)
+    if not storage.get_job_by_id(job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    storage.skip_bid_job(profile_id, job_id, user_id=user.get("id", ""), username=user.get("username", ""))
+    return {"ok": True}
 
 
 @router.get("/bid-job/{job_id}")
