@@ -1383,8 +1383,58 @@ def _trim_skills_spear2(doc: Document, resume: dict) -> None:
     _write_skill_groups_bold_categories(anchor, groups)
 
 
+# Children of w:pPr that must come AFTER w:pBdr (OOXML schema order). Word rejects a
+# pPr whose children are out of order; LibreOffice tolerates it, so this only shows
+# up when someone opens the DOCX in Word.
+_PPR_AFTER_PBDR = {
+    "shd", "tabs", "suppressAutoHyphens", "kinsoku", "wordWrap", "overflowPunct", "topLinePunct",
+    "autoSpaceDE", "autoSpaceDN", "bidi", "adjustRightInd", "snapToGrid", "spacing", "ind",
+    "contextualSpacing", "mirrorIndents", "suppressOverlap", "jc", "textDirection", "textAlignment",
+    "textboxTightWrap", "outlineLvl", "divId", "cnfStyle", "rPr", "sectPr", "pPrChange",
+}
+
+
+def _set_paragraph_border(p, pBdr) -> None:
+    """Put `pBdr` on paragraph element `p` (replacing any), at its schema position."""
+    pPr = p.find(qn("w:pPr"))  # type: ignore[call-arg]
+    if pPr is None:
+        pPr = OxmlElement("w:pPr")
+        p.insert(0, pPr)
+    existing = pPr.find(qn("w:pBdr"))  # type: ignore[call-arg]
+    if existing is not None:
+        pPr.remove(existing)
+    for i, child in enumerate(pPr):
+        if child.tag.split("}")[-1] in _PPR_AFTER_PBDR:
+            pPr.insert(i, pBdr)
+            return
+    pPr.append(pBdr)
+
+
+def _capture_template_borders(doc: Document) -> list[tuple]:
+    """(paragraph element, copy of its w:pBdr) for every paragraph the uploaded template
+    draws a border on — e.g. the black rule under each section heading. These are part
+    of the template's design and are put back by _restore_template_borders."""
+    captured = []
+    for paragraph in doc.paragraphs:
+        pPr = paragraph._p.find(qn("w:pPr"))  # type: ignore[call-arg]
+        pBdr = pPr.find(qn("w:pBdr")) if pPr is not None else None  # type: ignore[call-arg]
+        if pBdr is not None:
+            captured.append((paragraph._p, deepcopy(pBdr)))
+    return captured
+
+
+def _restore_template_borders(captured: list[tuple]) -> None:
+    """Re-apply the template's own borders to its paragraphs that are still in the
+    document (a paragraph whose content was replaced wholesale is gone — skip it)."""
+    for p, pBdr in captured:
+        if p.getparent() is not None:
+            _set_paragraph_border(p, pBdr)
+
+
 def _strip_paragraph_borders(doc: Document) -> None:
-    """Remove any w:pBdr from every paragraph (template cleanup before content is written)."""
+    """Remove any w:pBdr from every paragraph before content is written, so lines
+    cloned from a template paragraph never inherit a stray border. The template's own
+    borders are captured first and restored afterwards (see apply_resume_to_docx)."""
     for paragraph in doc.paragraphs:
         pPr = paragraph._p.find(qn("w:pPr"))  # type: ignore[call-arg]
         if pPr is None:
@@ -1455,11 +1505,6 @@ def _inject_section_heading_borders(doc: Document, resume_template: str = 'spear
             pPr = OxmlElement("w:pPr")
             p.insert(0, pPr)
 
-        # remove any existing border first (safety)
-        existing = pPr.find(qn("w:pBdr"))  # type: ignore[call-arg]
-        if existing is not None:
-            pPr.remove(existing)
-
         new_pBdr = OxmlElement("w:pBdr")
         border_el = OxmlElement(f"w:{border_side}")
         border_el.set(qn("w:val"), "single")
@@ -1467,7 +1512,7 @@ def _inject_section_heading_borders(doc: Document, resume_template: str = 'spear
         border_el.set(qn("w:space"), "1")
         border_el.set(qn("w:color"), border_color)
         new_pBdr.append(border_el)
-        pPr.append(new_pBdr)
+        _set_paragraph_border(p, new_pBdr)
 
         # spear-2: add space after the heading so text below isn't flush against the border
         if resume_template == 'spear-2':
@@ -1485,6 +1530,7 @@ def apply_resume_to_docx(docx_path: Path, resume: dict, resume_template: str = '
     # renders those phrases bold. (Headline stays plain: it is never bolded.)
     summary = _preserve_bold_line_text(resume.get("summary", ""))
     tech_keywords = _technical_skill_keywords(resume)
+    template_borders = _capture_template_borders(doc)
     _strip_paragraph_borders(doc)
 
     if headline:
@@ -1552,8 +1598,13 @@ def apply_resume_to_docx(docx_path: Path, resume: dict, resume_template: str = '
     # so a header that doesn't fit moves to the next page with its block.
     _fix_experience_keep_next(doc)
 
-    # Section heading borders — style depends on template
-    _inject_section_heading_borders(doc, resume_template=resume_template)
+    # Section heading rules. A template that draws its own (e.g. a black line under
+    # each heading) keeps exactly those. Only templates with none get the injected,
+    # template-style rule on headings recognized by their color.
+    if template_borders:
+        _restore_template_borders(template_borders)
+    else:
+        _inject_section_heading_borders(doc, resume_template=resume_template)
 
     doc.save(str(docx_path))
 
