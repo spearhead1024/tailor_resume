@@ -22,6 +22,7 @@ from fastapi.responses import Response
 
 from auth import get_current_user, has_role, storage
 from core import vps1_adapt, vps1_client
+from core.ats_score import analyze_ats_score
 from core.docx_resume_export import build_docx_style_pdf_bundle
 from core.storage import normalize_job_url, tech_stacks_match
 
@@ -490,6 +491,8 @@ def _eligible_bid_items(
             "link": job.get("link", ""),
             "submitted_at": job.get("submitted_at", ""),
             "resume_id": (existing or {}).get("saved_resume_id", ""),
+            "ats_score": (existing or {}).get("ats_score", 0),
+            "ats": (existing or {}).get("ats") or None,
         })
     items.sort(key=lambda j: j.get("submitted_at") or "", reverse=True)
     return items
@@ -1131,6 +1134,9 @@ def generate_from_json(
     # pasted JSON — the profile/template owns education).
     resume_blob["education_history"] = profile.get("education_history", []) or []
 
+    # VPS1's ATS score (keyword / title / skills / experience / structure / fit).
+    ats = analyze_ats_score(resume_blob, job.get("description", "") or "", target_role=job.get("job_title", ""))
+
     saved_resume_id = f"resume_{uuid.uuid4().hex[:10]}"
     record = {
         "saved_resume_id": saved_resume_id,
@@ -1146,6 +1152,8 @@ def generate_from_json(
         "created_by_user_id": user.get("id", ""),
         "created_by_username": user.get("username", ""),
         "source": "chatgpt_json",
+        "ats_score": int(ats.get("overall_score", 0) or 0),
+        "ats": ats,
     }
     storage.save_generated_resume(record)
     background_tasks.add_task(_render_pdf_to_cache, saved_resume_id)
@@ -1155,6 +1163,8 @@ def generate_from_json(
         "saved_resume_id": saved_resume_id,
         "job_company": job.get("company", ""),
         "job_title": job.get("job_title", ""),
+        "ats_score": record["ats_score"],
+        "ats": ats,
     }
 
 

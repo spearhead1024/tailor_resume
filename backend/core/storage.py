@@ -1079,6 +1079,7 @@ def _normalize_generated_resume(item: dict) -> dict:
         'applied_by_user_id': str(item.get('applied_by_user_id', '')).strip(),
         'applied_by_username': str(item.get('applied_by_username', '')).strip(),
         'ats_score': int(item.get('ats_score', 0) or 0),
+        'ats': item.get('ats') if isinstance(item.get('ats'), dict) else {},
         'download_filename': str(item.get('download_filename', '')).strip() or 'resume.pdf',
         'download_mode': str(item.get('download_mode', 'browser') or 'browser').strip(),
         'saved_pdf_path': str(item.get('saved_pdf_path', '')).strip(),
