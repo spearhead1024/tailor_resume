@@ -6,11 +6,13 @@
 const SCRIPT = 'content/autofill.js';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Filling other sites needs access to them. Chrome only shows the prompt from a
-// click, so callers must await this FIRST in their click handler. "debugger" lets
-// the panel type real keystrokes into React dropdowns (see typeIntoWidgets).
+// Filling other sites needs access to them — an optional permission, asked once.
+// Chrome only shows the prompt from a click, so callers must await this FIRST in
+// their click handler. ("debugger", used by typeIntoWidgets, is a regular manifest
+// permission: Chrome refuses to grant it as an optional one, and asking for it here
+// made the whole request fail without ever showing the prompt.)
 export const requestSiteAccess = () =>
-  chrome.permissions.request({ origins: ['<all_urls>'], permissions: ['debugger'] }).catch(() => false);
+  chrome.permissions.request({ origins: ['<all_urls>'] }).catch(() => false);
 export const hasSiteAccess = () => chrome.permissions.contains({ origins: ['<all_urls>'] }).catch(() => false);
 
 // Run fn(arg) in every frame of the tab (application forms often live in an iframe).

@@ -1,6 +1,7 @@
 /* TailorResume side panel — the Bid tab's flow docked beside the job page.
- * Pick a profile (remembered) and a job; the job opens in the current tab, and
- * opening a queued job in the tab yourself selects it here.
+ * Pick a profile (remembered) and a job. Jobs open in the panel's own "job tab"
+ * (a new tab the first time — never over Gmail or whatever you were on), and
+ * opening a queued job in a tab yourself selects it here.
  * Copy the ChatGPT prompt → paste the JSON → Generate CV (auto-downloads) →
  * Mark as Applied / Report / Skip, which moves on to the next job.
  * Autofill fills the application form (and attaches the CV) from the profile
@@ -24,14 +25,14 @@ function toast(text) {
 // ---------- icons ----------
 const svg = (body) => `<svg viewBox="0 0 24 24">${body}</svg>`;
 const I = {
-  // Application details — one distinct glyph per field.
-  name: svg('<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="11" r="2"/><path d="M6 16c.6-1.3 1.7-2 3-2s2.4.7 3 2"/><path d="M14 10h4M14 14h3"/>'),
-  email: svg('<circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-3.9 7.9"/>'),
-  phone: svg('<rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M11 18h2"/>'),
-  street: svg('<path d="M12 3v18"/><path d="M5 5h11l3 2.5-3 2.5H5z"/><path d="M19 13H8l-3 2.5L8 18h11z"/>'),
+  // Application details — name / email / phone / street / ZIP are VPS1's glyphs.
+  name: svg('<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>'),
+  email: svg('<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>'),
+  phone: svg('<path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.6a2 2 0 0 1-.5 2.1L8.1 9.7a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.8.3 1.7.5 2.6.7A2 2 0 0 1 22 16.9z"/>'),
+  street: svg('<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>'),
   city: svg('<path d="M3 21h18"/><rect x="4" y="9" width="7" height="12"/><rect x="13" y="4" width="7" height="17"/><path d="M7 13h1M7 17h1M16 8h1M16 12h1M16 16h1"/>'),
   state: svg('<path d="M3 6l6-3 6 3 6-3v15l-6 3-6-3-6 3z"/><path d="M9 3v15M15 6v15"/>'),
-  zip: svg('<path d="M4 20v-9a4 4 0 0 1 8 0v9"/><path d="M8 7h8a4 4 0 0 1 4 4v9H4"/><path d="M15 7V3h3"/>'),
+  zip: svg('<line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/>'),
   address: svg('<path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/>'),
   linkedin: svg('<rect x="3" y="3" width="18" height="18" rx="3"/><path d="M8 10.5V16"/><path d="M8 7.5h.01"/><path d="M12 16v-5.5M12 13a2.5 2.5 0 0 1 5 0v3"/>'),
   portfolio: svg('<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>'),
@@ -134,15 +135,32 @@ async function copyText(text, label) {
   return ok;
 }
 
-// Load the job posting in the tab the bidder is looking at (no new tab per job).
-async function openInCurrentTab(job) {
+// The "job tab": the tab the panel shows jobs in. The active tab is reused only when
+// it IS that tab or already shows a queued job — so the next job replaces the last
+// one (or its thank-you page), but never Gmail or anything else the bidder was on:
+// from there the job tab is brought back, and only if there is none yet does a new
+// tab open (and become the job tab). Kept in session storage so it
+// survives closing and reopening the panel.
+let jobTabId = null;
+const JOB_TAB_KEY = 'panelJobTab';
+const setJobTab = (id) => { jobTabId = id; chrome.storage.session.set({ [JOB_TAB_KEY]: id }).catch(() => {}); };
+chrome.tabs.onRemoved.addListener((id) => { if (id === jobTabId) setJobTab(null); });
+
+async function showJob(job) {
   if (!job?.link) return;
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab?.id != null) {
-      if (tab.url !== job.link) await chrome.tabs.update(tab.id, { url: job.link });
+    const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const jobTab = jobTabId != null ? await chrome.tabs.get(jobTabId).catch(() => null) : null;
+    if (active?.id != null && (active.id === jobTabId || jobForUrl(active.url || ''))) {
+      // On the job tab (or a queued job's page): the next job replaces it.
+      if (active.url !== job.link) await chrome.tabs.update(active.id, { url: job.link });
+      setJobTab(active.id);
+    } else if (jobTab && jobTab.windowId === active?.windowId) {
+      // On some other tab (Gmail…): leave it, bring the job tab back with this job.
+      await chrome.tabs.update(jobTab.id, { url: job.link, active: true });
     } else {
-      await chrome.tabs.create({ url: job.link });
+      const tab = await chrome.tabs.create({ url: job.link, active: true });
+      setJobTab(tab.id);
     }
     track('open_link', job);
   } catch { /* tab closed mid-way — the bidder can pick the job again */ }
@@ -168,27 +186,32 @@ function jobForUrl(url) {
     return !!id && t.full.includes(id.toLowerCase());
   }) || null;
 }
-async function activeTabUrl() {
+async function activeTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
-  return tab?.url || '';
+  return tab || null;
 }
 
 // When the bidder opens a queued job in the tab themselves, select it here.
 let panelWindowId = null;
 chrome.windows.getCurrent().then((w) => { panelWindowId = w.id; }).catch(() => {});
-async function followTab(url) {
+async function followTab(tabId, url) {
   if (S.screen !== 'main' || S.busy || S.fill.busy || !url) return;
   const job = jobForUrl(url);
-  if (job && job.id !== S.jobId) { await selectJob(job.id, { open: false }); toast(`Switched to ${job.company}`); }
+  if (!job) return;
+  setJobTab(tabId);                     // a tab showing a queued job is the job tab now
+  if (job.id !== S.jobId) { await selectJob(job.id, { open: false }); toast(`Switched to ${job.company}`); }
 }
 chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
-  if (windowId === panelWindowId) chrome.tabs.get(tabId).then((t) => followTab(t.url)).catch(() => {});
+  if (windowId === panelWindowId) chrome.tabs.get(tabId).then((t) => followTab(tabId, t.url)).catch(() => {});
 });
 chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
-  if (change.url && tab.active && tab.windowId === panelWindowId) followTab(change.url);
+  if (change.url && tab.active && tab.windowId === panelWindowId) followTab(tabId, change.url);
 });
 
 // ---------- autofill ----------
+const SITE_ACCESS_HELP = 'Autofill needs access to job sites and it was not allowed. Click Autofill again and choose '
+  + '"Allow" — or open chrome://extensions → TailorResume Assistant → Details → Site access → "On all sites".';
+
 async function activeTabId() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id || !/^https?:/.test(tab.url || '')) throw new Error('Open the job application in this tab first.');
@@ -210,7 +233,7 @@ async function cvPayload() {
 }
 
 async function autofill() {
-  if (!(await requestSiteAccess())) { setError('Autofill needs access to job sites — click Allow when Chrome asks.'); return; }
+  if (!(await requestSiteAccess())) { setError(SITE_ACCESS_HELP); return; }
   S.fill = { busy: 'fill', report: null }; patchCopy();
   try {
     const tabId = await activeTabId();
@@ -230,7 +253,7 @@ async function autofill() {
 // Learn what the bidder filled by hand, so the same question fills itself next time.
 async function rememberAnswers({ silent = false } = {}) {
   if (silent ? !(await hasSiteAccess()) : !(await requestSiteAccess())) {
-    if (!silent) setError('Remembering answers needs access to job sites — click Allow when Chrome asks.');
+    if (!silent) setError(SITE_ACCESS_HELP);
     return;
   }
   if (!silent) { S.fill.busy = 'learn'; patchCopy(); }
@@ -305,8 +328,9 @@ async function loadQueue({ open = false } = {}) {
   if (S.queue.some((j) => j.id === S.jobId)) { patchJob(); patchBuild(); return; }
   // The tab already shows a queued job (e.g. the panel opened mid-application): select
   // it instead of navigating the tab away from the bidder's work.
-  const inTab = open ? jobForUrl(await activeTabUrl()) : null;
-  if (inTab) { await selectJob(inTab.id, { open: false }); return; }
+  const tab = open ? await activeTab() : null;
+  const inTab = tab ? jobForUrl(tab.url || '') : null;
+  if (inTab) { setJobTab(tab.id); await selectJob(inTab.id, { open: false }); return; }
   const next = S.queue[Math.max(0, Math.min(prevIdx, S.queue.length - 1))];
   await selectJob(next?.id || '', { open });
 }
@@ -320,7 +344,7 @@ async function selectJob(id, { open = true } = {}) {
   const ta = $('#jsonInput'); if (ta) ta.value = '';
   patchJob(); patchBuild();
   if (!item) return;
-  if (open) openInCurrentTab(item);
+  if (open) showJob(item);
   try {
     const detail = await api(`/api/resumes/bid-job/${encodeURIComponent(id)}`);
     if (S.jobId === id) { S.job = detail; patchJob(); }
@@ -430,8 +454,9 @@ function renderMain() {
   $('#app').innerHTML = `
     <main class="main" id="main">
       <div id="alerts"></div>
+      <select id="profileSelect" class="profile-select" title="Profile"></select>
+      <section class="card" id="copyCard"></section>
       <section class="card" id="jobCard">
-        <select id="profileSelect" title="Profile"></select>
         <div class="combo">
           <input id="jobSearch" autocomplete="off" spellcheck="false">
           <div class="combo-list" id="jobList" hidden></div>
@@ -439,7 +464,6 @@ function renderMain() {
         <div id="jobLine"></div>
       </section>
       <section class="card" id="buildCard"></section>
-      <section class="card" id="copyCard"></section>
     </main>`;
   $('#app').onclick = onClick;
   $('#profileSelect').addEventListener('change', (e) => { setError(''); setMessage(''); selectProfile(e.target.value); });
@@ -447,11 +471,18 @@ function renderMain() {
   patchAlerts(); patchProfile(); patchJob(); patchBuild(); patchCopy();
 }
 
+// The job box shows the current job ("Company — Title") until you click into it;
+// then the text is selected, so typing starts a search and Esc / leaving restores it.
+const jobLabel = (j) => (j ? `${j.company} — ${j.job_title}` : '');
+
 function wireCombo() {
   const input = $('#jobSearch');
-  const open = () => { S.combo = { open: true, q: input.value, active: 0 }; patchCombo(); };
-  input.addEventListener('focus', open);
-  input.addEventListener('input', open);
+  input.addEventListener('focus', () => {
+    S.combo = { open: true, q: '', active: Math.max(0, S.queue.findIndex((j) => j.id === S.jobId)) };
+    patchCombo();
+    input.select();
+  });
+  input.addEventListener('input', () => { S.combo = { open: true, q: input.value, active: 0 }; patchCombo(); });
   input.addEventListener('blur', () => setTimeout(() => { S.combo.open = false; patchCombo(); }, 120));
   input.addEventListener('keydown', (e) => {
     const list = comboMatches();
@@ -468,10 +499,10 @@ function wireCombo() {
 }
 
 function pickJob(id) {
-  const input = $('#jobSearch'); input.value = ''; input.blur();
   S.combo = { open: false, q: '', active: 0 };
+  $('#jobSearch').blur();
   setError(''); setMessage('');
-  if (id !== S.jobId) selectJob(id); else openInCurrentTab(currentJob());
+  if (id !== S.jobId) selectJob(id); else showJob(currentJob());
 }
 
 function patchAlerts() {
@@ -492,13 +523,14 @@ function patchCombo() {
   const list = $('#jobList'), input = $('#jobSearch'); if (!list) return;
   input.placeholder = S.queueLoading ? 'Loading jobs…' : `Search ${S.queue.length} job${S.queue.length === 1 ? '' : 's'} by company or title…`;
   input.disabled = !S.queue.length;
+  if (document.activeElement !== input) input.value = jobLabel(currentJob());
   list.hidden = !S.combo.open || !S.queue.length;
   if (list.hidden) return;
   const items = comboMatches().slice(0, 200);
   list.innerHTML = items.length ? items.map((j, i) => `
     <div class="combo-item ${i === S.combo.active ? 'active' : ''} ${j.id === S.jobId ? 'current' : ''}" data-job="${esc(j.id)}">
-      <div class="t">${esc(j.job_title)}</div>
-      <div class="s">${esc(j.company)} · ${esc(j.region || 'ANY')}${j.resume_id ? ' · CV ready' : ''}</div>
+      <div class="t">${esc(j.company)}</div>
+      <div class="s">${esc(j.job_title)} · ${esc(j.region || 'ANY')}${j.resume_id ? ' · CV ready' : ''}</div>
     </div>`).join('') : '<div class="combo-empty">No matching job</div>';
   list.querySelector('.active')?.scrollIntoView({ block: 'nearest' });
 }
@@ -574,10 +606,15 @@ function patchBuild() {
     <textarea id="jsonInput" class="json" spellcheck="false" placeholder="Paste the JSON ChatGPT returned…"></textarea>
     ${S.atsOpen ? atsBreakdown() : ''}
     <div class="actions-3">
-      <button data-action="markApplied" ${S.resumeId && !b ? '' : 'disabled'} title="${S.resumeId ? 'Mark applied and go to the next job' : 'Generate the CV first'}">${b === 'apply' ? spin : 'Mark as Applied'}</button>
+      <button data-action="confirmApply" ${S.resumeId && !b ? '' : 'disabled'} title="${S.resumeId ? 'Mark applied and go to the next job' : 'Generate the CV first'}">${b === 'apply' ? spin : 'Mark as Applied'}</button>
       <button class="danger" data-action="confirmReport" ${b ? 'disabled' : ''}>Report Job</button>
       <button class="warn" data-action="confirmSkip" ${b ? 'disabled' : ''} title="Not for this profile — removes the job from this profile's queue only">Skip Job</button>
     </div>
+    ${S.confirm === 'apply' ? `
+      <div class="confirm">
+        <div>Mark <strong>${esc(j.company)}</strong> as applied? The next job opens in this tab.</div>
+        <div class="row"><button class="grow" data-action="applySubmit" ${b ? 'disabled' : ''}>${b === 'apply' ? spin : 'Yes, applied'}</button><button class="secondary grow" data-action="cancelConfirm">Cancel</button></div>
+      </div>` : ''}
     ${S.confirm === 'report' ? `
       <div class="confirm">
         <textarea id="reportReason" rows="2" placeholder="What's wrong? Link broken, posting closed, spam…"></textarea>
@@ -602,10 +639,10 @@ function patchCopy() {
   const required = (report?.unfilled || []).filter((u) => u.required);
   const optional = (report?.unfilled || []).length - required.length;
   el.innerHTML = `
-    <div class="card-head"><span class="card-title">Application details</span>
-      <div class="row">
-        <button class="sm" data-action="autofill" ${busy ? 'disabled' : ''} title="Fill this page's application form from the profile${S.resumeId ? ' and attach the CV' : ''}">${busy === 'fill' ? spin : I.wand} Autofill</button>
-        <button class="sm secondary" data-action="remember" ${busy ? 'disabled' : ''} title="Save the answers you filled by hand — the same questions fill themselves next time for this profile">${busy === 'learn' ? spin : 'Remember'}</button>
+    <div class="card-head"><span class="card-title ellipsis" title="${esc(p.name)} Details">${esc(p.name)} Details</span>
+      <div class="pair">
+        <button data-action="autofill" ${busy ? 'disabled' : ''} title="Fill this page's application form from the profile${S.resumeId ? ' and attach the CV' : ''}">${busy === 'fill' ? spin : I.wand} Autofill</button>
+        <button class="secondary" data-action="remember" ${busy ? 'disabled' : ''} title="Save the answers you filled by hand — the same questions fill themselves next time for this profile">${busy === 'learn' ? spin : 'Remember'}</button>
       </div></div>
     ${report ? `
       <div class="fill-report">
@@ -625,12 +662,13 @@ async function onClick(e) {
   const a = t.dataset.action;
   try {
     switch (a) {
-      case 'openJob': e.preventDefault(); await openInCurrentTab(currentJob()); break;
+      case 'openJob': e.preventDefault(); await showJob(currentJob()); break;
       case 'copyPrompt': await copyPrompt(); break;
       case 'generate': await generate(); break;
       case 'download': await download(); break;
       case 'toggleAts': if (S.ats) { S.atsOpen = !S.atsOpen; patchBuild(); } break;
-      case 'markApplied': await markApplied(); break;
+      case 'confirmApply': S.confirm = S.confirm === 'apply' ? '' : 'apply'; patchBuild(); break;
+      case 'applySubmit': await markApplied(); break;
       case 'confirmReport': S.confirm = S.confirm === 'report' ? '' : 'report'; patchBuild(); break;
       case 'confirmSkip': S.confirm = S.confirm === 'skip' ? '' : 'skip'; patchBuild(); break;
       case 'cancelConfirm': S.confirm = ''; patchBuild(); break;
@@ -658,6 +696,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 // ---------- boot ----------
 async function boot() {
+  const { [JOB_TAB_KEY]: savedTab } = await chrome.storage.session.get(JOB_TAB_KEY).catch(() => ({}));
+  if (savedTab != null) jobTabId = await chrome.tabs.get(savedTab).then((t) => t.id).catch(() => null);
   const cfg = await getConfig();
   S.user = cfg.user;
   if (!cfg.token) { S.screen = 'login'; renderLogin(); return; }
