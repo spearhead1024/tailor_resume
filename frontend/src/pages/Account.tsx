@@ -33,8 +33,12 @@ export default function Account() {
   const [pw, setPw] = useState({ current: '', next: '', confirm: '' });
   const [pwSaving, setPwSaving] = useState(false);
 
+  // Seed the form once per signed-in user. `user` is replaced after an avatar/CV upload
+  // (loadCurrentUser), and re-seeding on every change silently wiped unsaved edits to the form.
+  const seededFor = useRef('');
   useEffect(() => {
-    if (!user) return;
+    if (!user || seededFor.current === user.id) return;
+    seededFor.current = user.id;
     setForm({
       full_name: user.full_name || '', email: user.email || '', country: user.country || '',
       telegram: user.telegram || '', whatsapp: user.whatsapp || '', discord: user.discord || '',

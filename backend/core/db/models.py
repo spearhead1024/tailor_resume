@@ -219,6 +219,9 @@ class DeviceSessionRow(Base):
     last_seen: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow, index=True)
     revoked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
+    # Set on revoke and NOT cleared by a re-login: JWTs for this session issued at or before it stay
+    # invalid (same sid, so `revoked` alone would resurrect them). Sub-second precision.
+    tokens_valid_after: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
 
 
 class CompanyRow(Base):

@@ -63,6 +63,22 @@ def decode_jwt(token: str) -> dict:
     return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
 
 
+def identity_taken(value: str, exclude_user_id: str = "") -> bool:
+    """True if `value` is already another user's username, full name or email (case-insensitive).
+    The board identifies a Caller (and a chat author) by NAME, and login accepts username OR email —
+    so letting two accounts share one would let a user see/edit another caller's calls, or shadow an
+    admin's email at sign-in."""
+    v = str(value or "").strip().lower()
+    if not v:
+        return False
+    for u in storage.get_users():
+        if u.get("id") == exclude_user_id:
+            continue
+        if v in {str(u.get(k) or "").strip().lower() for k in ("username", "full_name", "email")}:
+            return True
+    return False
+
+
 def authenticate_user(identifier: str, password: str) -> dict | None:
     needle = (identifier or "").strip().lower()
     if not needle:
@@ -80,6 +96,30 @@ def authenticate_user(identifier: str, password: str) -> dict | None:
     return user
 
 
+def token_problem(payload: dict) -> str:
+    """Why a decoded JWT may NOT act as a login, or '' if it may. Shared by the REST dependency and
+    the live-board WebSocket, so the two can't drift apart (the socket used to skip the session check
+    and kept streaming to revoked devices)."""
+    if "snz" in payload:
+        # A reminder's snooze ticket is signed with the same secret but means only "re-send this
+        # alarm" (routers/push.py) — it must never work as a 12-hour bearer token for the account.
+        return "Invalid token"
+    sid = payload.get("sid")
+    if sid:
+        sess = devices.get(sid)
+        if not sess:
+            return "Session not found"
+        if sess.get("revoked"):
+            return "Session revoked — please sign in again"
+        # A re-login un-revokes the row but must not revive the tokens that were revoked: those were
+        # minted at or before the revoke's second (iat is whole seconds; record_login waits out that
+        # second so the new token's iat is strictly later).
+        cutoff = sess.get("tokens_valid_after") or 0
+        if cutoff and int(payload.get("iat") or 0) <= int(cutoff):
+            return "Session revoked — please sign in again"
+    return ""
+
+
 def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> dict:
@@ -91,20 +131,14 @@ def get_current_user(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    problem = token_problem(payload)
+    if problem:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=problem)
     user_id = payload.get("sub")
     user = storage.get_user_by_id(user_id) if user_id else None
     if not user or user.get("status") != "approved":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or not approved")
-    # If the JWT carries a session id, that session must still be active.
-    # (Old tokens without sid stay valid for back-compat — they'll get an sid
-    # on next login.)
-    sid = payload.get("sid")
-    if sid:
-        sess = devices.get(sid)
-        if not sess:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session not found")
-        if sess.get("revoked"):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session revoked — please sign in again")
+    # (Old tokens without a session id stay valid for back-compat — they get one on next login.)
     return user
 
 

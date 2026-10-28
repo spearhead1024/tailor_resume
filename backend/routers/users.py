@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from auth import get_current_user, require_admin, storage
+from auth import get_current_user, identity_taken, require_admin, storage
 from core import vps1_adapt
 from core.storage import build_password_record
 # detach_team(): a deleted team must not leave its name behind on the calls it was given.
@@ -46,6 +46,18 @@ def _access(user: dict = Depends(get_current_user)) -> dict:
     if user.get("is_admin"):
         return user
     raise HTTPException(status_code=403, detail="Admin only")
+
+
+def _check_identities(payload: dict, existing: dict, user_id: str) -> None:
+    """A changed username / full name / email must not be another account's (see identity_taken)."""
+    if "roles" in payload and not [r for r in (payload.get("roles") or []) if str(r).strip()]:
+        # The role normalizer would silently turn "no roles" into admin (if the account was admin) or
+        # bidder, so unticking a caller's only role made them a bidder. Refuse instead.
+        raise HTTPException(status_code=400, detail="A user needs at least one role.")
+    for field in ("username", "full_name", "email"):
+        new = str(payload.get(field) or "").strip()
+        if new and new.lower() != str(existing.get(field) or "").strip().lower() and identity_taken(new, user_id):
+            raise HTTPException(status_code=409, detail=f"That {field.replace('_', ' ')} is already used by another account.")
 
 
 def _apply_password(payload: dict) -> dict:
@@ -107,6 +119,7 @@ def create_user(body: UserUpsertRequest, user: dict = Depends(require_admin)):
     username = str(payload.get("username", "")).strip().lower()
     if username and storage.get_user_by_username(username):
         raise HTTPException(status_code=409, detail="Username taken")
+    _check_identities(payload, {}, payload["id"])
 
     payload = _autoteam_for_manager(payload)          # new manager → mint "<Name> team"
     storage.upsert_user(_apply_password(payload))
@@ -121,6 +134,7 @@ def update_user(user_id: str, body: UserUpsertRequest, user: dict = Depends(_acc
         raise HTTPException(status_code=404, detail="User not found")
 
     _validate_timezone(payload)
+    _check_identities(payload, target, user_id)
     payload = _autoteam_for_manager(payload, target)   # promoted to manager → mint "<Name> team"
 
     storage.update_user(user_id, _apply_password(payload))

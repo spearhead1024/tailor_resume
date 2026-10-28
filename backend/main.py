@@ -8,7 +8,9 @@ Start:
 """
 from __future__ import annotations
 
+import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -62,6 +64,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class _RedactTokens(logging.Filter):
+    """The board's websocket carries the login token in its query string (browsers can't set headers
+    on a WebSocket), and uvicorn logs every handshake URL, so 30-day tokens piled up in the log files."""
+    _RX = re.compile(r"([?&]token=)[^&\s\"]+")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if "token=" in msg:
+            record.msg, record.args = self._RX.sub(r"\1***", msg), None
+        return True
+
+
+for _name in ("uvicorn.error", "uvicorn.access"):
+    logging.getLogger(_name).addFilter(_RedactTokens())
 
 # Mount /api/* routers
 app.include_router(auth_router.router)
@@ -122,8 +140,11 @@ if FRONTEND_DIST.exists():
         # /api/* is handled by routers; anything else returns index.html for client-side routing
         if full_path.startswith("api/"):
             return JSONResponse({"detail": "Not Found"}, status_code=404)
-        target = FRONTEND_DIST / full_path
-        if target.is_file() and target.name != "index.html":
+        # Resolve and require the file to sit INSIDE dist/: `full_path` may contain "..%2f", which
+        # used to let an unauthenticated request read any file (data/jwt_secret.txt, app.db, …).
+        target = (FRONTEND_DIST / full_path).resolve()
+        if (target.is_relative_to(FRONTEND_DIST.resolve()) and target.is_file()
+                and target.name != "index.html"):
             # The service worker must NEVER be cached — a stale sw.js means the browser keeps an old
             # worker and the user never receives notification/sound fixes. (Hashed /assets/* are safe
             # to cache: a new build gives them new URLs.)

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api/client';
 import { closeLive } from './board-live';
+import { syncPushIfGranted } from './push';
 
 const TOKEN_KEY = 'tailorresume.token';
 
@@ -81,14 +82,22 @@ export async function loadCurrentUser(): Promise<User | null> {
     setUser(null);
     return null;
   }
-  try {
-    const me = await api.get<User>('/api/auth/me');
-    setUser(me);
-    return me;
-  } catch {
-    setToken(null);
-    setUser(null);
-    return null;
+  // Only a 401 means the session is gone. A reload during a deploy (502) or a network blip must not
+  // throw away a valid token, so retry those for a few seconds while the boot spinner shows.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const me = await api.get<User>('/api/auth/me');
+      setUser(me);
+      return me;
+    } catch (err) {
+      const status = (err as { response?: { status?: number } })?.response?.status;
+      if (status === 401 || attempt >= 3) {
+        if (status === 401) setToken(null);
+        setUser(null);
+        return null;
+      }
+      await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
+    }
   }
 }
 
@@ -96,10 +105,30 @@ export async function login(identifier: string, password: string): Promise<User>
   const res = await api.post<{ token: string; user: User }>('/api/auth/login', { identifier, password });
   setToken(res.token);
   setUser(res.user);
+  // Re-register this browser's push subscription to the user who just signed in. It used to happen
+  // only at app boot / on the Interviews page, so after a sign-out → sign-in (no reload) the browser
+  // kept ringing with the PREVIOUS user's reminders until the next full page load.
+  void syncPushIfGranted();
   return res.user;
 }
 
+/** Tell the server to stop pushing to THIS browser for the user signing out (best-effort). The
+ *  browser keeps its subscription; the next sign-in re-registers it to the new user. */
+async function forgetPushOnServer(token: string): Promise<void> {
+  try {
+    if (!('serviceWorker' in navigator)) return;
+    const reg = await navigator.serviceWorker.getRegistration();
+    const sub = await reg?.pushManager.getSubscription();
+    if (sub) {
+      await api.post('/api/push/unsubscribe', { endpoint: sub.endpoint },
+        { headers: { Authorization: `Bearer ${token}` } });   // the token is cleared below — send it explicitly
+    }
+  } catch { /* best-effort */ }
+}
+
 export function logout() {
+  const token = getToken();
+  if (token) void forgetPushOnServer(token);
   // Tear the live socket down FIRST. It was opened with this user's JWT baked into the URL, and the
   // app is a SPA — signing out and back in never reloads the page, so a surviving socket would still
   // be authenticated as the person who just left. The next user to sign in on this browser would

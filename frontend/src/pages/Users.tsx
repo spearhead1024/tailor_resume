@@ -277,11 +277,13 @@ export default function Users() {
   const deleteMutation = useMutation({
     mutationFn: (id: string) => api.delete(`/api/users/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['users'] }),
+    onError: (e: any) => toast(e?.response?.data?.detail || 'Failed to delete user', 'error'),
   });
 
   if (isLoading) return <div><span className="spinner" /> Loading…</div>;
 
   function updateRoles(u: any, roles: Role[]) {
+    if (!roles.length) { toast('A user needs at least one role.', 'error'); return; }
     updateMutation.mutate({ id: u.id, payload: { roles } });
   }
 
@@ -551,7 +553,9 @@ export default function Users() {
                 </td>
               )}
               <td>
-                {isAdmin
+                {isAdmin && u.id === me?.id
+                  ? <span className="muted" title="You can't delete your own account.">—</span>
+                  : isAdmin
                   ? <button className="danger" onClick={() => { if (confirm('Delete user?')) deleteMutation.mutate(u.id); }}>Delete</button>
                   : <span className="muted" title="Only an admin can delete an account — you can set the status to Disabled instead.">—</span>}
               </td>
@@ -634,7 +638,9 @@ export default function Users() {
                         <input type="text" placeholder="new password (≥ 10 chars)" style={{ maxWidth: 240 }}
                           value={pwFor[u.id] || ''} onChange={(e) => setPwFor((m) => ({ ...m, [u.id]: e.target.value }))} />
                         <button className="secondary" disabled={(pwFor[u.id] || '').length < 10}
-                          onClick={() => { up({ password: pwFor[u.id] }); setPwFor((m) => ({ ...m, [u.id]: '' })); toast('Password updated', 'success'); }}>
+                          onClick={() => updateMutation.mutate({ id: u.id, payload: { password: pwFor[u.id] } }, {
+                            onSuccess: () => { setPwFor((m) => ({ ...m, [u.id]: '' })); toast('Password updated', 'success'); },
+                          })}>
                           Set password
                         </button>
                       </div>
