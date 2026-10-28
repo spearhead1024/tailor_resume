@@ -8,6 +8,7 @@
  * Granularity is deliberately per-ROW, not per-keystroke: we announce "I'm in this cell" and "this
  * row changed", never a character-by-character feed.
  */
+import { api } from '../api/client';
 import { getToken } from './auth';
 
 export type LiveMsg =
@@ -29,6 +30,7 @@ export type LockInfo = { row_id: string; col_id: string; user_id: string; label:
 const HEARTBEAT_MS = 4000;    // keeps a held cell lock alive while you're still typing in it
 const RETRY_MIN_MS = 1000;
 const RETRY_MAX_MS = 15000;
+const UNAUTHORISED = 4401;   // close code the server sends for a token it won't accept
 
 export class BoardLive {
   private ws: WebSocket | null = null;
@@ -64,11 +66,24 @@ export class BoardLive {
     ws.onmessage = (e) => {
       try { this.onMsg(JSON.parse(e.data) as LiveMsg); } catch { /* ignore junk */ }
     };
-    ws.onclose = () => { this.cleanup(); this.onState?.(false); this.scheduleRetry(); };
+    ws.onclose = (e) => {
+      this.cleanup();
+      this.onState?.(false);
+      if (e.code === UNAUTHORISED) { this.denied(); return; }
+      this.scheduleRetry();
+    };
     ws.onerror = () => { try { ws.close(); } catch { /* already gone */ } };
   }
 
   private ids(e: { row: string; col: string }) { return { row_id: e.row, col_id: e.col }; }
+
+  // The server refused this session (expired / revoked token, or no board role). Retrying can never
+  // succeed, so stop. Ask the REST API who we are: an expired session gets a 401 there, and the
+  // client's 401 handler signs out and goes to /login. That sign-out also builds a fresh socket.
+  private denied() {
+    this.closed = true;
+    api.get('/api/auth/me').catch(() => { /* a 401 is handled by the API client */ });
+  }
 
   private cleanup() {
     if (this.beat !== null) { window.clearInterval(this.beat); this.beat = null; }
@@ -130,12 +145,13 @@ export class BoardLive {
 let _client: BoardLive | null = null;
 const _subs = new Set<(m: LiveMsg) => void>();
 const _stateSubs = new Set<(up: boolean) => void>();
+let _up = false;          // is the shared socket open right now
 
 function ensureClient(): void {
   if (_client) return;
   _client = new BoardLive(
     (m) => { _subs.forEach((f) => { try { f(m); } catch { /* one bad listener must not stop the rest */ } }); },
-    (up) => { _stateSubs.forEach((f) => { try { f(up); } catch { /* ditto */ } }); },
+    (up) => { _up = up; _stateSubs.forEach((f) => { try { f(up); } catch { /* ditto */ } }); },
   );
   _client.connect();
 }
@@ -156,6 +172,10 @@ export function subscribeLive(fn: (m: LiveMsg) => void): () => void {
 export function subscribeLiveState(fn: (up: boolean) => void): () => void {
   _stateSubs.add(fn);
   ensureClient();
+  // Report the CURRENT state right away. The bell (mounted on every page) usually opened the socket
+  // long before the board subscribes; without this the board never saw that first "up", treated the
+  // next real reconnect as its first connect, and skipped the resync it exists for.
+  if (_up) { try { fn(true); } catch { /* listener's problem */ } }
   return () => { _stateSubs.delete(fn); };
 }
 
@@ -170,4 +190,5 @@ export function closeLive(): void {
   _stateSubs.clear();
   _client?.close();
   _client = null;
+  _up = false;
 }

@@ -2411,9 +2411,19 @@ class Storage:
                 changed = True
             return changed
 
-    def insert_interview_row(self, row_id: str, cells: dict, at: int | None = None) -> dict:
+    def insert_interview_row(self, row_id: str, cells: dict, at: int | None = None,
+                             prepare=None) -> dict | None:
+        """Insert one row at `at` (default: the bottom). `prepare(rows) -> cells | None`, if given,
+        runs INSIDE the write-locked transaction with the board as it is right now, and returns the
+        final cells (or None to insert nothing → returns None). Call numbers are allocated there: picking
+        "the smallest unused number" from an earlier read let two rows added at once share a number."""
         with session_scope(self.db_path) as session:
+            _write_lock(session)
             existing = session.scalars(select(InterviewRow).order_by(InterviewRow.position)).all()
+            if prepare is not None:
+                cells = prepare([{'id': r.id, 'cells': dict(r.cells or {})} for r in existing])
+                if cells is None:
+                    return None
             n = len(existing)
             pos = at if isinstance(at, int) and 0 <= at <= n else n
             new = InterviewRow(id=row_id, position=pos, cells=dict(cells or {}))

@@ -55,29 +55,25 @@ function offsetMs(at: Date, tz: string): number {
 
 /** A wall-clock time IN `tz` → the absolute instant it refers to.
  *
- * Iterative, because the offset we need depends on the instant we are trying to find. The first guess
- * uses the offset at the naive instant; if that lands on the far side of a DST switch, the offset there
- * differs and we re-solve with it.
+ * The offset we need depends on the instant we are trying to find, so try both offsets in force
+ * around it: the one a day earlier and the one a day later (zones switch at most once a day). Each
+ * gives a candidate; a candidate is real if, read back in `tz`, it shows the requested time.
  *
  * The two awkward days:
- *   FALL BACK — 01:30 happens twice. We return the FIRST occurrence, which is what a calendar shows.
- *   SPRING FORWARD — 02:30 never happens at all; the clock jumps 01:59:59 → 03:00:00. Naively re-solving
- *     lands *before* the gap (01:30), i.e. an hour EARLIER than asked for, which reads as the app losing
- *     an hour. Detect that the answer does not read back as the time requested and resolve FORWARD
- *     instead (02:30 → 03:30), the way every serious date library does. */
+ *   FALL BACK — 01:30 happens twice; both candidates are real. Return the FIRST occurrence, which is
+ *     what a calendar shows.
+ *   SPRING FORWARD — 02:30 never happens; the clock jumps 01:59:59 → 03:00:00. Neither candidate is
+ *     real. Resolve FORWARD (02:30 → 03:30), the way every serious date library does: that is the later
+ *     candidate, for zones east of UTC as well as west. (Returning "the first guess" here moved Berlin
+ *     and Sydney an hour BACK, and put Cairo's midnight-switch day start on the previous evening.) */
 export function zonedToInstant(y: number, m: number, d: number, hh: number, mm: number, tz: string): number {
   const naive = Date.UTC(y, m - 1, d, hh, mm);
-  const o1 = offsetMs(new Date(naive), tz);
-  const guess1 = naive - o1;
-  const o2 = offsetMs(new Date(guess1), tz);
-  if (o2 === o1) return guess1;                      // no switch in between — done
-
-  const guess2 = naive - o2;
-  if (offsetMs(new Date(guess2), tz) === o2) return guess2;   // the re-solve is self-consistent → correct
-
-  // Neither is self-consistent: the requested wall clock falls inside a spring-forward gap and simply
-  // does not exist. guess1 is the one on the far side of the jump — take it, so we move forward.
-  return guess1;
+  const DAY = 86_400_000;
+  const before = offsetMs(new Date(naive - DAY), tz);
+  const after = offsetMs(new Date(naive + DAY), tz);
+  const cands = [naive - before, naive - after];
+  const real = cands.filter((c) => c + offsetMs(new Date(c), tz) === naive);
+  return real.length ? Math.min(...real) : Math.max(...cands);
 }
 
 /** YYYY-MM-DD → [y, m, d]. */

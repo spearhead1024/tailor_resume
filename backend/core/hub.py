@@ -46,6 +46,8 @@ class Conn:
 class Lock:
     user_id: str
     label: str
+    conn_id: int = 0              # the connection (tab) holding it — one user may have several tabs open
+    audience: set[str] | None = None   # who may see the row; lock/unlock news goes only to them
     at: float = field(default_factory=time.time)
 
     @property
@@ -71,14 +73,16 @@ class Hub:
         )
         async with self._lock:
             self._conns[id(ws)] = conn
-        await self.send(ws, {"type": "locks", "locks": self.lock_list()})
+        await self.send(ws, {"type": "locks", "locks": self.lock_list(conn.user_id)})
         return conn
 
     async def leave(self, ws) -> None:
         async with self._lock:
             conn = self._conns.pop(id(ws), None)
         if conn:
-            await self.release_all(conn.user_id)      # never leave a departed editor holding a cell
+            # Never leave a departed editor holding a cell — but only THIS tab's lock. Releasing every
+            # lock of the user freed the cell they were still typing in on another tab.
+            await self._release_where(lambda lk: lk.conn_id == id(ws))
 
     def online(self) -> list[dict]:
         seen: dict[str, dict] = {}
@@ -116,24 +120,30 @@ class Hub:
             log.exception("broadcast_soon failed")
 
     # ── soft cell locks ──────────────────────────────────────────────────────
-    def lock_list(self) -> list[dict]:
+    def lock_list(self, user_id: str | None = None) -> list[dict]:
+        """Live locks — only on rows `user_id` may see (a lock names the row and its editor)."""
         out = []
         for (row_id, col_id), lk in list(self._locks.items()):
             if lk.stale:
                 self._locks.pop((row_id, col_id), None)
                 continue
+            if user_id is not None and lk.audience is not None and user_id not in lk.audience:
+                continue
             out.append({"row_id": row_id, "col_id": col_id, "user_id": lk.user_id, "label": lk.label})
         return out
 
-    async def acquire(self, row_id: str, col_id: str, conn: Conn) -> bool:
-        """Claim a cell. Returns False if somebody else holds a live lock on it."""
+    async def acquire(self, row_id: str, col_id: str, conn: Conn, audience: set[str] | None = None) -> bool:
+        """Claim a cell for this connection. Returns False if somebody else holds a live lock on it.
+        A tab edits one cell at a time, so claiming a cell drops whatever else this tab held — which
+        also bounds the lock table however many ids a client sends."""
         key = (row_id, col_id)
         cur = self._locks.get(key)
         if cur and not cur.stale and cur.user_id != conn.user_id:
             return False
-        self._locks[key] = Lock(user_id=conn.user_id, label=conn.label)
+        await self._release_where(lambda lk: lk.conn_id == id(conn.ws), keep=key)
+        self._locks[key] = Lock(user_id=conn.user_id, label=conn.label, conn_id=id(conn.ws), audience=audience)
         await self.broadcast({"type": "lock", "row_id": row_id, "col_id": col_id,
-                              "user_id": conn.user_id, "label": conn.label})
+                              "user_id": conn.user_id, "label": conn.label}, audience)
         return True
 
     async def release(self, row_id: str, col_id: str, user_id: str) -> None:
@@ -141,13 +151,13 @@ class Hub:
         cur = self._locks.get(key)
         if cur and cur.user_id == user_id:
             self._locks.pop(key, None)
-            await self.broadcast({"type": "unlock", "row_id": row_id, "col_id": col_id})
+            await self.broadcast({"type": "unlock", "row_id": row_id, "col_id": col_id}, cur.audience)
 
-    async def release_all(self, user_id: str) -> None:
-        gone = [k for k, v in self._locks.items() if v.user_id == user_id]
-        for row_id, col_id in gone:
+    async def _release_where(self, pred, keep: tuple[str, str] | None = None) -> None:
+        gone = [(k, v) for k, v in self._locks.items() if k != keep and pred(v)]
+        for (row_id, col_id), lk in gone:
             self._locks.pop((row_id, col_id), None)
-            await self.broadcast({"type": "unlock", "row_id": row_id, "col_id": col_id})
+            await self.broadcast({"type": "unlock", "row_id": row_id, "col_id": col_id}, lk.audience)
 
     def held_by_other(self, row_id: str, col_id: str, user_id: str) -> Lock | None:
         lk = self._locks.get((row_id, col_id))
@@ -157,11 +167,14 @@ class Hub:
             self._locks.pop((row_id, col_id), None)
         return None
 
-    async def touch(self, row_id: str, col_id: str, user_id: str) -> None:
-        """Heartbeat: keep a lock alive while its owner is still typing."""
+    async def touch(self, row_id: str, col_id: str, user_id: str) -> bool:
+        """Heartbeat: keep a lock alive while its owner is still typing. False if the lock is gone
+        (expired, or released by a reconnect) — the caller re-claims it."""
         lk = self._locks.get((row_id, col_id))
-        if lk and lk.user_id == user_id:
+        if lk and lk.user_id == user_id and not lk.stale:
             lk.at = time.time()
+            return True
+        return False
 
 
 hub = Hub()

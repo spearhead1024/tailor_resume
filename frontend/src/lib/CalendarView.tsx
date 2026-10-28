@@ -12,7 +12,7 @@ import { type CSSProperties, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom';
 import {
   addDays, availableAt, dateKeyAt, dayKeyOf, freeBands, instantAt, meetingBands, mergeBands,
-  minutesOfDay, startOfDay, wallClockIn,
+  minutesOfDay, startOfDay, wallClockIn, zonedToInstant,
   type Availability, type Band, type DailyMeeting, type MeetingBand,
 } from './availability';
 import { effCol } from './board-cols';
@@ -903,6 +903,38 @@ export default function CalendarView(props: Props) {
  * Fields the caller is not allowed to touch are disabled rather than hidden — seeing that the Company
  * is "Acme" and simply not being able to change it is more useful than the field vanishing.
  */
+/** Scheduled_at in the event popup. A datetime-local fires onChange on EVERY edited segment (day,
+ *  hour, arrow keys), so saving there moved the call several times per edit — each one a save, a
+ *  broadcast and a "time changed" notification. Keep a draft; save once on blur / Enter (Esc reverts),
+ *  converted to a UTC instant in the viewer's zone — the same as the table's cell — so it can never be
+ *  stored as a zone-less wall time. Claims the cell lock on focus like the other fields. */
+function SchedInput({ ts, tz, disabled, onClaim, onRelease, onSave }: {
+  ts: number; tz: string; disabled: boolean; onClaim: () => void; onRelease: () => void; onSave: (iso: string) => void;
+}) {
+  const shown = isNaN(ts) ? '' : wallClockIn(ts, tz);
+  const [draft, setDraft] = useState(shown);
+  const draftRef = useRef(shown);
+  const editingRef = useRef(false);
+  useEffect(() => { if (!editingRef.current) { setDraft(shown); draftRef.current = shown; } }, [shown]);
+  const commit = () => {
+    editingRef.current = false;
+    const v = draftRef.current;
+    const m = v.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+    if (m && v !== shown) onSave(new Date(zonedToInstant(+m[1], +m[2], +m[3], +m[4], +m[5], tz)).toISOString());
+    onRelease();      // like every other field: leaving it frees the cell (else others got 409 until the popup closed)
+  };
+  return (
+    <input type="datetime-local" disabled={disabled} value={draft}
+      onFocus={() => { editingRef.current = true; onClaim(); }}
+      onChange={(e) => { setDraft(e.target.value); draftRef.current = e.target.value; }}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+        if (e.key === 'Escape') { draftRef.current = shown; setDraft(shown); (e.target as HTMLInputElement).blur(); }
+      }} />
+  );
+}
+
 function EventDetail({ row, columns, hideFields, canEdit, userTz, onPatch, onDelete, onOpenRow, onClose,
                       lockOf, lockVarsOf, onClaim, onRelease }: {
   row: CalRow; columns: CalCol[]; hideFields?: Set<string>; canEdit: (rowId: string, colId: string) => boolean;
@@ -953,13 +985,8 @@ function EventDetail({ row, columns, hideFields, canEdit, userTz, onPatch, onDel
 
     let input: React.ReactNode;
     if (cid === 'c_sched') {
-      // datetime-local speaks NAIVE local time; the server re-anchors it using this user's timezone —
-      // the same contract the table's Scheduled_at cell uses. Do not send a UTC string here.
-      input = (
-        <input type="datetime-local" disabled={!editable}
-          value={isNaN(schedTs) ? '' : wallClockIn(schedTs, userTz)}
-          onChange={(e) => e.target.value && onPatch(row.id, cid, e.target.value)} />
-      );
+      input = <SchedInput key={row.id} ts={schedTs} tz={userTz} disabled={!editable}
+        onClaim={() => onClaim(row.id, cid)} onRelease={onRelease} onSave={(iso) => onPatch(row.id, cid, iso)} />;
     } else if ((col.type === 'select' || col.type === 'person') && (col.options || []).length) {
       const opts = col.options || [];
       const loose = opts.filter((o) => !o.kind);                       // ungrouped people / plain options

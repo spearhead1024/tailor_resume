@@ -174,8 +174,10 @@ def send_push(user_id: str, payload: dict) -> int:
     sent = 0
     for sub in subs:
         try:
+            # timeout: pywebpush passes None through to requests (= wait forever), and this runs on the
+            # single reminder-scheduler thread — one stalled push service would stop every reminder.
             webpush(subscription_info=sub, data=body,
-                    vapid_private_key=pem, vapid_claims={"sub": _VAPID_SUB})
+                    vapid_private_key=pem, vapid_claims={"sub": _VAPID_SUB}, timeout=10)
             sent += 1
         except WebPushException as exc:
             status = getattr(getattr(exc, "response", None), "status_code", None)

@@ -44,7 +44,11 @@ def rename_team(team_id: str, body: dict = Body(...), user: dict = Depends(requi
         raise HTTPException(status_code=400, detail="Team name is required")
     if any(t["id"] != team_id and t["name"].strip().lower() == name.lower() for t in storage.get_teams()):
         raise HTTPException(status_code=409, detail="A team with that name already exists")
-    return storage.upsert_team({"id": team_id, "name": name})
+    old = str(storage.get_team(team_id).get("name", ""))
+    team = storage.upsert_team({"id": team_id, "name": name})
+    if old.strip() and old.strip() != name:
+        interviews.rename_team_cells(old, name)
+    return team
 
 
 @router.delete("/{team_id}")

@@ -59,8 +59,10 @@ def _trim(items: list[dict]) -> list[dict]:
     return out
 
 
-def add(user_ids, kind: str, title: str, body: str, row_id: str = "", frm: str = "") -> list[dict]:
-    """File one notification for each user. Returns the created items."""
+def add(user_ids, kind: str, title: str, body: str, row_id: str = "", frm: str = "",
+        detail: dict | None = None) -> list[dict]:
+    """File one notification for each user. Returns the created items. `detail` (optional) holds
+    what the bell's dialog shows: the call's #index and context, and the before → after changes."""
     ids = [u for u in {str(u) for u in (user_ids or [])} if u]
     if not ids or kind not in KINDS:
         return []
@@ -75,6 +77,7 @@ def add(user_ids, kind: str, title: str, body: str, row_id: str = "", frm: str =
         "from": str(frm or ""),
         "at": now,
         "read": False,
+        **({"detail": detail} if detail else {}),
     } for uid in ids]
     with _lock:
         data = _read()

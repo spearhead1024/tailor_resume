@@ -124,6 +124,15 @@ def _start_reminder_scheduler():
     threading.Thread(target=notify.scheduler_loop, kwargs={"interval_s": 60}, daemon=True).start()
 
 
+@app.on_event("shutdown")
+def _flush_board_notifications():
+    """Board notifications wait a minute for the editor to finish (core/live.py). Announce any still
+    waiting before the process exits, while the live socket loop is still up — so a restart or deploy
+    doesn't swallow them. (live.py also registers this with atexit as a last resort.)"""
+    from core import live
+    live.flush_pending()
+
+
 # ---------------------------------------------------------------------------
 # Frontend static files (SPA fallback for non-/api/* paths)
 # ---------------------------------------------------------------------------

@@ -1266,7 +1266,6 @@ export default function Interviews() {
   // response so the snapshot can't roll them back. See loadGrid / the socket effect.
   const loadingRef = useRef(false);
   const pendingRef = useRef<LiveMsg[]>([]);
-  const everUpRef = useRef(false);
   const gridRef = useRef<Grid | null>(null);
 
   /** Re-read the roster: everyone's hours, time zone, meetings and days off.
@@ -1299,9 +1298,18 @@ export default function Interviews() {
 
   // ── cell selection (Coda/Sheets-style): click = select one cell, double-click = edit, drag = range,
   //    Delete/Backspace = clear. Stacked columns: each sub-cell selects/edits independently. ──
-  const [sel, setSel] = useState<{ r1: number; c1: number; r2: number; c2: number } | null>(null);
+  // Selection and the open editor are addressed by VISIBLE row index (keyboard nav, ranges), but the
+  // board re-sorts and loses rows live (someone reschedules or deletes a call, the Recent-N cap drops
+  // one). So each also remembers the row id it was made on (`rid`): a selection follows its row to the
+  // new index, and an editor whose row moved or vanished is closed — it must never land on (and save
+  // into) whatever call now sits at that index.
+  type SelState = { r1: number; c1: number; r2: number; c2: number; rid?: string };
+  type EditState = { r: number; c: number; s: number; seed?: string; rid?: string };
+  const [sel, setSelRaw] = useState<SelState | null>(null);
   const [aSub, setASub] = useState<number>(0);                // which sub-field of the anchor cell is selected
-  const [editing, setEditing] = useState<{ r: number; c: number; s: number; seed?: string } | null>(null);
+  const [editing, setEditingRaw] = useState<EditState | null>(null);
+  const setSel = (v: SelState | null) => setSelRaw(v ? { ...v, rid: v.rid ?? gridRef.current?.rows[v.r1]?.id } : null);
+  const setEditing = (v: EditState | null) => setEditingRaw(v ? { ...v, rid: v.rid ?? gridRef.current?.rows[v.r]?.id } : null);
   const [copied, setCopied] = useState<SelRect | null>(null);  // copy-highlight, cleared on paste / Escape / new copy
   const [modal, setModal] = useState<{ rowId: string; colId: string; title: string; subtitle: string; value: string; readOnly: boolean; kind: 'text' | 'chat' } | null>(null);  // JD editor / Chat thread
   const [confirmDel, setConfirmDel] = useState<string | null>(null);   // rowId pending delete-confirmation
@@ -1329,6 +1337,21 @@ export default function Interviews() {
   const selRef = useRef(sel); useEffect(() => { selRef.current = sel; }, [sel]);
   const aSubRef = useRef(aSub); useEffect(() => { aSubRef.current = aSub; }, [aSub]);
   const editingRef = useRef(editing); useEffect(() => { editingRef.current = editing; }, [editing]);
+  // After every render (gridRef now holds this render's visible rows): re-anchor the selection to its
+  // row, and close an editor whose row is no longer at its index. See SelState/EditState above.
+  useEffect(() => {
+    const rows = gridRef.current?.rows;
+    if (!rows) return;
+    if (editing?.rid && rows[editing.r]?.id !== editing.rid) setEditingRaw(null);
+    if (sel?.rid && rows[sel.r1]?.id !== sel.rid) {
+      const at = rows.findIndex((r) => r.id === sel.rid);
+      if (at < 0) setSelRaw(null);
+      else {
+        const d = at - sel.r1;
+        setSelRaw({ ...sel, r1: at, r2: Math.max(0, Math.min(rows.length - 1, sel.r2 + d)) });
+      }
+    }
+  });
   // A "type to edit" that has been requested but whose editor isn't on screen yet. Set
   // SYNCHRONOUSLY in the key handler (editingRef only catches up after React renders), so
   // letters typed during that render are appended to the seed instead of starting a NEW
@@ -1408,11 +1431,19 @@ export default function Interviews() {
   // — a flaky network, or simply a backend restart, which drops every socket at once — stays silently
   // stale for as long as it is open, missing rows other people can plainly see, until a manual reload.
   // Reconnecting is exactly the moment we know we may have missed something, so we resync there.
-  useEffect(() => subscribeLiveState((up) => {
-    setLiveUp(up);
-    if (up && everUpRef.current) { void loadGrid(); void loadPeople(); }   // skip the first connect: the mount load covers it
-    if (up) everUpRef.current = true;
-  }), []);
+  //
+  // Only an "up" reported synchronously on subscribe is skipped: the socket was already open when this
+  // board mounted, so the mount load is current. (Skipping the first "up" whenever it came left a board
+  // opened while the socket was down — e.g. during a restart's backoff — stale until a manual reload.)
+  useEffect(() => {
+    let subscribing = true;
+    const off = subscribeLiveState((up) => {
+      setLiveUp(up);
+      if (up && !subscribing) { void loadGrid(); void loadPeople(); }
+    });
+    subscribing = false;
+    return off;
+  }, []);
 
   // Claim the cell you're editing — but only after a beat, so tabbing/clicking through the board
   // doesn't lock every cell you pass over. Once claimed, everyone else sees "✎ <you>" on it and the
@@ -1430,7 +1461,7 @@ export default function Interviews() {
     const col = vis[editing.c];
     const row = g?.rows[editing.r];
     const colId = col ? (fieldIdsOf(col)[editing.s] ?? col.id) : '';
-    if (!row || !colId) return;
+    if (!row || !colId || (editing.rid && row.id !== editing.rid)) return;   // its row moved — don't lock another call
     const t = window.setTimeout(() => live.startEdit(row.id, colId), LOCK_CLAIM_MS);
     return () => { window.clearTimeout(t); live.endEdit(); };
   }, [editing]);
@@ -1580,6 +1611,9 @@ export default function Interviews() {
         const row = g.rows[r]; if (!row) return;
         const lc = logi[li];
         if (!canWriteRef.current(row, lc.colId)) return;               // skip what this user can't write HERE
+        // Job Description / Chat are modal-managed: pasting "over" them would write this tab's cached
+        // copy back (a stale chat thread wiped newer messages). Same rule as Delete and Fill.
+        if (colOf(lc.colId)?.type === 'button') return;
         changes.push({ rowId: row.id, colId: lc.colId, value: parseCell(colOf(lc.colId), str, row.cells?.[lc.colId] ?? '') });
       };
       const rmin = Math.min(s.r1, s.r2), rmax = Math.max(s.r1, s.r2);
@@ -1726,11 +1760,12 @@ export default function Interviews() {
   };
   const insertRowOp = (row: Row, at: number) => {        // re-insert a row (undo of delete / redo of add)
     setGrid((g) => (g ? { ...g, rows: insertRowAt(g.rows, row, at) } : g));   // idempotent: the socket may restore it too
-    api.post('/api/interviews/rows', { id: row.id, at, cells: row.cells }).catch(() => toastRef.current('Failed to restore row', 'error'));
+    // On failure, re-read the board: the optimistic change above must not linger as if it had worked.
+    api.post('/api/interviews/rows', { id: row.id, at, cells: row.cells }).catch(() => { toastRef.current('Failed to restore row', 'error'); void loadGrid(); });
   };
   const removeRowOp = (rowId: string) => {               // delete a row (undo of add / redo of delete)
     setGrid((g) => (g ? { ...g, rows: removeRow(g.rows, rowId) } : g));
-    api.delete(`/api/interviews/rows/${rowId}`).catch(() => toastRef.current('Failed to remove row', 'error'));
+    api.delete(`/api/interviews/rows/${rowId}`).catch(() => { toastRef.current('Failed to remove row', 'error'); void loadGrid(); });
   };
   const undo = () => {
     const op = undoStack.current.pop(); if (!op) return;
@@ -1885,7 +1920,12 @@ export default function Interviews() {
     const row = at >= 0 ? rows[at] : null;
     setGrid((gg) => (gg ? { ...gg, rows: removeRow(gg.rows, rowId) } : gg));
     setSel(null); setEditing(null);
-    try { await api.delete(`/api/interviews/rows/${rowId}`); if (row) { undoStack.current.push({ k: 'delRow', row, at }); redoStack.current = []; } } catch { toast('Failed to delete row', 'error'); }
+    try { await api.delete(`/api/interviews/rows/${rowId}`); if (row) { undoStack.current.push({ k: 'delRow', row, at }); redoStack.current = []; } }
+    catch {
+      // The row was hidden optimistically; put it back (or re-read the board) so it doesn't look deleted.
+      toast('Failed to delete row', 'error');
+      if (row) setGrid((gg) => (gg ? { ...gg, rows: insertRowAt(gg.rows, row, at) } : gg)); else void loadGrid();
+    }
   };
   // A call's follow-up row: index "<parent>_<n>" (the direct child — shortest — in a chain).
   const followupOf = (rowId: string): Row | null => {
@@ -1901,6 +1941,24 @@ export default function Interviews() {
   // the full Chat & Feedback thread), chains the index, and appends it at the bottom.
   // One follow-up per call — and marking a call Passed already creates it — so when one
   // exists, the button takes you to it instead of failing with "already exists".
+  // A notification's "Open on board" (and the OS push banner) links to /interviews?row=<id>: once the
+  // board has loaded, scroll to that call and flash it, then drop the param.
+  const [focusRow, setFocusRow] = useUrlState('row', '');
+  useEffect(() => {
+    if (!focusRow || !grid) return;
+    if (grid.rows.some((r) => r.id === focusRow)) goToRow(focusRow);
+    else toast('That call is no longer on the board, or not visible to you', 'error');
+    setFocusRow('');
+  }, [focusRow, grid]);   // eslint-disable-line react-hooks/exhaustive-deps
+  // Clicking a board push while this tab is open: the service worker focuses us and names the call.
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return;
+    const onMsg = (e: MessageEvent) => {
+      if (e.data?.type === 'open-row' && e.data.row_id) setFocusRow(String(e.data.row_id));
+    };
+    navigator.serviceWorker.addEventListener('message', onMsg);
+    return () => navigator.serviceWorker.removeEventListener('message', onMsg);
+  }, [setFocusRow]);
   const cloning = useRef(new Set<string>());
   const cloneRow = async (rowId: string) => {
     const existing = followupOf(rowId);
@@ -2160,7 +2218,10 @@ export default function Interviews() {
   // A call whose time has already gone is greyed out — done with, but still on the board. Unscheduled
   // rows are NOT past (they simply haven't been booked yet), so they stay normal.
   const isPast = (r: Row) => { const ms = schedMs(r); return !isNaN(ms) && ms < nowMs; };
-  gridRef.current = { ...grid, rows: viewRows };   // keyboard/clipboard index into the visible (filtered) rows
+  gridRef.current = { ...grid, rows: viewRows };
+  // The editor renders only on the row it was opened on — in the render where a live update has just
+  // moved that row, it shows nowhere (the effect above then closes it) instead of on the wrong call.
+  const editingView = editing && (!editing.rid || viewRows[editing.r]?.id === editing.rid) ? editing : null;   // keyboard/clipboard index into the visible (filtered) rows
 
   // Shared cell movement: collapse + move (sub-aware) or Shift-extend the focus. Used by keys AND editor nav.
   const moveActive = (dir: Dir, extend: boolean) => {
@@ -2407,8 +2468,8 @@ export default function Interviews() {
                         <StackedCell fields={fields} row={row} meName={meName} avatarByName={avatarByName} tz={userTz}
                           lockOf={(colId) => heldInfo(row.id, colId)}
                           subState={stackState(ri, c, col.id)}
-                          editSub={editing && editing.r === ri && editing.c === c ? editing.s : null}
-                          editSeed={editing && editing.r === ri && editing.c === c ? editing.seed : undefined}
+                          editSub={editingView && editingView.r === ri && editingView.c === c ? editingView.s : null}
+                          editSeed={editingView && editingView.r === ri && editingView.c === c ? editingView.seed : undefined}
                           onSelect={(sub, openType, shift) => selectCellSub(ri, c, sub, openType, shift)}
                           onEdit={(sub) => editCell(ri, c, sub)}
                           onDone={(dir) => { setEditing(null); if (dir) moveActive(dir, false); }}
@@ -2422,7 +2483,7 @@ export default function Interviews() {
                   const ce = copiedEdge(ri, c);
                   const tdStyle: CSSProperties = { padding: 0, position: 'relative', ...ss };
                   if (ce.length) tdStyle.boxShadow = [ss.boxShadow, ...ce].filter(Boolean).join(', ');
-                  const isEditing = !!editing && editing.r === ri && editing.c === c && editing.s === 0;
+                  const isEditing = !!editingView && editingView.r === ri && editingView.c === c && editingView.s === 0;
                   const cval = displayValue(row, col.id);   // Caller falls back to the Team it was handed to
                   // Somebody else is in this cell. The tag only ever showed on STACKED cells, so a plain
                   // one (Status always, Approved for a solo caller) just went quietly dead in your hands:

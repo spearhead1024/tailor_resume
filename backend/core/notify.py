@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -103,10 +104,17 @@ def snooze_add(user_id: str, payload: dict, minutes: int = 5) -> None:
     """Re-send this alarm in `minutes`. Persisted, so a server restart doesn't lose it."""
     minutes = min(max(int(minutes or 5), 1), 120)
     due = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    uid = str(user_id)
     with _lock:
         items = _read_snooze()
-        items.append({"at": due.isoformat(), "user_id": str(user_id), "payload": payload})
-        _write_snooze(items[-500:])
+        # Cap PER PERSON (a ticket can be replayed): one user hammering Snooze must only crowd out
+        # their own pending alarms — the old global [-500:] cut could evict everyone else's.
+        mine = [it for it in items if it.get("user_id") == uid]
+        if len(mine) >= 20:
+            drop = mine[0]
+            items = [it for it in items if it is not drop]
+        items.append({"at": due.isoformat(), "user_id": uid, "payload": payload})
+        _write_snooze(items[-2000:])
 
 
 def run_due_snoozes() -> int:
@@ -114,21 +122,27 @@ def run_due_snoozes() -> int:
     now = datetime.now(timezone.utc)
     with _lock:
         items = _read_snooze()
-    due, keep = [], []
+    due, keep, junk = [], [], []
     for it in items:
         try:
             when = datetime.fromisoformat(str(it.get("at", "")).replace("Z", "+00:00"))
         except Exception:
-            continue                     # unparseable → drop it rather than retry forever
+            junk.append(it)              # unparseable → drop it rather than retry forever
+            continue
         (due if when <= now else keep).append(it)
     for it in due:
         try:
             push.send_push(it["user_id"], it["payload"])
         except Exception:
             log.exception("snoozed alarm failed")
-    if due:
+    if due or junk:
+        # Re-read at write time and remove only what was sent (and the junk): a Snooze tapped while the
+        # pushes above were in flight was appended meanwhile, and writing back `keep` would drop it.
+        sent_ids = {id(it) for it in due + junk}
+        sent = [it for it in items if id(it) in sent_ids]
         with _lock:
-            _write_snooze(keep)
+            current = _read_snooze()
+            _write_snooze([it for it in current if it not in sent])
     return len(due)
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
@@ -641,9 +655,22 @@ def run_due_reminders() -> int:
     if dirty:
         with _lock:
             state = _read_state()
-            state["sent"] = sorted(set(state.get("sent", [])) | sent)[-5000:]   # cap growth
+            state["sent"] = _prune_sent(set(state.get("sent", [])) | sent)
             _write_state(state)
     return fired
+
+
+def _prune_sent(keys: set[str]) -> list[str]:
+    """Bound the "already sent" set by AGE: every key embeds the call's date/time (or the digest day),
+    and a reminder more than 3 days past can never fire again. (The old cap kept the alphabetically
+    last 5000 keys, which would evict live rows' keys at random and let them re-fire.)"""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=3)).date().isoformat()
+    out = set()
+    for k in keys:
+        m = re.search(r"\d{4}-\d{2}-\d{2}", k)
+        if not m or m.group(0) >= cutoff:
+            out.add(k)
+    return sorted(out)
 
 
 _sched_lock_handle = None   # kept open for the process's lifetime, so the OS lock is held

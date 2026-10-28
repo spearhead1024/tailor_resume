@@ -13,6 +13,7 @@ import { api } from '../api/client';
 import { useToast } from '../lib/toast';
 import { useAuth, loadCurrentUser } from '../lib/auth';
 import { gmtLabel } from '../lib/TimezonePicker';
+import { dateKeyAt } from '../lib/availability';
 
 type DayKey = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat';
 type Slot = { on: boolean; start: string; end: string };
@@ -36,7 +37,12 @@ const DEFAULT_AVAIL: Availability = DAYS.reduce((a, d) => {
   return a;
 }, {} as Availability);
 
-const todayISO = () => new Date().toISOString().slice(0, 10);
+// "Today" in the person's own zone (Account time zone, else the browser's). toISOString() is the UTC
+// date: a US user after ~7pm couldn't pick today, and an Asian user before 9am could pick yesterday.
+const todayISO = (tz: string) => {
+  try { return dateKeyAt(Date.now(), tz || Intl.DateTimeFormat().resolvedOptions().timeZone); }
+  catch { return dateKeyAt(Date.now(), Intl.DateTimeFormat().resolvedOptions().timeZone); }
+};
 const prettyDate = (iso: string) => {
   const d = new Date(`${iso}T00:00:00`);
   return isNaN(d.getTime()) ? iso
@@ -257,7 +263,7 @@ export default function AvailabilityPage() {
           One-off dates that override the week above — holidays, appointments, anything.
         </p>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <input type="date" min={todayISO()} value={newDayOff}
+          <input type="date" min={todayISO(tz)} value={newDayOff}
             onChange={(e) => setNewDayOff(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addDayOff(); } }}
             style={{ width: 180 }} />

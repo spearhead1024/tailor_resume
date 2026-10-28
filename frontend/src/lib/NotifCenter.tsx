@@ -10,15 +10,24 @@
  * Mixing them would bury "your interview starts in an hour" under a stream of edit chatter.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
+import { useAuth } from './auth';
 import { subscribeLive, subscribeLiveState } from './board-live';
 import { notifPermission, startRinging, stopRinging } from './push';
 import { useToast } from './toast';
 
 export type NotifKind = 'board' | 'reminder';
+export type NotifChange = { id: string; label: string; type: string; before: string; after: string };
+/** What a board notification's dialog shows (filed by core/live.py; absent on older items). */
+export type NotifDetail = {
+  row_id?: string; index?: string; context?: string; actor?: string; created?: boolean;
+  changes?: NotifChange[]; messages?: string[];
+};
 export type Notif = {
   id: string; kind: NotifKind; title: string; body: string;
-  row_id?: string; from?: string; at: string; read: boolean;
+  row_id?: string; from?: string; at: string; read: boolean; detail?: NotifDetail;
 };
 type Counts = { unread: number; board: number; reminder: number };
 
@@ -38,9 +47,101 @@ function ago(iso: string): string {
   return d === 1 ? 'yesterday' : `${d}d ago`;
 }
 
+/* ── The details dialog: what changed on a call, opened by clicking a notification ── */
+function NotifDialog({ n, onClose, onOpenBoard }: { n: Notif; onClose: () => void; onOpenBoard: (rowId: string) => void }) {
+  const { user } = useAuth();
+  const tz = user?.timezone || undefined;
+  const d = n.detail || {};
+  const rowId = d.row_id || n.row_id || '';
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  // Scheduled_at / Created_at are stored as UTC instants — show them in the viewer's zone.
+  const fmt = (v: string, type: string) => {
+    if (!v) return '';
+    if (type === 'date' && /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v)) {
+      const t = new Date(v);
+      if (!isNaN(t.getTime())) {
+        try { return t.toLocaleString('en-US', { timeZone: tz, dateStyle: 'medium', timeStyle: 'short' }); }
+        catch { return t.toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }); }
+      }
+    }
+    return v;
+  };
+  const when = (() => { const t = new Date(n.at); return isNaN(t.getTime()) ? '' : t.toLocaleString('en-US', { timeZone: tz, dateStyle: 'medium', timeStyle: 'short' }); })();
+  const tag = (txt: string, bg: string, fg: string) => (
+    <span style={{ fontSize: '0.66rem', fontWeight: 700, padding: '1px 6px', borderRadius: 4, background: bg, color: fg, marginLeft: 6 }}>{txt}</span>);
+  return (
+    <div onMouseDown={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 400,
+      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem' }}>
+      <div className="card" role="dialog" aria-modal="true" aria-label={n.title} onMouseDown={(e) => e.stopPropagation()}
+        style={{ width: 'min(560px, 100%)', maxHeight: '82vh', overflowY: 'auto', padding: '1rem 1.15rem' }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 700, fontSize: '0.98rem' }}>{n.title}</div>
+            <div className="muted" style={{ fontSize: '0.8rem', marginTop: 2 }}>
+              {d.index ? <strong style={{ color: 'var(--text)' }}>#{d.index}</strong> : null}
+              {d.context ? <>{d.index ? ' · ' : ''}{d.context}</> : null}
+            </div>
+            <div className="muted" style={{ fontSize: '0.74rem', marginTop: 2 }}>{[d.actor || n.from, when].filter(Boolean).join(' · ')}</div>
+          </div>
+          <button className="ghost" onClick={onClose} aria-label="Close" style={{ padding: '2px 8px' }}>✕</button>
+        </div>
+
+        {(d.changes || []).length > 0 && (
+          <table style={{ width: '100%', marginTop: 12, fontSize: '0.82rem', borderCollapse: 'collapse' }}>
+            <thead><tr className="muted" style={{ textAlign: 'left' }}>
+              <th style={{ padding: '4px 6px', width: '32%' }}>Field</th><th style={{ padding: '4px 6px' }}>Change</th></tr></thead>
+            <tbody>
+              {(d.changes || []).map((c) => {
+                const b = fmt(c.before, c.type), a = fmt(c.after, c.type);
+                return (
+                  <tr key={c.id} style={{ borderTop: '1px solid var(--border)', verticalAlign: 'top' }}>
+                    <td style={{ padding: '6px', fontWeight: 600 }}>{c.label}
+                      {!b && a ? tag('added', 'var(--success-bg)', 'var(--success)') : null}
+                      {b && !a ? tag('removed', 'var(--danger-bg)', 'var(--danger)') : null}</td>
+                    <td style={{ padding: '6px', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                      {b && a ? <><span className="muted" style={{ textDecoration: 'line-through' }}>{b}</span>{' → '}<span>{a}</span></>
+                        : a ? <span>{a}</span>
+                        : <span className="muted" style={{ textDecoration: 'line-through' }}>{b}</span>}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+
+        {(d.messages || []).length > 0 && (
+          <div style={{ display: 'grid', gap: 6, marginTop: 12 }}>
+            {(d.messages || []).map((m, i) => (
+              <div key={i} style={{ background: 'var(--panel-2)', border: '1px solid var(--border)', borderRadius: 10,
+                padding: '6px 10px', fontSize: '0.84rem', whiteSpace: 'pre-wrap' }}>{m}</div>
+            ))}
+          </div>
+        )}
+
+        {!(d.changes || []).length && !(d.messages || []).length && (
+          <div style={{ marginTop: 12, fontSize: '0.86rem', whiteSpace: 'pre-wrap' }}>{n.body}</div>
+        )}
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 14 }}>
+          <button className="secondary" onClick={onClose}>Close</button>
+          {rowId && <button onClick={() => onOpenBoard(rowId)}>Open on board</button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function NotifCenter() {
   const toast = useToast();
+  const navigate = useNavigate();
+  const loc = useLocation();
   const [open, setOpen] = useState(false);
+  const [detail, setDetail] = useState<Notif | null>(null);
   const [tab, setTab] = useState<'' | NotifKind>('');
   const [items, setItems] = useState<Notif[]>([]);
   const [counts, setCounts] = useState<Counts>({ unread: 0, board: 0, reminder: 0 });
@@ -131,6 +232,23 @@ export default function NotifCenter() {
     }
   };
 
+  // Click a notification → mark it read and show what changed.
+  const openItem = (n: Notif) => {
+    if (!n.read) void markRead([n.id]);
+    setDetail(n);
+    setOpen(false);
+  };
+  // "Open on board" keeps the board's current filters (URL state) and adds ?row= to jump to the call.
+  const openBoard = (rowId: string) => {
+    let base = '';
+    if (loc.pathname === '/interviews') base = loc.search;
+    else { try { base = sessionStorage.getItem('nav:/interviews') || ''; } catch { /* storage blocked */ } }
+    const sp = new URLSearchParams(base);
+    sp.set('row', rowId);
+    setDetail(null);
+    navigate(`/interviews?${sp.toString()}`);
+  };
+
   const shown = tab ? items.filter((i) => i.kind === tab) : items;
   const badge = counts.unread;
 
@@ -199,11 +317,13 @@ export default function NotifCenter() {
             {shown.map((n) => {
               const meta = KIND_META[n.kind] ?? KIND_META.board;
               return (
-                <div key={n.id} onClick={() => !n.read && markRead([n.id])}
+                <div key={n.id} onClick={() => openItem(n)} role="button" tabIndex={0}
+                  onKeyDown={(e) => { if (e.key === 'Enter') openItem(n); }}
+                  title="Show details"
                   style={{
                     display: 'flex', gap: 10, padding: '10px 12px',
                     borderBottom: '1px solid var(--border)',
-                    cursor: n.read ? 'default' : 'pointer',
+                    cursor: 'pointer',
                     background: n.read ? 'transparent' : 'rgba(59,130,246,0.07)',
                   }}>
                   <span style={{ flex: '0 0 auto', color: meta.colour, fontSize: '0.9rem' }}>{meta.icon}</span>
@@ -223,6 +343,9 @@ export default function NotifCenter() {
           </div>
         </div>
       )}
+      {/* Portal to <body>: the top nav has backdrop-filter, which makes it the containing block for
+          position:fixed — rendered in place, the dialog was trapped inside the 52px nav bar. */}
+      {detail && createPortal(<NotifDialog n={detail} onClose={() => setDetail(null)} onOpenBoard={openBoard} />, document.body)}
     </div>
   );
 }
