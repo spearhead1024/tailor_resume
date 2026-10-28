@@ -125,16 +125,17 @@ export default function Settings() {
   const [remindersDirty, setRemindersDirty] = useState(false);
   const [remindersSaving, setRemindersSaving] = useState(false);
 
+  // (Re)seed from the server — but only the sections WITHOUT unsaved edits. Saving one section
+  // refetches settings; re-seeding everything wiped what the admin had typed into the others.
   useEffect(() => {
-    if (data) {
-      setDeadline(String(data.job_deadline_hours ?? 12)); setDeadlineDirty(false);
-      setTemplate(String(data.prompt_template || '')); setPromptDirty(false);
-      setDomainsText(toLines(data.blacklist_domains)); setDomainsDirty(false);
-      setTitlesText(toLines(data.blacklist_titles)); setTitlesDirty(false);
-      setCompaniesText(toLines(data.blacklist_companies)); setCompaniesDirty(false);
-      setNotif({ ...NOTIF_DEFAULTS, ...(data.notifications || {}) }); setNotifDirty(false);
-    }
-  }, [data]);
+    if (!data) return;
+    if (!deadlineDirty) setDeadline(String(data.job_deadline_hours ?? 12));
+    if (!promptDirty) setTemplate(String(data.prompt_template || ''));
+    if (!domainsDirty) setDomainsText(toLines(data.blacklist_domains));
+    if (!titlesDirty) setTitlesText(toLines(data.blacklist_titles));
+    if (!companiesDirty) setCompaniesText(toLines(data.blacklist_companies));
+    if (!notifDirty) setNotif({ ...NOTIF_DEFAULTS, ...(data.notifications || {}) });
+  }, [data]);   // eslint-disable-line react-hooks/exhaustive-deps -- reads the dirty flags as of this data
 
   useEffect(() => {
     if (!user) return;
@@ -179,8 +180,10 @@ export default function Settings() {
 
   if (isLoading) return <div><span className="spinner" /> Loading…</div>;
 
+  // Send ONLY the field being saved — the server merges it into the current settings.
+  // (Sending this page's possibly-stale copy of everything overwrote other admins' edits.)
   const save = (patch: any, what: string) =>
-    saveMutation.mutate({ payload: { ...(data || {}), ...patch }, what });
+    saveMutation.mutate({ payload: patch, what });
 
   const tabBtn = (key: SubTab, label: string) => (
     <button key={key} onClick={() => setSubTab(key)}

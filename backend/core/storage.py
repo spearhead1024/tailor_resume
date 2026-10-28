@@ -679,7 +679,7 @@ def _normalize_profile(item: dict) -> dict:
         'status': 'restricted' if str(item.get('status', 'active') or 'active').strip().lower() == 'restricted' else 'active',
         'created_by_user_id': str(item.get('created_by_user_id', '')).strip(),
         'created_by_username': str(item.get('created_by_username', '')).strip(),
-        'total_years_of_experience': int(item['total_years_of_experience']) if str(item.get('total_years_of_experience') or '').strip().isdigit() else 0,
+        'total_years_of_experience': _years(item.get('total_years_of_experience')),
         # Who they are on paper, and on what terms they can be hired. This dict is REBUILT from
         # scratch on every read and every write — a key that is not named here does not exist, no
         # matter what a client sends. That is why these four live here and not only in the router.
@@ -1204,6 +1204,30 @@ def _ensure_company_row(session: Session, company_name: str, job_company_key: st
     if job_company_key and job_company_key not in keys:
         row.data = {**(row.data or {}), 'job_company_keys': keys + [job_company_key]}
 
+def _years(v: Any) -> int:
+    """Years of experience as a whole number. The Profiles input allows 7.5 / "12.0", which the old
+    isdigit() test silently turned into 0 (the prompt then fell back to 8, autofill typed "0")."""
+    try:
+        return max(0, int(round(float(str(v).strip()))))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _write_lock(session: Session) -> None:
+    """Take SQLite's write lock BEFORE reading, for a read-modify-write of a JSON row.
+
+    pysqlite only begins a transaction at the first write, so two writers (request threads, or the
+    API and a worker process) could both read the same row, each change a different key, and the
+    later commit silently erased the earlier one — two people editing different cells of the same
+    call lost one edit. BEGIN IMMEDIATE makes the second writer wait (busy timeout) for the first to
+    commit, so it reads the updated row. Must be the first statement in the session."""
+    session.execute(text("BEGIN IMMEDIATE"))
+
+
+def _blank(v) -> bool:
+    return v is None or v == "" or v == [] or v == {}
+
+
 class Storage:
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = Path(data_dir)
@@ -1462,6 +1486,7 @@ class Storage:
         if not sid:
             return
         with session_scope(self.db_path) as session:
+            _write_lock(session)
             row = session.get(GeneratedResumeRow, sid)
             if row is None:
                 return
@@ -1552,6 +1577,7 @@ class Storage:
         if not tid:
             return
         with session_scope(self.db_path) as session:
+            _write_lock(session)    # rewrites user rows: a concurrent user edit must not be lost
             for row in session.query(UserRow).all():
                 data = dict(row.data or {})
                 if str(data.get('team_id', '')).strip() == tid:
@@ -1609,6 +1635,7 @@ class Storage:
         if not uid:
             return
         with session_scope(self.db_path) as session:
+            _write_lock(session)
             row = session.get(UserRow, uid)
             if row is None:
                 return
@@ -1802,6 +1829,7 @@ class Storage:
         if not jid:
             return
         with session_scope(self.db_path) as session:
+            _write_lock(session)
             row = session.get(JobRow, jid)
             if row is None:
                 return
@@ -2008,6 +2036,7 @@ class Storage:
         """Store a check result. Preserves job_company_keys; never overwrites a locked row
         unless `data` itself carries locked=True (a manual override)."""
         with session_scope(self.db_path) as session:
+            _write_lock(session)
             row = session.get(CompanyRow, key)
             if row is None:
                 return
@@ -2020,6 +2049,7 @@ class Storage:
 
     def set_company_pending(self, key: str) -> bool:
         with session_scope(self.db_path) as session:
+            _write_lock(session)
             row = session.get(CompanyRow, key)
             if row is None:
                 return False
@@ -2257,6 +2287,7 @@ class Storage:
         if not jid:
             return
         with session_scope(self.db_path) as session:
+            _write_lock(session)
             row = session.get(JobRow, jid)
             if row is None:
                 return
@@ -2271,6 +2302,7 @@ class Storage:
         if not jid:
             return
         with session_scope(self.db_path) as session:
+            _write_lock(session)
             row = session.get(JobRow, jid)
             if row is None:
                 return
@@ -2386,6 +2418,7 @@ class Storage:
         """Merge `patch` into one row's cells — a single transaction, so two people editing
         different cells of the same row never overwrite each other."""
         with session_scope(self.db_path) as session:
+            _write_lock(session)
             r = session.get(InterviewRow, str(row_id or ''))
             if r is None:
                 return None
@@ -2398,6 +2431,7 @@ class Storage:
         """Atomic read-modify-write of ONE cell. The chat thread uses this so concurrent posts
         append rather than clobber (fn receives the stored value, returns the new one)."""
         with session_scope(self.db_path) as session:
+            _write_lock(session)
             r = session.get(InterviewRow, str(row_id or ''))
             if r is None:
                 return None
@@ -2488,12 +2522,27 @@ class Storage:
         if not pid:
             return None
         with session_scope(self.db_path) as session:
-            if session.get(Vps1ProfileRow, pid) is None:
+            _write_lock(session)
+            snap_row = session.get(Vps1ProfileRow, pid)
+            if snap_row is None:
                 return None                       # unknown profile — don't create an orphan override
+            snapshot = dict(snap_row.data or {})
             ov = session.get(Vps1ProfileOverrideRow, pid)
             fields = dict(ov.data or {}) if ov is not None else {}
-            fields.update(patch or {})
+            # The page sends the WHOLE profile; storing it all froze every VPS_1 field (contact
+            # details, uploaded resume…) against later mirror updates. Keep only real edits: a value
+            # equal to VPS_1's own drops the override, so that field follows VPS_1 again.
+            for k, v in (patch or {}).items():
+                if k in ('id', 'source'):
+                    continue
+                # A field VPS_1 omits comes back padded as "" (vps1_adapt), so "" vs a missing value is
+                # no edit either — storing it hid the value VPS_1 sent later, for good.
+                if v == snapshot.get(k) or (_blank(v) and _blank(snapshot.get(k))):
+                    fields.pop(k, None)
+                else:
+                    fields[k] = v
             fields.pop('id', None)                # the id is never an editable field
+            fields.pop('source', None)
             if ov is None:
                 session.add(Vps1ProfileOverrideRow(id=pid, data=fields))
             else:
