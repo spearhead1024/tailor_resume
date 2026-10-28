@@ -249,6 +249,7 @@ class BidSkipRow(Base):
     job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     skipped_by_user_id: Mapped[str] = mapped_column(String(64), default='')
     skipped_by_username: Mapped[str] = mapped_column(String(255), default='')
+    reason: Mapped[str] = mapped_column(String(500), default='', server_default='')
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
 
 

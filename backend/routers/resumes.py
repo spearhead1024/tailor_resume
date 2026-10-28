@@ -578,7 +578,8 @@ def bid_queue(profile_id: str, user: dict = Depends(get_current_user)):
 @router.post("/bid/skip")
 def bid_skip(body: dict, user: dict = Depends(get_current_user)):
     """Skip a job for one profile — it leaves that profile's Bid queue for good
-    (other profiles still see it). Body: {profile_id, job_id}."""
+    (other profiles still see it). Body: {profile_id, job_id, reason} — the reason
+    (e.g. "Location / region") is kept with the skip."""
     if not has_role(user, "admin", "bidder"):
         raise HTTPException(status_code=403, detail="Forbidden")
     profile_id = str((body or {}).get("profile_id") or "").strip()
@@ -588,7 +589,9 @@ def bid_skip(body: dict, user: dict = Depends(get_current_user)):
     _check_profile_access(user, profile_id)
     if not storage.get_job_by_id(job_id):
         raise HTTPException(status_code=404, detail="Job not found")
-    storage.skip_bid_job(profile_id, job_id, user_id=user.get("id", ""), username=user.get("username", ""))
+    reason = str((body or {}).get("reason") or "").strip()
+    storage.skip_bid_job(profile_id, job_id, user_id=user.get("id", ""), username=user.get("username", ""),
+                         reason=reason)
     return {"ok": True}
 
 

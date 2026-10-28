@@ -330,10 +330,14 @@ function BidJobView({ job, profile, onAdvance }: { job: BidJob; profile: BidProf
   // profile's region) — it leaves this profile's queue only; other profiles keep it.
   const skipJob = async () => {
     if (busy) return;
-    if (!window.confirm('Are you sure skip this job?')) return;
+    // Same as Report: confirm + a reason in one step; Cancel aborts.
+    const reason = window.prompt(`Are you sure skip this job?\n"${job.company} · ${job.job_title}" — why doesn't it suit ${profile.name}? (e.g. location / region, tech stack)`);
+    if (reason === null) return;
+    const trimmed = reason.trim();
+    if (!trimmed) { toast('A reason is required', 'error'); return; }
     setBusy('skip');
     try {
-      await api.post('/api/resumes/bid/skip', { profile_id: profile.id, job_id: job.id });
+      await api.post('/api/resumes/bid/skip', { profile_id: profile.id, job_id: job.id, reason: trimmed });
       track('skip');
       toast(`Skipped — ${job.company}`, 'success');
       refresh();

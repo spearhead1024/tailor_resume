@@ -2075,10 +2075,11 @@ class Storage:
                 row.updated_at = datetime.utcnow()
 
     # ── Bid skips (per-profile "not for this profile" on a job) ──────────
-    def skip_bid_job(self, profile_id: str, job_id: str, *, user_id: str = '', username: str = '') -> None:
+    def skip_bid_job(self, profile_id: str, job_id: str, *, user_id: str = '', username: str = '',
+                     reason: str = '') -> None:
         with session_scope(self.db_path) as session:
             if session.get(BidSkipRow, (profile_id, job_id)) is None:
-                session.add(BidSkipRow(profile_id=profile_id, job_id=job_id,
+                session.add(BidSkipRow(profile_id=profile_id, job_id=job_id, reason=reason[:500],
                                        skipped_by_user_id=user_id, skipped_by_username=username))
 
     def skipped_bid_job_ids(self, profile_id: str) -> set[str]:
