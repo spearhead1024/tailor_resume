@@ -43,3 +43,6 @@ data/notif_snooze.json*
 # Public-company list cache rebuilt daily by the company-intel worker
 data/listed_companies.json
 data/scheduler.lock
+**/__pycache__/
+# job-sync's cross-process lock (runtime)
+data/job_sync.lock
