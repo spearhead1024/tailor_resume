@@ -21,7 +21,8 @@ module.exports = {
       // in process memory with no cross-process fan-out. With >1 worker, a broadcast triggered on
       // one worker never reaches a socket held by another -- roughly half of connected clients
       // silently stop seeing live updates.
-      args: '-m uvicorn main:app --host 0.0.0.0 --port 8503 --workers 1',
+      args: '-m uvicorn main:app --host 127.0.0.1 --port 8503 --workers 1',   // nginx proxies to 127.0.0.1; never expose uvicorn directly
+      kill_timeout: 10000,   // let the shutdown flush of pending board notifications finish (pm2 default: 1.6s)
       interpreter: 'none',
       env: {
         PYTHONUNBUFFERED: '1',
@@ -40,7 +41,7 @@ module.exports = {
       env: {
         PYTHONUNBUFFERED: '1',
       },
-      max_memory_restart: '256M',
+      max_memory_restart: '384M',
       autorestart: true,
       restart_delay: 5000,
     },

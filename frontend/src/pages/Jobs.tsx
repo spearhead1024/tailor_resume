@@ -155,6 +155,9 @@ export default function Jobs() {
   const counts = data?.counts || { approved: 0, pending: 0, rejected: 0, deleted: 0, total: 0 };
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const safePage = Math.min(page, totalPages);
+  // Deleting/rejecting everything on the last page left page > totalPages: an empty list labelled
+  // "Page N-1 of N-1" with Next disabled. Snap back to the real last page once the counts arrive.
+  useEffect(() => { if (data && page > totalPages) setPage(totalPages); }, [data, page, totalPages, setPage]);
 
   const createMutation = useMutation({
     mutationFn: (payload: any) => api.post('/api/jobs', { payload }),
@@ -170,6 +173,7 @@ export default function Jobs() {
   const deleteMutation = useMutation({
     mutationFn: (id: string) => api.delete(`/api/jobs/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['jobs'] }),
+    onError: (e: any) => toast(formatJobError(e, 'Failed to delete job'), 'error'),
   });
 
   const clearReportMutation = useMutation({

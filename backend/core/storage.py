@@ -949,6 +949,7 @@ def _normalize_job(item: dict) -> dict:
         'scrape_status': str(item.get('scrape_status', 'done' if item.get('description') else 'queued') or 'queued').strip(),
         'scrape_error': str(item.get('scrape_error', '')).strip(),
         'created_by_user_id': str(item.get('created_by_user_id', '')).strip(),
+        'added_by_unknown': bool(item.get('added_by_unknown', False)),   # job_sync: VPS1 has no adder — stop asking
         'created_by_username': str(item.get('created_by_username', '')).strip(),
         'submitted_at': str(item.get('submitted_at', '')).strip(),
         'approved_at': str(item.get('approved_at', '')).strip(),
@@ -2189,6 +2190,14 @@ class Storage:
                 stmt = stmt.where(JobRow.id != str(exclude_job_id).strip())
             row = session.scalar(stmt.limit(1))
             return _normalize_job(dict(row.data or {})) if row else None
+
+    def sync_remote_ids(self) -> set[str]:
+        """Every VPS1 job id already stored (any status) — job-sync's primary duplicate check."""
+        with session_scope(self.db_path) as session:
+            rows = session.execute(text(
+                "SELECT json_extract(data, '$.sync_remote_id') FROM jobs "
+                "WHERE json_extract(data, '$.sync_remote_id') IS NOT NULL")).all()
+            return {str(r[0]) for r in rows if r[0]}
 
     def find_recent_company_job(
         self, company: str, region: str, within_days: int = COMPANY_DEDUP_DAYS, exclude_job_id: str = '',

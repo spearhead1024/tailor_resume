@@ -21,10 +21,12 @@ Run as a standalone script — loops forever with a 20-minute sleep.
 """
 from __future__ import annotations
 
+import fcntl
 import logging
 import os
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -189,12 +191,29 @@ def _status_for(job: dict) -> str:
     return "approved" if _is_complete(job) else "rejected"
 
 
+def _remote_submitted_at(job: dict) -> str:
+    """VPS1's own submitted_at (when the job was added there) as "…Z" UTC, or ''."""
+    raw = str(job.get("submitted_at") or "").strip()
+    if not raw:
+        return ""
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _build_payload(job: dict, status: str) -> dict:
-    # The API exposes no approval timestamp, so we stamp the moment we first
-    # ingest the job. Dedup means existing jobs are never re-inserted, so this
-    # is effectively the local "first seen" time — which is what the platform's
-    # daily-intake window keys on.
+    # Date the job by when it was ADDED on VPS1 (its submitted_at), not by when we
+    # happened to sync it. Stamping the sync time made any backlog that arrived late
+    # look brand new: when the title blacklist was emptied, ~290 VPS1 jobs from
+    # June–October were inserted at once and all showed as "today" (and entered the
+    # Bid queue, whose deadline keys on submitted_at). VPS1 exposes no approval time,
+    # so approved_at stays our first-seen time.
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    added_iso = _remote_submitted_at(job) or now_iso
     return {
         "company":        str(job.get("company") or "").strip(),
         "job_title":      str(job.get("job_title") or "").strip(),
@@ -204,7 +223,7 @@ def _build_payload(job: dict, status: str) -> dict:
         "description":    str(job.get("description_preview") or "").strip(),
         "status":         status,
         "source":         "sync",
-        "submitted_at":   now_iso,
+        "submitted_at":   added_iso,
         "approved_at":    now_iso if status == "approved" else "",
         "sync_remote_id": str(job.get("id") or ""),
         "scrape_status":  "done" if str(job.get("description_preview") or "").strip() else "queued",
@@ -212,6 +231,24 @@ def _build_payload(job: dict, status: str) -> dict:
         # VPS1 accounts are never confused with local users (access + metrics use the id).
         "created_by_username": str(job.get("created_by_username") or "").strip(),
     }
+
+
+def _rejection(payload: dict, remote_id: str, link: str) -> str | None:
+    """'blocked' (admin blacklist: domain / title keyword / company) or 'dup' (this company already
+    has an active job in the region within the dedup window), else None."""
+    block_reason = storage.job_block_reason(payload)
+    if block_reason is not None:
+        _log_once(remote_id, "blocked:" + block_reason, "Blocked (%s): %s — %s — %s",
+                  block_reason, payload["company"], payload["job_title"], link)
+        return "blocked"
+    recent = storage.find_recent_company_job(payload["company"], payload["region"])
+    if recent is not None:
+        _log_once(remote_id, "dup:" + str(recent.get("id", "")),
+                  "Skipped company-dup: %s [%s] — already have '%s' (%s) within %dd",
+                  payload["company"] or remote_id, payload["region"],
+                  recent.get("job_title", ""), recent.get("id", ""), COMPANY_DEDUP_DAYS)
+        return "dup"
+    return None
 
 
 def _find_existing(link: str, company: str, job_title: str) -> bool:
@@ -235,7 +272,10 @@ def reject_incomplete_approved() -> int:
     """Set status='rejected' for any locally-approved sync job with no description."""
     count = 0
     for j in storage.get_jobs():
-        if j.get("status") != "approved":
+        # Only SYNCED jobs the sync owns: a manually added or human-approved job (or any job a person
+        # changed — sync_locked) must never be auto-rejected; nothing fills a manual job's
+        # description, so they were all being rejected within one cycle.
+        if j.get("status") != "approved" or j.get("source") != "sync" or j.get("sync_locked"):
             continue
         if str(j.get("description") or "").strip():
             continue
@@ -294,9 +334,21 @@ def retry_rejected(approved: list[dict] | None = None) -> int:
         rjob = _with_full_description(match)
         if not _is_complete(rjob):
             continue
+        # Re-read right before writing: the network calls above take a while, and an admin may have
+        # deleted/rejected the job meanwhile (which sets sync_locked) — that decision must win.
+        fresh = storage.get_job_by_id(local["id"]) or {}
+        if fresh.get("status") != "rejected" or fresh.get("sync_locked"):
+            continue
         payload = _build_payload(rjob, "approved")
-        payload["id"] = local["id"]
-        storage.upsert_job(payload)
+        if storage.job_block_reason(payload) is not None:
+            continue                      # blacklisted — stays rejected (was miscounted as upgraded)
+        if storage.find_recent_company_job(payload["company"], payload["region"],
+                                           exclude_job_id=local["id"]) is not None:
+            continue                      # the company already has an active job in the window
+        # It becomes biddable NOW. Dating it by its VPS1 add time put an upgrade made more than the
+        # Bid deadline (12 h) after that already past it, so it never appeared in any Bid queue.
+        payload["submitted_at"] = payload["approved_at"]
+        storage.update_job(local["id"], payload)    # merge: keeps reports / flags / notes
         upgraded += 1
         log.info("Upgraded rejected→approved: %s — %s", rjob.get("company"), rjob.get("job_title"))
 
@@ -311,12 +363,54 @@ def retry_rejected(approved: list[dict] | None = None) -> int:
 # Main sync: fetch new approved jobs from remote
 # ---------------------------------------------------------------------------
 
-def sync_once() -> dict:
-    remote_jobs = _fetch_all_approved()
+_LOCK_FILE = Path(__file__).resolve().parents[2] / "data" / "job_sync.lock"
 
+
+@contextmanager
+def _cycle_lock():
+    """Cross-process lock: the scheduled cycle runs in the job-sync worker, "Sync now" in the API
+    process. A thread lock can't see across processes, so both could insert the same new job (as
+    two rows). Yields False when another sync is already running."""
+    _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(_LOCK_FILE, "w") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def sync_once() -> dict:
+    """Fetch and insert new approved jobs now ("Sync now"). Returns {"busy": True} if a sync is
+    already running in another process."""
+    with _cycle_lock() as got:
+        if not got:
+            return {"busy": True}
+        return _sync(_fetch_all_approved())
+
+
+# Remote jobs we decided not to ingest are seen again every cycle (they're never stored), so their
+# "Skipped"/"Blocked" line used to repeat ~300 times every 20 minutes. Log each one once per process.
+_reported: set[tuple[str, str]] = set()
+
+
+def _log_once(remote_id: str, reason: str, msg: str, *args) -> None:
+    key = (remote_id, reason)
+    if key not in _reported:
+        _reported.add(key)
+        log.info(msg, *args)
+
+
+def _sync(remote_jobs: list[dict]) -> dict:
     fetched  = len(remote_jobs)
     inserted = 0
     skipped  = 0
+    # VPS1 ids we already hold: a job whose company/title/link VPS1 later corrected must not look new.
+    known_remote_ids = storage.sync_remote_ids()
 
     blocked = 0
     for listitem in remote_jobs:
@@ -328,7 +422,11 @@ def sync_once() -> dict:
         # Never ingest placeholder "Manual Job" listings.
         if job_title.casefold() == "manual job":
             skipped += 1
-            log.info("Skipped placeholder 'Manual Job': %s — %s", company or remote_id, link)
+            _log_once(remote_id, "manual", "Skipped placeholder 'Manual Job': %s — %s", company or remote_id, link)
+            continue
+
+        if remote_id and remote_id in known_remote_ids:
+            skipped += 1
             continue
 
         # Skip if any local record already exists with this URL or company+title,
@@ -336,6 +434,17 @@ def sync_once() -> dict:
         # Done BEFORE the detail fetch so we don't hit the API for known jobs.
         if _find_existing(link, company, job_title):
             skipped += 1
+            continue
+
+        # Blacklist and one-per-company checks need only the listing (company, title, link, region),
+        # so run them BEFORE the detail fetch: these jobs are never stored and come back every cycle,
+        # and fetching each one's description first cost ~120 needless VPS1 calls per cycle.
+        reason = _rejection(_build_payload(listitem, "approved"), remote_id, link)
+        if reason is not None:
+            if reason == "blocked":
+                blocked += 1
+            else:
+                skipped += 1
             continue
 
         # New job → fetch full description, then classify and build payload.
@@ -348,28 +457,7 @@ def sync_once() -> dict:
         # common case where the listing already carries it).
         if payload["job_title"].casefold() == "manual job":
             skipped += 1
-            log.info("Skipped placeholder 'Manual Job': %s — %s", company or remote_id, link)
-            continue
-
-        # Blacklist (admin-configured: domain / title keyword / company).
-        # Blocked jobs are logged at info level — they're a deliberate filter.
-        block_reason = storage.job_block_reason(payload)
-        if block_reason is not None:
-            blocked += 1
-            log.info("Blocked (%s): %s — %s — %s", block_reason, company, job_title, link)
-            continue
-
-        # One job per company per region per month: if this company already has an
-        # active job in the same region within the dedup window, skip the new one.
-        recent = storage.find_recent_company_job(payload["company"], payload["region"])
-        if recent is not None:
-            skipped += 1
-            log.info(
-                "Skipped company-dup: %s [%s] — already have '%s' (%s) within %dd",
-                payload["company"] or remote_id, payload["region"],
-                recent.get("job_title", ""), recent.get("id", ""),
-                COMPANY_DEDUP_DAYS,
-            )
+            _log_once(remote_id, "manual", "Skipped placeholder 'Manual Job': %s — %s", company or remote_id, link)
             continue
 
         try:
@@ -414,7 +502,8 @@ def backfill_added_by(approved: list[dict] | None = None, max_detail_lookups: in
     so a large backlog is filled over a few cycles without hammering VPS1)."""
     missing = [j for j in storage.get_jobs()
                if j.get("source") == "sync" and j.get("sync_remote_id")
-               and not str(j.get("created_by_username") or "").strip()]
+               and not str(j.get("created_by_username") or "").strip()
+               and not j.get("added_by_unknown")]          # VPS1 had no adder last time — don't re-ask forever
     if not missing:
         return 0
     if approved is None:
@@ -425,13 +514,25 @@ def backfill_added_by(approved: list[dict] | None = None, max_detail_lookups: in
     for local in missing:
         rid = str(local["sync_remote_id"])
         name = by_id.get(rid, "")
+        answered = False                 # VPS1 answered for this job (detail, or 404: gone) — not a failed request
         if not name and lookups < max_detail_lookups:
             lookups += 1
-            detail = _fetch_detail(rid)
+            try:
+                detail = _api_get(f"/api/jobs/{rid}")
+                answered = True
+            except requests.HTTPError as exc:
+                detail = None
+                answered = exc.response is not None and exc.response.status_code == 404
+            except Exception:
+                detail = None
             name = str((detail or {}).get("created_by_username") or "").strip()
         if name:
             storage.update_job(local["id"], {"created_by_username": name})
             filled += 1
+        elif answered:
+            # Only a job VPS1 actually answered for: one past the lookup cap, or a failed request,
+            # just hasn't been asked yet.
+            storage.update_job(local["id"], {"added_by_unknown": True})
     log.info("Added-by backfill: filled %d of %d synced jobs (%d detail lookups)",
              filled, len(missing), lookups)
     return filled
@@ -446,10 +547,17 @@ def main() -> None:
     )
     while True:
         try:
-            reject_incomplete_approved()
-            retry_rejected()
-            sync_once()
-            backfill_added_by()
+            with _cycle_lock() as got:
+                if got:
+                    # Each step fetches the approved list itself and lets it go: holding one shared
+                    # copy (7k jobs with descriptions) alongside get_jobs() for the whole cycle pushed
+                    # the worker past pm2's 256M max_memory_restart, so it was killed mid-cycle.
+                    reject_incomplete_approved()
+                    retry_rejected()
+                    _sync(_fetch_all_approved())
+                    backfill_added_by()
+                else:
+                    log.info("Sync skipped — another sync (\"Sync now\") is running")
         except Exception as exc:
             log.error("Unhandled error in sync cycle: %s", exc)
         time.sleep(SYNC_INTERVAL_SECONDS)

@@ -117,6 +117,19 @@ def _check_company_week(payload: dict, exclude_job_id: str = "") -> None:
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
+# Who added / approved a job is recorded by the server, never taken from the client.
+_SERVER_OWNED = ("id", "created_by_user_id", "created_by_username",
+                 "approved_by_user_id", "approved_by_username", "approved_at", "sync_locked")
+
+
+def _job_for_write(job_id: str, user: dict) -> dict:
+    """The job, if this user may change it: admins any job, job_adders only the jobs they added —
+    the same rule list/get already apply (404, so other people's job ids aren't confirmed)."""
+    job = storage.get_job_by_id(job_id)
+    if not job or (not user.get("is_admin") and job.get("created_by_user_id") != user.get("id")):
+        raise HTTPException(status_code=404, detail="Not found")
+    return job
+
 
 @router.get("")
 def list_jobs(
@@ -165,7 +178,11 @@ async def sync_now(user: dict = Depends(require_role("admin"))):
     try:
         from core import job_sync
         result = await run_in_threadpool(job_sync.sync_once)
+        if (result or {}).get("busy"):
+            raise HTTPException(status_code=409, detail="A sync is already running — try again in a moment.")
         return {"ok": True, **(result or {})}
+    except HTTPException:
+        raise
     except Exception as exc:  # surface the failure to the toast
         raise HTTPException(status_code=502, detail=f"Sync failed: {exc}")
     finally:
@@ -213,7 +230,7 @@ def check_duplicate(body: dict, user: dict = Depends(require_jobs_access)):
 
 @router.post("")
 def create_job(body: JobUpsertRequest, user: dict = Depends(require_jobs_access)):
-    payload = dict(body.payload)
+    payload = {k: v for k, v in dict(body.payload).items() if k not in _SERVER_OWNED}
     _check_duplicate(payload)
     _check_company_week(payload)
     # Reject blacklisted jobs up-front so the toast shows the real reason
@@ -224,18 +241,19 @@ def create_job(body: JobUpsertRequest, user: dict = Depends(require_jobs_access)
             status_code=422,
             detail=f"Blocked — {reason} (Settings → Blacklist).",
         )
-    if not payload.get("id"):
-        payload["id"] = storage.make_id("job")
-    payload.setdefault("created_by_user_id", user["id"])
-    payload.setdefault("created_by_username", user.get("username", ""))
+    # Always a fresh id: upsert_job REPLACES a row with the same id, so a client-chosen id could
+    # overwrite somebody else's job.
+    payload["id"] = storage.make_id("job")
+    payload["created_by_user_id"] = user["id"]
+    payload["created_by_username"] = user.get("username", "")
     now = _utcnow()
     payload.setdefault("submitted_at", now)
     # Manually-added jobs go live as approved (job_adders included).
     payload.setdefault("status", "approved")
     if payload.get("status") == "approved":
-        payload.setdefault("approved_at", now)
-        payload.setdefault("approved_by_user_id", user["id"])
-        payload.setdefault("approved_by_username", user.get("username", ""))
+        payload["approved_at"] = now
+        payload["approved_by_user_id"] = user["id"]
+        payload["approved_by_username"] = user.get("username", "")
     if not storage.upsert_job(payload):
         # Defensive — blacklist could change between the check above and now.
         raise HTTPException(status_code=422, detail="Blocked by blacklist.")
@@ -244,7 +262,8 @@ def create_job(body: JobUpsertRequest, user: dict = Depends(require_jobs_access)
 
 @router.patch("/{job_id}")
 def update_job(job_id: str, body: JobUpsertRequest, user: dict = Depends(require_jobs_access)):
-    patch = dict(body.payload)
+    _job_for_write(job_id, user)
+    patch = {k: v for k, v in dict(body.payload).items() if k not in _SERVER_OWNED}
     # When the edit touches a duplicate-relevant field, check against the
     # rest of the table (but allow the row to keep its own values).
     if any(k in patch for k in ("link", "company", "job_title")):
@@ -274,7 +293,11 @@ def update_job(job_id: str, body: JobUpsertRequest, user: dict = Depends(require
 
 @router.delete("/{job_id}")
 def delete_job(job_id: str, user: dict = Depends(require_jobs_access)):
-    storage.delete_job(job_id)
+    """Soft delete: status "deleted" + sync_locked. A hard delete removed the row, so the next job-sync
+    found the job "new" on VPS1 again and re-inserted it within 20 minutes; the kept row is what
+    tells the sync (and duplicate checks) that this job was already handled."""
+    _job_for_write(job_id, user)
+    storage.update_job(job_id, {"status": "deleted", "sync_locked": True})
     return {"ok": True}
 
 
@@ -316,8 +339,6 @@ def clear_job_report(job_id: str, user: dict = Depends(require_jobs_access)):
     The job returns to circulation (visible again in Resumes/Apply). To take
     it OUT of circulation instead, change its status to rejected/deleted.
     """
-    job = storage.get_job_by_id(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    _job_for_write(job_id, user)
     storage.clear_job_reports(job_id)
     return {"ok": True}
