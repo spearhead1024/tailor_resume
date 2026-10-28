@@ -124,26 +124,29 @@ function JobCellView({ cell }: { cell: JobCell }) {
   );
 }
 
-/** Sum applied across profile rows; total = job pool × unique profile count. */
+/** Sum applied and to-do pools across profile rows. Each profile has its OWN pool (filtered by
+ *  region and tech stack), so pools are summed, never "first pool × row count". */
 function sumApplied(cells: Cell[]): Cell {
   return {
     applied: cells.reduce((a, c) => a + c.applied, 0),
-    total:   (cells[0]?.total ?? 0) * cells.length,
+    total:   cells.reduce((a, c) => a + c.total, 0),
   };
 }
 
 /** Per-day version of {@link sumApplied}. */
 function aggregateAcrossRows(arrays: Cell[][]): Cell[] {
   if (arrays.length === 0) return [];
-  const len = arrays[0].length;
-  const out: Cell[] = [];
-  for (let i = 0; i < len; i++) {
-    out.push({
-      applied: arrays.reduce((sum, a) => sum + a[i].applied, 0),
-      total:   arrays[0][i].total * arrays.length,
-    });
-  }
-  return out;
+  return arrays[0].map((_, i) => sumApplied(arrays.map((a) => a[i])));
+}
+
+/** Rows for a grand total: a profile shared by two bidders appears once per bidder, but its pool
+ *  must count once. Keep each profile's pool on its first row and zero it on the others. */
+function poolOncePerProfile(rows: Row[]): Row[] {
+  const seen = new Set<string>();
+  return rows.map((r) => {
+    if (!seen.has(r.profile_id)) { seen.add(r.profile_id); return r; }
+    return { ...r, daily: r.daily.map((c) => ({ ...c, total: 0 })), week: { ...r.week, total: 0 } };
+  });
 }
 
 /** Searchable multi-select of users for the Metrics filter. Works on a HIDDEN set:
@@ -219,7 +222,9 @@ export default function Metrics() {
   const canSeeApps = isAdmin || hasRole(user, 'bidder');
   const canSeeJobs = isAdmin || hasRole(user, 'job_adder');
   // View + week live in the URL (lib/urlState) so a refresh keeps them.
-  const [view, setView] = useUrlState<'apps' | 'jobs'>('view', canSeeApps ? 'apps' : 'jobs');
+  const [urlView, setView] = useUrlState<'apps' | 'jobs'>('view', canSeeApps ? 'apps' : 'jobs');
+  // A link (or a tab another user left on ?view=jobs) can name a view this user can't see — fall back.
+  const view = urlView === 'jobs' ? (canSeeJobs ? 'jobs' : 'apps') : (canSeeApps ? 'apps' : 'jobs');
   const [weekStart, setWeekStart] = useUrlState('week', todayIsoMonday());
   // Admin-only user filter, stored as the set of HIDDEN user ids (see the note by
   // loadHiddenUsers). Anyone not in this set shows — so a new bidder appears without
@@ -291,10 +296,12 @@ export default function Metrics() {
   // GRAND TOTAL reflects only the visible (selected) users, so it matches the rows
   // on screen rather than the backend's all-users total.
   const appsTotals = useMemo(() => {
-    const rows = groups.flatMap((g) => g.rows);
+    // Nobody filtered out → the server's totals, which also count a job two people both marked once.
+    if (data?.totals && groups.length === allGroups.length) return data.totals;
+    const rows = poolOncePerProfile(groups.flatMap((g) => g.rows));
     if (rows.length === 0) return null;
     return { daily: aggregateAcrossRows(rows.map((r) => r.daily)), week: sumApplied(rows.map((r) => r.week)) };
-  }, [groups]);
+  }, [groups, allGroups, data]);
   const jobTotals = useMemo(() => {
     if (jobRows.length === 0) return null;
     const days = jobRows[0].daily.length;

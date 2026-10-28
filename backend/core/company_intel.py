@@ -407,20 +407,30 @@ def from_job_text(descs: list[str]) -> dict:
 # ── Y Combinator directory (free JSON, cached daily) ───────────────────────
 _yc_lock = threading.Lock()
 _yc: dict = {"at": 0.0, "by_key": {}}
+_YC_RETRY_S = 15 * 60
 
 
 def yc_lookup(name: str) -> dict | None:
     from core.storage import company_key_for
     with _yc_lock:
-        if time.time() - _yc["at"] > 86400 or not _yc["by_key"]:
-            r = _get("https://yc-oss.github.io/api/companies/all.json")
-            if r is not None:
-                by_key = {}
-                for c in r.json():
+        if time.time() - _yc["at"] > 86400:
+            by_key = {}
+            try:
+                r = _get("https://yc-oss.github.io/api/companies/all.json")
+                for c in (r.json() if r is not None else []):
                     k = company_key_for(c.get("name", ""))
                     if k:
                         by_key[k] = c
+            except Exception:
+                by_key = {}
+            if by_key:
                 _yc.update(at=time.time(), by_key=by_key)
+            else:
+                # Failed (or empty) download: keep any last good copy and back off before retrying.
+                # Without this every company check re-fetched all.json under the lock — up to the
+                # HTTP timeout each — serialising all the enrichment threads behind it.
+                _yc["at"] = time.time() - 86400 + _YC_RETRY_S
+                log.warning("YC directory refresh failed; using %d cached companies", len(_yc["by_key"]))
         c = _yc["by_key"].get(company_key_for(name))
     if not c:
         return None

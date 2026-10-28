@@ -3,7 +3,7 @@ import { useUrlState } from '../lib/urlState';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
-import { etDateTime } from '../lib/etTime';
+import { etDateKey, etDateTime } from '../lib/etTime';
 
 type Shot = {
   id: string;
@@ -25,8 +25,9 @@ type Shot = {
 // authed blob and shared via a module-level cache (so the filmstrip thumbnail
 // and the large viewer never fetch the same screenshot twice).
 const urlCache = new Map<string, string>();
-function useShotUrl(id: string | null): string {
-  const [src, setSrc] = useState<string>(() => (id && urlCache.get(id)) || '');
+/** The image's blob URL; '' while loading, null if it failed. */
+function useShotUrl(id: string | null): string | null {
+  const [src, setSrc] = useState<string | null>(() => (id && urlCache.get(id)) || '');
   useEffect(() => {
     if (!id) { setSrc(''); return; }
     const cached = urlCache.get(id);
@@ -39,7 +40,7 @@ function useShotUrl(id: string | null): string {
         urlCache.set(id, url);
         if (alive) setSrc(url);
       })
-      .catch(() => { if (alive) setSrc(''); });
+      .catch(() => { if (alive) setSrc(null); });
     return () => { alive = false; };
   }, [id]);
   return src;
@@ -57,7 +58,9 @@ function Thumb({ shot, active, onClick }: { shot: Shot; active: boolean; onClick
         background: 'var(--panel-2)', cursor: 'pointer', position: 'relative',
         outline: active ? '0' : '1px solid var(--border)',
       }}>
-      {src
+      {src === null
+        ? <span className="muted" style={{ position: 'absolute', inset: 0, margin: 'auto', height: 'fit-content', fontSize: 12 }}>failed</span>
+        : src
         ? <img src={src} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover', objectPosition: 'top', display: 'block' }} />
         : <span className="spinner" style={{ position: 'absolute', inset: 0, margin: 'auto' }} />}
     </button>
@@ -103,8 +106,9 @@ export default function Screenshots() {
     return all.filter((s) => {
       if (profileId && s.profile_id !== profileId) return false;
       if (bidder && s.created_by_username !== bidder) return false;
-      if (dateFrom && (s.created_at || '') < dateFrom) return false;
-      if (dateTo && (s.created_at || '') > dateTo + 'T23:59:59Z') return false;
+      // Compare ET days, the same clock the cards are labelled with (raw UTC moved evening shots a day).
+      if (dateFrom && etDateKey(s.created_at || '') < dateFrom) return false;
+      if (dateTo && etDateKey(s.created_at || '') > dateTo) return false;
       if (debounced) {
         const hay = `${s.company} ${s.job_title} ${s.url} ${s.created_by_username} ${s.profile_name}`.toLowerCase();
         if (!hay.includes(debounced)) return false;
@@ -200,7 +204,7 @@ export default function Screenshots() {
                   ? { width: '100%', height: 'auto', display: 'block', cursor: 'zoom-out' }
                   : { maxWidth: '100%', maxHeight: '62vh', objectFit: 'contain', display: 'block', cursor: 'zoom-in' }}
               />
-            ) : <span className="spinner" />}
+            ) : mainSrc === null ? <span className="muted">Couldn't load this screenshot.</span> : <span className="spinner" />}
           </div>
 
           {/* Caption / actions */}

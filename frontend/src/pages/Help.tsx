@@ -177,6 +177,8 @@ function GuideVideo() {
 
   const [videoUrl, setVideoUrl] = useState('');
   const [vidLoading, setVidLoading] = useState(false);
+  const [vidFailed, setVidFailed] = useState(false);
+  const [vidTry, setVidTry] = useState(0);
 
   async function refresh() {
     setLoading(true);
@@ -192,17 +194,18 @@ function GuideVideo() {
   useEffect(() => {
     let url = '';
     let alive = true;
+    setVidFailed(false);
     if (meta?.available) {
       setVidLoading(true);
       api.raw.get('/api/guide/video', { responseType: 'blob' })
         .then((res) => { if (!alive) return; url = URL.createObjectURL(res.data as Blob); setVideoUrl(url); })
-        .catch(() => { if (alive) setVideoUrl(''); })
+        .catch(() => { if (alive) { setVideoUrl(''); setVidFailed(true); } })
         .finally(() => { if (alive) setVidLoading(false); });
     } else {
       setVideoUrl('');
     }
     return () => { alive = false; if (url) URL.revokeObjectURL(url); };
-  }, [meta?.available, v]);
+  }, [meta?.available, v, vidTry]);
 
   async function upload(file: File) {
     if (file.size > 300 * 1024 * 1024) {
@@ -255,7 +258,9 @@ function GuideVideo() {
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               gap: 10, minHeight: 280, color: 'var(--muted)', background: '#000', borderRadius: 10,
             }}>
-              <span className="spinner" /> Loading video…
+              {vidFailed && !vidLoading
+                ? <>Couldn't load the video. <button className="secondary" onClick={() => setVidTry((n) => n + 1)}>Retry</button></>
+                : <><span className="spinner" /> Loading video…</>}
             </div>
           ) : (
             <video

@@ -9,7 +9,7 @@
 // calls made in one event (e.g. "set region" + "back to page 1"), so every setter
 // here writes into one shared pending query that is committed once per tick.
 
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 
 type Prim = string | number | boolean;
@@ -39,6 +39,24 @@ function decode<T extends Prim>(raw: string | null, def: T): T {
 }
 const encode = (v: Prim) => (typeof v === 'boolean' ? (v ? '1' : '0') : String(v));
 
+/** The raw query value for `key`, but answering a set() IMMEDIATELY.
+ *  The URL itself is committed a microtask later (see stage), so a controlled <input> bound to the
+ *  URL value would snap back to the old text at the end of the keystroke and then jump to the new
+ *  one — the cursor leapt to the end on every key, and IME composition broke. So a set() also
+ *  records the new raw value as an override, shown until the URL moves (our own commit landing, or
+ *  Back/Forward/navigation), after which the URL is the truth again. */
+function useMirroredRaw(key: string): [string | null, (raw: string | null) => void, ReturnType<typeof useSearchParams>[1]] {
+  const [params, setParams] = useSearchParams();
+  const urlRaw = params.get(key);
+  const urlRef = useRef(urlRaw);
+  urlRef.current = urlRaw;
+  const [ov, setOv] = useState<{ raw: string | null; base: string | null } | null>(null);
+  useEffect(() => { if (ov && ov.base !== urlRaw) setOv(null); }, [urlRaw, ov]);
+  const raw = ov && ov.base === urlRaw ? ov.raw : urlRaw;
+  const remember = useCallback((next: string | null) => setOv({ raw: next, base: urlRef.current }), []);
+  return [raw, remember, setParams];
+}
+
 type Setter<T> = (v: T | ((prev: T) => T)) => void;
 
 /** Like useState, but stored in the URL query under `key`. The type follows the
@@ -48,41 +66,44 @@ export function useUrlState(key: string, def: boolean): [boolean, Setter<boolean
 export function useUrlState(key: string, def: number): [number, Setter<number>];
 export function useUrlState<T extends string = string>(key: string, def: NoInfer<T>): [T, Setter<T>];
 export function useUrlState<T extends Prim>(key: string, def: T): [T, Setter<T>] {
-  const [params, setParams] = useSearchParams();
-  const value = decode(params.get(key), def);
+  const [raw, remember, setParams] = useMirroredRaw(key);
+  const value = decode(raw, def);
   const defRef = useRef(def);
   defRef.current = def;
   const set = useCallback((v: T | ((prev: T) => T)) => {
+    let nextRaw: string | null = null;
     stage((p) => {
       const cur = decode(p.get(key), defRef.current);
       const next = typeof v === 'function' ? (v as (prev: T) => T)(cur) : v;
-      if (next === defRef.current) p.delete(key); else p.set(key, encode(next));
+      if (next === defRef.current) p.delete(key); else p.set(key, nextRaw = encode(next));
     }, setParams);
-  }, [key, setParams]);
+    remember(nextRaw);
+  }, [key, setParams, remember]);
   return [value, set];
 }
 
 /** useUrlState for objects/arrays (stored as JSON). */
 export function useUrlJson<T>(key: string, def: T): [T, (v: T | ((prev: T) => T)) => void] {
-  const [params, setParams] = useSearchParams();
-  const parse = (raw: string | null, fallback: T): T => {
-    if (raw === null) return fallback;
-    try { return JSON.parse(raw) as T; } catch { return fallback; }
+  const [raw, remember, setParams] = useMirroredRaw(key);
+  const parse = (r: string | null, fallback: T): T => {
+    if (r === null) return fallback;
+    try { return JSON.parse(r) as T; } catch { return fallback; }
   };
-  const raw = params.get(key);
   // Keep the parsed object stable while the URL text is unchanged (safe in deps arrays).
   const memo = useRef<{ raw: string | null; value: T }>({ raw: undefined as unknown as null, value: def });
   if (memo.current.raw !== raw) memo.current = { raw, value: parse(raw, def) };
   const defJson = JSON.stringify(def);
   const set = useCallback((v: T | ((prev: T) => T)) => {
+    let nextRaw: string | null = null;
     stage((p) => {
       const cur = parse(p.get(key), JSON.parse(defJson));
       const next = typeof v === 'function' ? (v as (prev: T) => T)(cur) : v;
       const json = JSON.stringify(next);
-      if (json === defJson) p.delete(key); else p.set(key, json);
+      if (json === defJson) p.delete(key); else p.set(key, nextRaw = json);
     }, setParams);
+    remember(nextRaw);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, defJson, setParams]);
+  }, [key, defJson, setParams, remember]);
   return [memo.current.value, set];
 }
 
