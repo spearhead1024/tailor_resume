@@ -158,15 +158,33 @@ def _infer_target_title(target_role: str, keywords: list[str], profile_skills: l
             best_title = title
     return best_title
 
+def _mentions(term: str, lowered: str) -> bool:
+    """Whole-word mention (VPS1 used a raw substring test, so "next steps" counted as Next.js,
+    "honest" as NestJS, "weeks" as EKS — inflating "missing keywords" and lowering the score)."""
+    return re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", lowered) is not None
+
+
+# Tool names that are also everyday English words. As an ALIAS ("next", "nest", "spring") they are
+# ignored — the specific form ("Next.js", "NestJS", "Spring Boot") still matches; as a canonical name
+# ("Express", "Spark") they must appear Capitalized, so "express interest" isn't Express.js.
+_ENGLISH_WORDS = {"next", "nest", "express", "spring", "phoenix", "apollo", "spark", "lambda", "helm"}
+
+
 def _extract_explicit_jd_techs(job_description: str) -> list[str]:
     text = job_description or ''
     lowered = text.lower()
     found: list[str] = []
     for alias, canonical in TECH_ALIAS_MAP.items():
-        if alias in lowered and canonical not in found:
+        if alias in _ENGLISH_WORDS:
+            continue
+        if _mentions(alias, lowered) and canonical not in found:
             found.append(canonical)
     for tech in KNOWN_TECH_TERMS:
-        if tech.lower() in lowered and tech not in found:
+        if tech.lower() in _ENGLISH_WORDS:
+            hit = re.search(rf"(?<![A-Za-z0-9]){re.escape(tech)}(?![A-Za-z0-9])", text) is not None
+        else:
+            hit = _mentions(tech.lower(), lowered)
+        if hit and tech not in found:
             found.append(tech)
     return found
 

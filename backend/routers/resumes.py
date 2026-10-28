@@ -13,14 +13,14 @@ import json
 import re
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import cast
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.responses import Response
 
-from auth import get_current_user, has_role, storage
+from auth import get_current_user, has_role, require_role, storage
 from core import vps1_adapt, vps1_client
 from core.ats_score import analyze_ats_score
 from core.docx_resume_export import build_docx_style_pdf_bundle
@@ -219,8 +219,9 @@ def list_resumes(user: dict = Depends(get_current_user)):
     return [r for r in items if r.get("profile_id") in allowed]
 
 
-def _et_day(iso_ts: str) -> str:
-    """ET calendar date (YYYY-MM-DD) of a UTC ISO timestamp, '' if unparseable."""
+def _et_day(iso_ts: str, tz=None) -> str:
+    """Calendar date (YYYY-MM-DD) of a UTC ISO timestamp in `tz` (default US Eastern), '' if
+    unparseable."""
     raw = str(iso_ts or "").strip()
     if not raw:
         return ""
@@ -230,7 +231,7 @@ def _et_day(iso_ts: str) -> str:
         return raw[:10]
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
-    return ts.astimezone(_ET).date().isoformat()
+    return ts.astimezone(tz or _ET).date().isoformat()
 
 
 @router.get("/search")
@@ -240,6 +241,7 @@ def search_applied_resumes(
     bidder: str = Query(""),
     date_from: str = Query(""),   # ET date YYYY-MM-DD (applied_at)
     date_to: str = Query(""),
+    tz: str = Query(""),          # IANA zone the dates are in (the viewer's — Applied shows times in it)
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=200),
     user: dict = Depends(get_current_user),
@@ -253,6 +255,10 @@ def search_applied_resumes(
     """
     if not has_role(user, "admin", "bidder"):
         raise HTTPException(status_code=403, detail="Forbidden")
+    try:
+        day_tz = ZoneInfo(tz) if tz else None      # None → ET (the historical default)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Unknown time zone")
 
     profiles = {p.get("id"): p for p in storage.get_profiles()}
     allowed_pids = None
@@ -284,7 +290,7 @@ def search_applied_resumes(
             continue
         if bl and who.lower() != bl:
             continue
-        applied_day = _et_day(r.get("applied_at") or r.get("created_at"))
+        applied_day = _et_day(r.get("applied_at") or r.get("created_at"), day_tz)
         if date_from and applied_day and applied_day < date_from:
             continue
         if date_to and applied_day and applied_day > date_to:
@@ -336,7 +342,7 @@ def search_applied_resumes(
                 continue
             if bl and who.lower() != bl:
                 continue
-            applied_day = _et_day(row.get("applied_at") or row.get("created_at"))
+            applied_day = _et_day(row.get("applied_at") or row.get("created_at"), day_tz)
             if date_from and applied_day and applied_day < date_from:
                 continue
             if date_to and applied_day and applied_day > date_to:
@@ -876,16 +882,38 @@ Return the JSON now, inside a single ```json fenced code block."""
 # "Baylor University … | Bachelor's Degree in Computer Science") or a leftover
 # template placeholder must never seed the FIXED WORK HISTORY — ChatGPT would then
 # generate a single fake "Computer Science Student" role. This guards the prompt.
+# An education line mis-parsed as a company: degree words, or a template marker.
 _NOT_A_COMPANY_RE = re.compile(
-    r"(?i)\b(university|college|institute|bachelor|master|degree|__role__|__headline__)\b"
+    r"(?i)\b(bachelor|master|degree|b\.?\s?sc|m\.?\s?sc|ph\.?\s?d|diploma|certificat\w*|__role__|__headline__)\b"
 )
+_SCHOOL_WORD_RE = re.compile(r"(?i)\b(university|college|institute|academy|school)\b")
+_YEAR_RE = re.compile(r"(19|20)\d{2}")
 
 
-def _looks_like_real_company(name: str, duration: str = "") -> bool:
-    txt = f"{name} {duration}"
-    if not str(name or "").strip():
+def _looks_like_real_company(name: str, duration: str = "", schools: frozenset = frozenset()) -> bool:
+    """Is this a work-history employer (not an education line)? A school-sounding name is still a
+    real employer when it has dates and isn't one of the profile's own schools — "Allen Institute
+    for AI" or "Boston College" (as an employer) must not silently drop out of the prompt."""
+    name = str(name or "").strip()
+    if not name:
         return False
-    return not _NOT_A_COMPANY_RE.search(txt)
+    if _NOT_A_COMPANY_RE.search(f"{name} {duration}"):
+        return False
+    if _SCHOOL_WORD_RE.search(name):
+        return not _is_own_school(name, schools) and bool(_YEAR_RE.search(str(duration or "")))
+    return True
+
+
+def _school_key(name: str) -> str:
+    """'Baylor University, Waco, TX' → 'baylor university': the school without its place or punctuation."""
+    return " ".join(re.sub(r"[^a-z0-9 ]+", " ", str(name or "").split(",")[0].lower()).split())
+
+
+def _is_own_school(name: str, schools: frozenset) -> bool:
+    """Is this one of the profile's own schools? Compared loosely — exact string equality let
+    "Baylor University" through when education said "Baylor University, Waco, TX"."""
+    key = _school_key(name)
+    return bool(key) and any(k and (key in k or k in key) for k in map(_school_key, schools))
 
 
 def _prompt_companies(profile: dict) -> list[dict]:
@@ -901,12 +929,15 @@ def _prompt_companies(profile: dict) -> list[dict]:
         for o in (gs.get("bullets_per_company") or []) if isinstance(o, dict)
     }
 
+    schools = frozenset(str(e.get("university") or "").strip().lower()
+                        for e in (profile.get("education_history") or []) if isinstance(e, dict))
+
     def _from_detected() -> list[dict]:
         out: list[dict] = []
         for item in profile.get("detected_work_history") or []:
             name = str(item.get("company_name") or "").strip()
             duration = str(item.get("duration") or "").strip()
-            if not _looks_like_real_company(name, duration):
+            if not _looks_like_real_company(name, duration, schools):
                 continue
             bullets = int(item.get("bullets") or 0) or overrides.get(name.lower()) or default_bullets
             out.append({"company_name": name, "duration": duration, "bullets": bullets})
@@ -918,7 +949,7 @@ def _prompt_companies(profile: dict) -> list[dict]:
         for i, w in enumerate(profile.get("work_history", []) or []):
             name = str(w.get("company_name") or "").strip()
             duration = str(w.get("duration") or "").strip()
-            if not _looks_like_real_company(name, duration):
+            if not _looks_like_real_company(name, duration, schools):
                 continue
             bullets = int(bullet_counts[i]) if i < len(bullet_counts) and bullet_counts[i] else default_bullets
             out.append({"company_name": name, "duration": duration, "bullets": bullets})
@@ -1152,6 +1183,19 @@ def generate_from_json(
             ),
         )
 
+    # The DOCX filler maps work_history[i] onto the template's i-th company slot, so the pasted list
+    # must be the prompt's companies, in the prompt's order. Order by company_index (ChatGPT may
+    # reorder), and refuse a count mismatch rather than put bullets under the wrong employer.
+    expected = _prompt_companies(profile)
+    wh = resume_blob.get("work_history") or []
+    if all(isinstance(w.get("company_index"), int) for w in wh):
+        wh.sort(key=lambda w: w["company_index"])
+    if expected and len(wh) != len(expected):
+        raise HTTPException(status_code=400, detail=(
+            f"ChatGPT returned {len(wh)} compan{'y' if len(wh) == 1 else 'ies'} in work_history, but this "
+            f"profile has {len(expected)} ({', '.join(c['company_name'] for c in expected)}). "
+            "Ask ChatGPT to return exactly one entry per company, in that order, then paste again."))
+
     # Education is preserved from the profile (VPS1 flow: never rendered from the
     # pasted JSON — the profile/template owns education).
     resume_blob["education_history"] = profile.get("education_history", []) or []
@@ -1167,6 +1211,10 @@ def generate_from_json(
         "job_company": job.get("company", ""),
         "job_title": job.get("job_title", ""),
         "job_link": job.get("link", ""),
+        # Snapshot of the job as applied to: the Applied tab searches the description, and it must
+        # survive the job being edited or deleted later.
+        "job_description": job.get("description", ""),
+        "job_region": job.get("region", "ANY"),
         "resume": resume_blob,
         "status": "generated",
         "applied_status": "pending",
@@ -1194,27 +1242,45 @@ def generate_from_json(
 # Bidder Apply actions (kept from previous flow)
 # ---------------------------------------------------------------------------
 
+def _own_resume(resume_id: str, user: dict) -> dict:
+    """The generated resume, if this user may act on it: an admin, or a bidder assigned its profile."""
+    record = storage.get_generated_resume_by_id(resume_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Resume not found")
+    if not has_role(user, "admin", "bidder"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    _check_profile_access(user, record.get("profile_id", ""))
+    return record
+
+
 @router.patch("/{resume_id}")
-def patch_resume(resume_id: str, payload: dict, user: dict = Depends(get_current_user)):
-    if hasattr(storage, "update_generated_resume"):
-        storage.update_generated_resume(resume_id, payload)
+def patch_resume(resume_id: str, payload: dict, user: dict = Depends(require_role("admin"))):
+    # Admin-only: the payload is merged as-is (profile_id, applied_by_*, status…), so no other role may
+    # call it. The app's own flows use /apply instead.
+    _own_resume(resume_id, user)
+    storage.update_generated_resume(resume_id, payload)
     return {"ok": True}
 
 
 @router.post("/{resume_id}/apply")
 def mark_applied(resume_id: str, user: dict = Depends(get_current_user)):
-    if hasattr(storage, "update_generated_resume"):
-        storage.update_generated_resume(resume_id, {
-            "applied_status": "applied",
-            "applied_at": _utcnow_iso(),
-            "applied_by_user_id": user.get("id", ""),
-            "applied_by_username": user.get("username", ""),
-        })
+    record = _own_resume(resume_id, user)
+    # Idempotent: re-applying an applied resume must not move the credit to whoever clicked last
+    # (per-bidder metrics count applied_by_user_id).
+    if record.get("applied_status") == "applied":
+        return {"ok": True}
+    storage.update_generated_resume(resume_id, {
+        "applied_status": "applied",
+        "applied_at": _utcnow_iso(),
+        "applied_by_user_id": user.get("id", ""),
+        "applied_by_username": user.get("username", ""),
+    })
     return {"ok": True}
 
 
 @router.post("/{resume_id}/unapply")
-def mark_unapplied(resume_id: str, user: dict = Depends(get_current_user)):
+def mark_unapplied(resume_id: str, user: dict = Depends(require_role("admin"))):
+    _own_resume(resume_id, user)
     if hasattr(storage, "update_generated_resume"):
         storage.update_generated_resume(resume_id, {
             "applied_status": "pending",
@@ -1226,7 +1292,8 @@ def mark_unapplied(resume_id: str, user: dict = Depends(get_current_user)):
 
 
 @router.delete("/{resume_id}")
-def delete(resume_id: str, user: dict = Depends(get_current_user)):
+def delete(resume_id: str, user: dict = Depends(require_role("admin"))):
+    _own_resume(resume_id, user)
     if hasattr(storage, "delete_generated_resume"):
         storage.delete_generated_resume(resume_id)
     return {"ok": True}
@@ -1235,6 +1302,11 @@ def delete(resume_id: str, user: dict = Depends(get_current_user)):
 # ---------------------------------------------------------------------------
 # PDF
 # ---------------------------------------------------------------------------
+
+# VPS_1 resume ids are UUIDs. The id ends up in a cache filename and an outbound URL path, so
+# anything else ("../x", "a/b") is refused rather than sanitised.
+_VPS1_ID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
 
 @router.get("/{resume_id}/pdf")
 def get_resume_pdf(resume_id: str, user: dict = Depends(get_current_user)):
@@ -1245,6 +1317,8 @@ def get_resume_pdf(resume_id: str, user: dict = Depends(get_current_user)):
         if not has_role(user, "admin"):
             raise HTTPException(status_code=403, detail="Forbidden")
         remote_id = resume_id[len("vps1:"):]
+        if not _VPS1_ID_RE.fullmatch(remote_id):
+            raise HTTPException(status_code=404, detail="Resume not found")
         cache_file = PDF_CACHE_DIR / f"vps1_{remote_id}.pdf"
         if cache_file.exists() and cache_file.stat().st_size > 0:
             return Response(content=cache_file.read_bytes(), media_type="application/pdf")

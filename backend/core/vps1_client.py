@@ -21,6 +21,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from urllib.parse import quote, unquote
 
 import requests
 
@@ -108,8 +109,9 @@ def get_resume_file(resume_id: str, fmt: str = "pdf") -> tuple[bytes, str, str] 
     if not is_configured():
         return None
     try:
+        # quote(safe=""): the id is one path segment — a "/" or ".." in it must not reach another endpoint
         resp = _session.get(
-            f"{BASE_URL}/api/external/resumes/{resume_id}/file",
+            f"{BASE_URL}/api/external/resumes/{quote(resume_id, safe='')}/file",
             params={"fmt": fmt}, headers=_headers(), timeout=FILE_TIMEOUT,
         )
         resp.raise_for_status()
@@ -119,7 +121,6 @@ def get_resume_file(resume_id: str, fmt: str = "pdf") -> tuple[bytes, str, str] 
     cd = resp.headers.get("Content-Disposition", "")
     filename = "resume.pdf"
     if "filename*=UTF-8''" in cd:
-        from urllib.parse import unquote
         filename = unquote(cd.split("filename*=UTF-8''", 1)[1].strip())
     elif "filename=" in cd:
         filename = cd.split("filename=", 1)[1].strip().strip('"')
@@ -134,7 +135,7 @@ def get_resume_share_link(resume_id: str, fmt: str = "pdf") -> str | None:
         return None
     try:
         resp = _session.get(
-            f"{BASE_URL}/api/external/resumes/{resume_id}/share-link",
+            f"{BASE_URL}/api/external/resumes/{quote(resume_id, safe='')}/share-link",
             params={"fmt": fmt}, headers=_headers(), timeout=HTTP_TIMEOUT,
         )
         resp.raise_for_status()

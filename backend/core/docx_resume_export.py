@@ -644,7 +644,9 @@ def _copy_paragraph_text_with_replacements(paragraph: Paragraph, replacements: d
     original = paragraph.text or ""
     desired = original
     for marker, value in cleaned.items():
-        desired = re.sub(re.escape(marker), value, desired, flags=re.IGNORECASE)
+        # A function replacement: `value` is model-written text, and as a template string a
+        # backslash in it ("AI\\ML Engineer") raised re.error and broke the PDF for good.
+        desired = re.sub(re.escape(marker), lambda _m, v=value: v, desired, flags=re.IGNORECASE)
     if desired == original:
         return False
 
@@ -653,7 +655,7 @@ def _copy_paragraph_text_with_replacements(paragraph: Paragraph, replacements: d
         run_text = run.text or ""
         new_text = run_text
         for marker, value in cleaned.items():
-            new_text = re.sub(re.escape(marker), value, new_text, flags=re.IGNORECASE)
+            new_text = re.sub(re.escape(marker), lambda _m, v=value: v, new_text, flags=re.IGNORECASE)
         if new_text != run_text:
             run.text = _preserve_line_text(new_text)
             changed_in_runs = True

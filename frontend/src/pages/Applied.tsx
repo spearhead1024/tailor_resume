@@ -62,10 +62,12 @@ export default function Applied() {
     if (bidder) sp.set('bidder', bidder);
     if (dateFrom) sp.set('date_from', dateFrom);
     if (dateTo) sp.set('date_to', dateTo);
+    // The From/To days mean days in the viewer's zone — the same zone the Applied times are shown in.
+    if (dateFrom || dateTo) sp.set('tz', tz || Intl.DateTimeFormat().resolvedOptions().timeZone);
     sp.set('page', String(page));
     sp.set('page_size', String(pageSize));
     return sp.toString();
-  }, [debounced, profileId, bidder, dateFrom, dateTo, page, pageSize]);
+  }, [debounced, profileId, bidder, dateFrom, dateTo, page, pageSize, tz]);
 
   const { data, isFetching } = useQuery({
     queryKey: ['applied', 'search', params],
@@ -77,6 +79,9 @@ export default function Applied() {
   const total = data?.total || 0;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const safePage = Math.min(page, totalPages);
+  // Deleting/rejecting everything on the last page left page > totalPages: an empty list labelled
+  // "Page N-1 of N-1" with Next disabled. Snap back to the real last page once the counts arrive.
+  useEffect(() => { if (data && page > totalPages) setPage(totalPages); }, [data, page, totalPages, setPage]);
 
   async function viewPdf(id: string) {
     try {

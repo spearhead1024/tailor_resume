@@ -56,6 +56,12 @@ const BLANK_PROFILE = {
 };
 
 
+// FastAPI puts the reason in response.data.detail (a string, or a list for validation errors).
+function errText(e: any, fallback: string): string {
+  const d = e?.response?.data?.detail;
+  return typeof d === 'string' && d ? d : fallback;
+}
+
 export default function Profiles() {
   const { user } = useAuth();
   const qc = useQueryClient();
@@ -95,6 +101,9 @@ export default function Profiles() {
       qc.invalidateQueries({ queryKey: ['profiles'] });
       setSelected((prev: any) => ({ ...prev, ...data }));
     },
+    // Failures used to end silently (spinner just stopped) — e.g. a non-.docx template, or the
+    // upload that follows creating a new profile.
+    onError: (e: any) => toast(errText(e, 'Template upload failed'), 'error'),
   });
 
   const [dlBusy, setDlBusy] = useState(false);
@@ -158,11 +167,13 @@ export default function Profiles() {
         setPendingFile(null);
       }
     },
+    onError: (e: any) => toast(errText(e, 'Failed to save profile'), 'error'),
   });
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => api.delete(`/api/profiles/${id}`),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['profiles'] }); setSelected(null); },
+    onError: (e: any) => toast(errText(e, 'Failed to delete profile'), 'error'),
   });
 
   // The open profile's id lives in the URL (?id=…) so a refresh reopens it: restore

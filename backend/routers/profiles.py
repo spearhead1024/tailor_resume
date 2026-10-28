@@ -41,8 +41,11 @@ _SECTION_HEADINGS = {
     "experience": {"WORK EXPERIENCE", "EXPERIENCE", "PROFESSIONAL EXPERIENCE", "EMPLOYMENT HISTORY"},
     "education": {"EDUCATION", "EDUCATION HISTORY"},
 }
+# Month names short or full ("Jun" / "June", "Sept" / "September"), optional trailing dot.
+_MONTH_RX = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|"
+             r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?")
 _DATE_RANGE_RE = re.compile(
-    r"(?i)\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)?\s*\d{4}\b\s*(?:-|–|—|to)\s*(?:present|current|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)?\s*\d{4})\b"
+    rf"(?i)\b(?:{_MONTH_RX})?\s*\d{{4}}\b\s*(?:-|–|—|to)\s*(?:present|current|(?:{_MONTH_RX})?\s*\d{{4}})\b"
 )
 
 
@@ -103,8 +106,10 @@ def _parse_company_line(line: str):
     parts = [part.strip() for part in re.split(r"\s*\|\s*", value) if part.strip()]
     if len(parts) >= 2 and (_DATE_RANGE_RE.search(value) or len(parts) >= 3):
         company = parts[0]
-        duration = parts[-1]
-        location = " | ".join(parts[1:-1]) if len(parts) > 2 else ""
+        # The dates may sit anywhere after the company ("Co | Dates | City" or "Co | City | Dates").
+        di = next((i for i in range(len(parts) - 1, 0, -1) if _DATE_RANGE_RE.search(parts[i])), len(parts) - 1)
+        duration = parts[di]
+        location = " | ".join(p for i, p in enumerate(parts[1:], 1) if i != di)
         if company and (_DATE_RANGE_RE.search(duration) or _DATE_RANGE_RE.search(value)):
             return company, location, duration
     match = _DATE_RANGE_RE.search(value)
@@ -130,15 +135,20 @@ def _extract_work_history_from_resume_text(text: str) -> list[dict]:
             continue
         if line == "-":
             continue
-        # Skip template placeholder lines (VPS1-format templates carry __role__ /
-        # __headline__ markers). Parsing them as company lines produced garbage
-        # "company" names like "__role__ | Jul 2024".
-        if re.search(r"_{2,3}[a-z_]+_{2,3}", line, re.IGNORECASE):
+        # VPS1-format templates put the company on the SAME line as a placeholder:
+        # "__role__ | Company | City | Jan 2024 – Present". Drop the marker and parse the rest — skipping
+        # the whole line (as before) threw away every company. A line that is only a marker
+        # (__headline__) has nothing left and is skipped.
+        line = re.sub(r"_{2,3}[a-z_]+_{2,3}\s*\|?\s*", "", line, flags=re.IGNORECASE).strip(" |")
+        if not line:
             continue
         # Skip education lines that leak into the experience scan (e.g.
         # "Baylor University (2012 - 2016) | Bachelor's Degree…") — mis-parsing one
-        # as a company seeds the prompt with a fake role.
-        if re.search(r"(?i)\b(university|college|institute|bachelor|master|degree)\b", line):
+        # as a company seeds the prompt with a fake role. Degree words always mark education; a
+        # school word only when the line has no role context (an employer can be "… Institute").
+        if re.search(r"(?i)\b(bachelor|master|degree|b\.?\s?sc|m\.?\s?sc|ph\.?\s?d|diploma|certificat\w*)\b", line):
+            continue
+        if re.search(r"(?i)\b(university|college|academy|school)\b", line) and "|" not in line:
             continue
         parsed = _parse_company_line(line)
         if parsed:
@@ -231,7 +241,10 @@ def create_profile(body: ProfileUpsertRequest, user: dict = Depends(require_admi
 
 
 @router.patch("/{profile_id}")
-def update_profile(profile_id: str, body: ProfileUpsertRequest, user: dict = Depends(get_current_user)):
+def update_profile(profile_id: str, body: ProfileUpsertRequest, user: dict = Depends(require_admin)):
+    # Admin-only, like the Profiles tab: the payload REPLACES the whole profile (incl. region, tech
+    # stacks and the template path), so letting an assigned bidder call it let them reshape their own
+    # Bid queue or point the template at any file on the server.
     # A VPS_1 profile is edited HERE but lives THERE: VPS_1 only sends a few fields, so admins fill the
     # rest in on this side. The edit is stored as an override (admin edits win, and the hourly mirror
     # can't wipe them) — we never write back to VPS_1.
@@ -244,8 +257,6 @@ def update_profile(profile_id: str, body: ProfileUpsertRequest, user: dict = Dep
             raise HTTPException(status_code=404, detail="Profile not found")
         return vps1_adapt.profile(updated)
 
-    if not user.get("is_admin") and profile_id not in (user.get("assigned_profile_ids") or []):
-        raise HTTPException(status_code=403, detail="Forbidden")
     payload = dict(body.payload)
     payload["id"] = profile_id
     storage.upsert_profile(payload)
@@ -259,9 +270,7 @@ def delete_profile(profile_id: str, user: dict = Depends(require_admin)):
 
 
 @router.post("/{profile_id}/upload-resume")
-async def upload_resume(profile_id: str, file: UploadFile = File(...), user: dict = Depends(get_current_user)):
-    if not user.get("is_admin") and profile_id not in (user.get("assigned_profile_ids") or []):
-        raise HTTPException(status_code=403, detail="Forbidden")
+async def upload_resume(profile_id: str, file: UploadFile = File(...), user: dict = Depends(require_admin)):
     if not file.filename or not file.filename.lower().endswith(".docx"):
         raise HTTPException(status_code=400, detail="Must upload a .docx file")
 
@@ -269,16 +278,21 @@ async def upload_resume(profile_id: str, file: UploadFile = File(...), user: dic
     if profile is None:
         raise HTTPException(status_code=404, detail="Profile not found")
 
-    target_dir = DATA_DIR / "profile_resumes" / profile_id
+    target_dir = (DATA_DIR / "profile_resumes" / profile_id).resolve()
+    # The client's filename is untrusted: keep only its last component, so a name like
+    # "../profile_x/Template.docx" or "/etc/…" can't write outside this profile's folder.
+    safe_name = Path(file.filename.replace("\\", "/")).name
+    target_path = (target_dir / safe_name).resolve()
+    if not safe_name.lower().endswith(".docx") or not target_path.is_relative_to(target_dir):
+        raise HTTPException(status_code=400, detail="Invalid file name")
     target_dir.mkdir(parents=True, exist_ok=True)
-    target_path = target_dir / file.filename
     content = await file.read()
     target_path.write_bytes(content)
 
     # Persist the upload metadata in the shape the docx exporter expects.
     extracted_text = _extract_docx_text(target_path)
     profile["uploaded_resume"] = {
-        "filename":       file.filename,
+        "filename":       safe_name,
         "content_type":   file.content_type or "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "size_bytes":     len(content),
         "path":           str(target_path),
