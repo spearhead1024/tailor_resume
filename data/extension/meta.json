@@ -1,6 +1,6 @@
 {
-  "version": "0.8.2",
+  "version": "0.9.3",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "v0.8.2 \u2014 Refresh button beside the profile picker: re-reads the to-bid counts and the job queue in place, keeping the current job, the pasted JSON and your tabs untouched.",
-  "built_at": "2026-10-22T13:25:45Z"
+  "changelog": "v0.9.3 \u2014 Reliability fixes. Autofill: never puts profile data into the wrong question (labels are read from the field's own container; phone/state/city/zip/salary/years rules are stricter; referrer/emergency contact fields are skipped), prefers answers you taught it over the profile's, and doesn't reuse a US answer for a UK question. Panel: a CV generated for one job can't end up on another if you switch jobs mid-request; switching profile clears the previous profile's CV; a wrong password shows the right message; an expired session returns to the sign-in screen.",
+  "built_at": "2026-10-23T03:16:11Z"
 }

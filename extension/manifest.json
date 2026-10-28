@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "TailorResume Assistant",
-  "version": "0.8.2",
+  "version": "0.9.3",
   "description": "Bid from a docked side panel: pick a profile and a job, build the CV, autofill the application form (CV attached), then mark applied, report or skip.",
-  "minimum_chrome_version": "114",
+  "minimum_chrome_version": "116",
   "update_url": "https://tailorresume.duckdns.org/api/extension/update.xml",
   "permissions": [
     "storage",
@@ -38,5 +38,14 @@
   "optional_host_permissions": [
     "<all_urls>"
   ],
+  "commands": {
+    "autofill": {
+      "suggested_key": {
+        "default": "Alt+Shift+F",
+        "mac": "Alt+Shift+F"
+      },
+      "description": "Autofill the application form on this tab"
+    }
+  },
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmFRvhRTehvNk989FkTeagyo7CGplDDRO4nmnLf+c7mTbVEJxOah716pIPh0+dK4c3Pwq4o/FkJup/U4f7+DraJXptA8IEaDmD4NJZYDnkW+OFDXivXRaPDsakw6F5atie1dLwA2Xs863ItyU5jmqcLjZcdHzPIppJ6o7wCoLC9cA6DqVHus7F1EsDNDSc/l2jLcZqxVVStA8Ophgw34xt5EQckLdo3E1UaUwb222soiei+NZ2n9anFItJy3GkxkjyAT7PdaHWuu+Bhhzs2ES0TKgJbYK1IfWp7rhxhepvZ06pRTDSISMT8A/TAk2MGSvGAh4jWHTP0GXmak9ISzs5QIDAQAB"
 }

@@ -55,6 +55,9 @@ const S = {
   resumeId: '', ats: null, atsScore: 0, atsOpen: false,
   busy: '',            // '' | prompt | gen | dl | apply | report | skip
   refreshing: false,
+  netDown: false,
+  previewOpen: (() => { try { return localStorage.getItem('panelPreviewOpen') !== '0'; } catch { return true; } })(),
+  shortcut: null,      // the Autofill shortcut as Chrome reports it ('' = not set)
   confirm: '',         // '' | report | skip
   fill: { busy: '', report: null },   // autofill: busy '' | fill | learn
   error: '', message: '',
@@ -62,7 +65,11 @@ const S = {
 
 // ---------- api ----------
 async function api(path, opts) {
-  try { return await request(path, opts); } catch (e) {
+  try {
+    const res = await request(path, opts);
+    if (S.netDown) networkBack();
+    return res;
+  } catch (e) {
     if (e?.status === 401) showLogin('Session expired — please sign in again.');
     throw e;
   }
@@ -180,10 +187,21 @@ function urlKey(u) {
 }
 function jobForUrl(url) {
   const t = urlKey(url); if (!t) return null;
+  // 1) the exact posting URL
+  let best = null, bestLen = -1;
+  for (const j of S.queue) {
+    const k = urlKey(j.link); if (!k) continue;
+    if (k.full === t.full) return j;
+    // 2) the same page or a page UNDER it (Lever /apply, Ashby /application) — on a path
+    //    boundary, so /jobs/12 never matches /jobs/123, and the most specific job wins over
+    //    one whose link is a careers index above it.
+    if (k.host === t.host && k.path.length > 1 && (t.path === k.path || t.path.startsWith(k.path + '/'))
+        && k.path.length > bestLen) { best = j; bestLen = k.path.length; }
+  }
+  if (best) return best;
+  // 3) a long job id (Lever/Ashby uuid, Greenhouse number) anywhere in the URL (embeds, ?gh_jid=)
   return S.queue.find((j) => {
     const k = urlKey(j.link); if (!k) return false;
-    // Same page or deeper (Lever /apply, Ashby /application) — never a company's job index.
-    if (k.host === t.host && k.path.length > 1 && t.path.startsWith(k.path)) return true;
     const id = (k.path.match(/[0-9a-f-]{8,}|\d{6,}/gi) || []).pop();
     return !!id && t.full.includes(id.toLowerCase());
   }) || null;
@@ -220,22 +238,47 @@ async function activeTabId() {
   return tab.id;
 }
 
+// The current CV's PDF, fetched once per resume and shared by the preview, Download
+// and Autofill (which attaches it). The object URL lives as long as that resume is
+// current; switching resumes revokes it.
+let pdfCache = { id: '', promise: null, url: '' };
+function cvBlob(id) {
+  if (pdfCache.id !== id) {
+    if (pdfCache.url) URL.revokeObjectURL(pdfCache.url);
+    const entry = { id, url: '', promise: null };
+    entry.promise = api(`/api/resumes/${encodeURIComponent(id)}/pdf`, { raw: true })
+      .then((r) => r.blob())
+      .then((b) => {
+        if (!b.size) throw new Error('The generated PDF is empty — try Generate CV again.');
+        if (pdfCache === entry) entry.url = URL.createObjectURL(b);
+        return b;
+      });
+    entry.promise.catch(() => { if (pdfCache === entry) pdfCache = { id: '', promise: null, url: '' }; });
+    pdfCache = entry;
+  }
+  return pdfCache.promise;
+}
+const cvFilename = () => `${((selectedProfile()?.name || 'Resume').trim() || 'Resume').replace(/[\\/:*?"<>|]+/g, '')} resume.pdf`;
+
 async function cvPayload() {
   if (!S.resumeId) return null;
-  const resp = await api(`/api/resumes/${encodeURIComponent(S.resumeId)}/pdf`, { raw: true });
-  const blob = await resp.blob();
+  const blob = await cvBlob(S.resumeId);
   const base64 = await new Promise((resolve, reject) => {
     const fr = new FileReader();
     fr.onload = () => resolve(String(fr.result).split(',')[1] || '');
     fr.onerror = reject;
     fr.readAsDataURL(blob);
   });
-  const name = ((selectedProfile()?.name || 'Resume').trim() || 'Resume').replace(/[\\/:*?"<>|]+/g, '');
-  return { base64, filename: `${name} resume.pdf` };
+  return { base64, filename: cvFilename() };
 }
 
-async function autofill() {
-  if (!(await requestSiteAccess())) { setError(SITE_ACCESS_HELP); return; }
+async function autofill({ fromShortcut = false } = {}) {
+  if (S.fill.busy) return;                       // one run at a time (double click / shortcut)
+  if (fromShortcut) {
+    // Chrome only shows the site-access prompt for a click, not a key press.
+    if (!(await hasSiteAccess())) { setError('Click Autofill once to allow access to job sites — after that the shortcut works too.', 10000); return; }
+  } else if (!(await requestSiteAccess())) { setError(SITE_ACCESS_HELP); return; }
+  if (S.fill.busy) return;                       // a second click got here while the first awaited
   S.fill = { busy: 'fill', report: null }; patchCopy();
   try {
     const tabId = await activeTabId();
@@ -254,24 +297,54 @@ async function autofill() {
 
 // Learn what the bidder filled by hand, so the same question fills itself next time.
 async function rememberAnswers({ silent = false } = {}) {
+  if (!silent && S.fill.busy) return;
   if (silent ? !(await hasSiteAccess()) : !(await requestSiteAccess())) {
     if (!silent) setError(SITE_ACCESS_HELP);
     return;
   }
-  if (!silent) { S.fill.busy = 'learn'; patchCopy(); }
+  if (!silent) {
+    if (S.fill.busy) return;
+    S.fill.busy = 'learn'; patchCopy();
+  }
   try {
     const tabId = await activeTabId();
     const fields = await collectAnswers(tabId);
-    if (!fields.length) { if (!silent) toast('No filled form fields on this page'); return; }
+    if (!fields.length) { if (!silent) setError('No filled-in form fields on this page — answer the questions on the form, then click Remember.', 8000); return; }
     const res = await api('/api/autofill/learn', { method: 'POST', body: { profile_id: S.profileId, fields } });
-    if (!silent) toast(res.answers || res.labels ? `Remembered ${res.answers + res.labels} answer${res.answers + res.labels === 1 ? '' : 's'}` : 'Nothing new to remember');
+    if (silent) return;
+    // The autofill report's "answer these" list is now stale — clear it; the alert says what happened.
+    S.fill.report = null;
+    const n = (res.answers || 0) + (res.labels || 0);
+    setMessage(n ? `Remembered ${n} answer${n === 1 ? '' : 's'} for ${selectedProfile()?.name || 'this profile'} — next time they fill in by themselves.`
+      : 'Nothing new to remember — every answer on this form is already known.');
   } catch (e) { if (!silent) throw e; }
   finally { if (!silent) { S.fill.busy = ''; patchCopy(); } }
 }
 
 // ---------- alerts ----------
-function setError(msg) { S.error = msg || ''; if (msg) S.message = ''; patchAlerts(); }
-function setMessage(msg) { S.message = msg || ''; if (msg) S.error = ''; patchAlerts(); }
+// Success notes fade after 6s. A network error fades after 10s, or the moment the
+// server answers again / the browser is back online. Other errors stay until the
+// next action or the ✕ — they need reading.
+const NET_MSG = 'Network error — the server can\'t be reached. It clears when the connection is back.';
+const alertTimers = {};
+function setAlert(kind, msg, ttl = 0) {
+  clearTimeout(alertTimers[kind]);
+  S[kind] = msg || '';
+  if (msg) S[kind === 'error' ? 'message' : 'error'] = '';
+  if (msg && ttl) alertTimers[kind] = setTimeout(() => { if (S[kind] === msg) { S[kind] = ''; patchAlerts(); } }, ttl);
+  patchAlerts();
+}
+function setError(msg, ttl = 0) { setAlert('error', msg, ttl); }
+function setMessage(msg) { setAlert('message', msg, 6000); }
+function showError(err) {
+  if (err?.status === 0) { S.netDown = true; setError(NET_MSG, 10000); }
+  else setError(err?.message || String(err));
+}
+function networkBack() {
+  S.netDown = false;
+  if (S.error === NET_MSG) setError('');
+}
+window.addEventListener('online', () => { if (S.netDown) networkBack(); });
 
 // ---------- auth ----------
 async function login(identifier, password) {
@@ -281,7 +354,7 @@ async function login(identifier, password) {
     await setSession({ token: res.token, user: res.user });
     S.user = res.user;
   } catch (e) { S.screen = 'login'; throw e; }
-  S.screen = 'main'; renderMain(); await loadProfiles();
+  S.screen = 'main'; renderMain(); loadShortcut(); await loadProfiles();
 }
 
 function showLogin(note) {
@@ -296,8 +369,9 @@ async function loadProfiles() {
   $('#main').innerHTML = '<div class="empty"><span class="spinner"></span></div>';
   let data;
   try { data = await api('/api/resumes/bid/profiles'); } catch (e) {
+    if (e.status === 401) return;        // api() already showed the sign-in screen — don't cover it
     renderMain();
-    setError(e.status === 403 ? 'The side panel is for bidders and admins.' : e.message);
+    if (e.status === 403) setError('The side panel is for bidders and admins.'); else showError(e);
     return;
   }
   S.profiles = (data.profiles || []).filter((p) => p.status !== 'inactive');
@@ -313,8 +387,10 @@ async function refresh() {
   if (S.refreshing) return;
   S.refreshing = true; patchRefresh();
   try {
+    const pid = S.profileId;
     const data = await api('/api/resumes/bid/profiles');
     S.profiles = (data.profiles || []).filter((p) => p.status !== 'inactive');
+    if (S.profileId !== pid) return;     // the bidder switched profile meanwhile — that load wins
     if (!S.profiles.some((p) => p.id === S.profileId)) {
       S.profileId = S.profiles[0]?.id || '';
       await chrome.storage.local.set({ [PROFILE_KEY]: S.profileId });
@@ -332,9 +408,12 @@ function patchRefresh() {
 
 async function selectProfile(id) {
   S.profileId = id;
+  // Nothing of the previous profile may survive: its CV would otherwise be attached by Autofill
+  // to a form being filled with the new profile's details.
+  Object.assign(S, { queue: [], jobId: '', job: null, resumeId: '', ats: null, atsScore: 0,
+    atsOpen: false, confirm: '', fill: { busy: '', report: null } });
+  patchCopy(); patchBuild();
   await chrome.storage.local.set({ [PROFILE_KEY]: id });
-  S.queue = []; S.jobId = '';
-  patchCopy();
   await loadQueue({ open: true });
 }
 
@@ -343,10 +422,15 @@ async function selectProfile(id) {
 // Applied / Report / Skip the bidder lands on the next job.
 async function loadQueue({ open = false } = {}) {
   const prevIdx = S.queue.findIndex((j) => j.id === S.jobId);
+  const pid = S.profileId;
   S.queueLoading = true; patchJob();
+  let queue = [];
   try {
-    S.queue = S.profileId ? await api(`/api/resumes/bid?profile_id=${encodeURIComponent(S.profileId)}`) : [];
-  } catch (e) { S.queue = []; setError(e.message); }
+    queue = pid ? await api(`/api/resumes/bid?profile_id=${encodeURIComponent(pid)}`) : [];
+  } catch (e) { if (S.profileId === pid) showError(e); }
+  // A late answer for a profile that is no longer selected must not replace the current queue.
+  if (S.profileId !== pid) return;
+  S.queue = queue;
   S.queueLoading = false;
   const p = selectedProfile(); if (p) p.bid_count = S.queue.length;
   patchProfile();
@@ -363,7 +447,7 @@ async function loadQueue({ open = false } = {}) {
 async function selectJob(id, { open = true } = {}) {
   const item = S.queue.find((j) => j.id === id) || null;
   Object.assign(S, {
-    jobId: item ? id : '', job: null, confirm: '', atsOpen: false, fill: { busy: '', report: null },
+    jobId: item ? id : '', job: null, confirm: '', atsOpen: false, fill: { busy: S.fill.busy, report: null },
     resumeId: item?.resume_id || '', ats: item?.ats || null, atsScore: item?.ats_score || 0,
   });
   const ta = $('#jsonInput'); if (ta) ta.value = '';
@@ -391,29 +475,34 @@ async function generate() {
   const text = ($('#jsonInput')?.value || '').trim();
   if (!text) { setError('Paste the JSON from ChatGPT first.'); $('#jsonInput')?.focus(); return; }
   setError(''); setMessage('');
+  // Pin the job and profile: the CV belongs to THEM, whatever is selected when the answer comes.
+  const jobId = job.id, profileId = S.profileId;
+  let rid = '';
   S.busy = 'gen'; patchBuild();
   try {
     const res = await api('/api/resumes/generate-from-json', {
-      method: 'POST', body: { json_text: text, profile_id: S.profileId, job_id: job.id },
+      method: 'POST', body: { json_text: text, profile_id: profileId, job_id: jobId },
     });
-    Object.assign(S, { resumeId: res.saved_resume_id || '', ats: res.ats || null, atsScore: res.ats_score || 0 });
-    const item = currentJob(); if (item) Object.assign(item, { resume_id: S.resumeId, ats: S.ats, ats_score: S.atsScore });
+    rid = res.saved_resume_id || '';
+    const fresh = { resume_id: rid, ats: res.ats || null, ats_score: res.ats_score || 0 };
+    const item = S.profileId === profileId ? S.queue.find((j) => j.id === jobId) : null;
+    if (item) Object.assign(item, fresh);
+    if (S.jobId === jobId && S.profileId === profileId) Object.assign(S, { resumeId: rid, ats: fresh.ats, atsScore: fresh.ats_score });
     track('generate', job);
   } finally { S.busy = ''; patchBuild(); }
-  if (S.resumeId) await download();   // auto-download, like VPS1
+  if (rid && S.jobId === jobId && S.resumeId === rid) await download();   // auto-download, like VPS1
 }
 
 async function download() {
   const job = currentJob();
   if (!S.resumeId || !job) return;
-  const name = ((selectedProfile()?.name || 'Resume').trim() || 'Resume').replace(/[\\/:*?"<>|]+/g, '');
   S.busy = 'dl'; patchBuild();
   try {
-    const resp = await api(`/api/resumes/${encodeURIComponent(S.resumeId)}/pdf`, { raw: true });
-    const blob = await resp.blob();
-    if (!blob.size) throw new Error('The generated PDF is empty — try Generate CV again.');
+    const blob = await cvBlob(S.resumeId);
     const url = URL.createObjectURL(blob);
-    const id = await chrome.downloads.download({ url, filename: `${name} resume.pdf`, saveAs: true });
+    // Cancelling the Save As dialog rejects ("Download canceled") — a choice, not an error.
+    const id = await chrome.downloads.download({ url, filename: cvFilename(), saveAs: true })
+      .catch((e) => { if (/cancel/i.test(e?.message || '')) return undefined; throw e; });
     setTimeout(() => URL.revokeObjectURL(url), 120_000);
     if (id !== undefined) track('download', job);
   } finally { S.busy = ''; patchBuild(); }
@@ -430,12 +519,13 @@ async function finish(kind, run, note) {
 }
 
 const markApplied = () => {
-  if (!S.resumeId) { setError('Generate the CV before marking applied.'); return; }
+  const rid = S.resumeId;                // read before any await — it's THIS job's CV
+  if (!rid) { setError('Generate the CV before marking applied.'); return; }
   return finish('apply', async (job) => {
     // Learn from the form before the tab moves on to the next job.
     await rememberAnswers({ silent: true });
     track('mark_applied', job);
-    await api(`/api/resumes/${encodeURIComponent(S.resumeId)}/apply`, { method: 'POST' });
+    await api(`/api/resumes/${encodeURIComponent(rid)}/apply`, { method: 'POST' });
   }, (job) => `Applied — ${job.company}.`);
 };
 
@@ -448,8 +538,14 @@ const reportJob = () => {
   }, (job) => `Reported — ${job.company}.`);
 };
 
-const skipJob = () => finish('skip', async (job) => {
-  await api('/api/resumes/bid/skip', { method: 'POST', body: { profile_id: S.profileId, job_id: job.id } });
+const SKIP_REASONS = ['Location / region', 'Tech stack mismatch', 'Seniority mismatch', 'Already applied'];
+const skipJob = () => {
+  const reason = ($('#skipReason')?.value || '').trim();
+  if (!reason) { $('#skipReason')?.focus(); setError('Pick or type a reason for skipping.', 6000); return; }
+  return finishSkip(reason);
+};
+const finishSkip = (reason) => finish('skip', async (job) => {
+  await api('/api/resumes/bid/skip', { method: 'POST', body: { profile_id: S.profileId, job_id: job.id, reason } });
   track('skip', job);
 }, (job) => `Skipped — ${job.company}.`);
 
@@ -470,12 +566,13 @@ function renderLogin() {
     const f = new FormData(e.currentTarget);
     const btn = $('#loginBtn'); btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
     try { await login(String(f.get('identifier')).trim(), String(f.get('password'))); }
-    catch (err) { setError(err.message); btn.disabled = false; btn.textContent = 'Sign in'; }
+    catch (err) { showError(err); btn.disabled = false; btn.textContent = 'Sign in'; }
   });
   patchAlerts();
 }
 
 function renderMain() {
+  previewKey = '';   // fresh #previewCard — let patchPreview draw it again
   $('#app').innerHTML = `
     <main class="main" id="main">
       <div id="alerts"></div>
@@ -497,8 +594,13 @@ function renderMain() {
         </section>
         <section class="card" id="buildCard"></section>
       </div>
+      <section class="card" id="previewCard" hidden></section>
     </main>`;
   $('#app').onclick = onClick;
+  // Reason chips are spans (not buttons, so they keep their small pill size): Enter / Space click them.
+  $('#app').onkeydown = (e) => {
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.matches?.('.chip')) { e.preventDefault(); e.target.click(); }
+  };
   $('#profileSelect').addEventListener('change', (e) => { setError(''); setMessage(''); selectProfile(e.target.value); });
   wireCombo();
   patchAlerts(); patchProfile(); patchJob(); patchBuild(); patchCopy();
@@ -540,22 +642,23 @@ function pickJob(id) {
 
 function patchAlerts() {
   const el = $('#alerts'); if (!el) return;
-  el.innerHTML = (S.error ? `<div class="alert error">${esc(S.error)}</div>` : '') + (S.message ? `<div class="alert ok">${esc(S.message)}</div>` : '');
+  const box = (kind, cls, msg) => `<div class="alert ${cls}"><span>${esc(msg)}</span><button class="alert-x" data-action="dismissAlert" data-k="${kind}" title="Dismiss" aria-label="Dismiss">✕</button></div>`;
+  el.innerHTML = (S.error ? box('error', 'error', S.error) : '') + (S.message ? box('message', 'ok', S.message) : '');
   el.hidden = !S.error && !S.message;
 }
 
 function patchProfile() {
   const sel = $('#profileSelect'); if (!sel) return;
-  sel.disabled = !S.profiles.length;
   sel.innerHTML = S.profiles.length
     ? S.profiles.map((p) => `<option value="${esc(p.id)}" ${p.id === S.profileId ? 'selected' : ''}>${esc(p.name)} · ${p.bid_count ?? 0} to bid</option>`).join('')
     : '<option>No profiles assigned to you</option>';
+  patchLocks();
 }
 
 function patchCombo() {
   const list = $('#jobList'), input = $('#jobSearch'); if (!list) return;
   input.placeholder = S.queueLoading ? 'Loading jobs…' : `Search ${S.queue.length} job${S.queue.length === 1 ? '' : 's'} by company or title…`;
-  input.disabled = !S.queue.length;
+  patchLocks();
   if (document.activeElement !== input) input.value = jobLabel(currentJob());
   list.hidden = !S.combo.open || !S.queue.length;
   if (list.hidden) return;
@@ -625,6 +728,9 @@ function patchBuild() {
   el.hidden = !j;
   if (!j) return;
   const prev = $('#jsonInput')?.value ?? '';
+  // Reasons typed into an open Report / Skip box survive a re-render (e.g. a refresh).
+  const reasons = {};
+  for (const id of ['reportReason', 'skipReason']) { const t = $('#' + id); if (t?.value) reasons[id] = t.value; }
   const b = S.busy, spin = '<span class="spinner"></span>';
   const score = S.atsScore;
   const tone = score >= 90 ? 'good' : score >= 75 ? 'mid' : 'low';
@@ -655,12 +761,73 @@ function patchBuild() {
       </div>` : ''}
     ${S.confirm === 'skip' ? `
       <div class="confirm">
-        <div>Are you sure skip this job?</div>
-        <div class="row"><button class="warn grow" data-action="skipSubmit" ${b ? 'disabled' : ''}>${b === 'skip' ? spin : 'Yes, skip'}</button><button class="secondary grow" data-action="cancelConfirm">Cancel</button></div>
+        <div>Are you sure skip this job? Why doesn't it suit ${esc(selectedProfile()?.name || 'this profile')}?</div>
+        <div class="chips">${SKIP_REASONS.map((r) => `<span class="chip" role="button" tabindex="0" data-action="skipReason" data-r="${esc(r)}">${esc(r)}</span>`).join('')}</div>
+        <textarea id="skipReason" rows="2" placeholder="Pick a reason above or type one…"></textarea>
+        <div class="row"><button class="warn grow" data-action="skipSubmit" ${b ? 'disabled' : ''}>${b === 'skip' ? spin : 'Skip job'}</button><button class="secondary grow" data-action="cancelConfirm">Cancel</button></div>
       </div>` : ''}`;
   $('#jsonInput').value = prev;
-  if (S.confirm === 'report' && !b) $('#reportReason')?.focus();
+  for (const [id, v] of Object.entries(reasons)) { const t = $('#' + id); if (t) t.value = v; }
+  if (S.confirm === 'report' && !b && !reasons.reportReason) $('#reportReason')?.focus();
+  if (S.confirm === 'skip' && !b && !reasons.skipReason) $('#skipReason')?.focus();
+  patchPreview();
+  patchLocks();
 }
+
+// The generated CV, previewed at the bottom of the panel (Chrome's PDF viewer, from
+// the same fetched PDF that Download and Autofill use). Hide/Show is remembered.
+let previewKey = '';
+function patchPreview() {
+  const el = $('#previewCard'); if (!el) return;
+  const id = currentJob() ? S.resumeId : '';
+  el.hidden = !id;
+  const ready = !!id && pdfCache.id === id && !!pdfCache.url;
+  const key = `${id}|${S.previewOpen}|${ready}`;
+  if (key === previewKey) return;           // unchanged — don't reload the viewer
+  previewKey = key;
+  if (!id) { el.innerHTML = ''; return; }
+  el.innerHTML = `
+    <div class="card-head"><span class="card-title">CV preview</span>
+      <button class="secondary sm-btn" data-action="togglePreview">${S.previewOpen ? 'Hide' : 'Show'}</button></div>
+    ${!S.previewOpen ? '' : ready
+      ? `<iframe class="pdf-frame" src="${pdfCache.url}#view=FitH&toolbar=0&navpanes=0" title="CV preview"></iframe>`
+      : '<div class="empty"><span class="spinner"></span> Loading the CV…</div>'}`;
+  if (S.previewOpen && !ready) {
+    cvBlob(id).then(() => patchPreview()).catch((e) => {
+      if (S.resumeId !== id) return;
+      previewKey = '';
+      el.innerHTML = `<div class="card-head"><span class="card-title">CV preview</span></div><div class="muted small">Couldn't load the CV — ${esc(e.message || 'try Download')}.</div>`;
+    });
+  }
+}
+
+// ---------- Autofill shortcut (manifest "commands": autofill) ----------
+// Chrome owns the binding (users can change it at chrome://extensions/shortcuts);
+// read it so the hint under the Autofill button is always the real key.
+async function loadShortcut() {
+  try {
+    const cmd = (await chrome.commands.getAll()).find((c) => c.name === 'autofill');
+    S.shortcut = cmd?.shortcut || '';
+  } catch { S.shortcut = ''; }
+  patchCopy();
+}
+// The shortcut, pressed on a job page: the worker opens the panel if needed and
+// asks it to autofill (see background.js). A message reaches an open panel; a panel
+// it just opened finds the request in session storage when it boots.
+const AUTOFILL_REQ = 'pendingAutofill';
+async function takeAutofillRequest() {
+  const { [AUTOFILL_REQ]: req } = await chrome.storage.session.get(AUTOFILL_REQ).catch(() => ({}));
+  if (!req) return false;
+  // With several windows open, only the panel of the window the key was pressed in acts.
+  if (req.windowId != null && panelWindowId != null && req.windowId !== panelWindowId) return false;
+  await chrome.storage.session.remove(AUTOFILL_REQ).catch(() => {});
+  return Date.now() - req.at < 15000;
+}
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.type === 'autofill' && S.screen === 'main') {
+    takeAutofillRequest().then((ok) => { if (ok && !S.fill.busy) autofill({ fromShortcut: true }).catch(showError); });
+  }
+});
 
 function patchCopy() {
   const el = $('#copyCard'); if (!el) return;
@@ -676,6 +843,9 @@ function patchCopy() {
       <div class="pair">
         <button data-action="autofill" ${busy ? 'disabled' : ''} title="Fill this page's application form from the profile${S.resumeId ? ' and attach the CV' : ''}">${busy === 'fill' ? spin : I.wand} Autofill</button>
         <button class="secondary" data-action="remember" ${busy ? 'disabled' : ''} title="Save the answers you filled by hand — the same questions fill themselves next time for this profile">${busy === 'learn' ? spin : 'Remember'}</button>
+        <span class="kbd-hint">${S.shortcut === null ? '' : S.shortcut
+          ? `<kbd title="Autofill shortcut — change it at chrome://extensions/shortcuts">${esc(S.shortcut)}</kbd>`
+          : '<a href="#" data-action="setShortcut" title="Choose a key for Autofill">Set shortcut</a>'}</span>
       </div></div>
     ${report ? `
       <div class="fill-report">
@@ -687,6 +857,15 @@ function patchCopy() {
       </div>` : ''}
     <div class="copy-grid">${copyFields(p).map(([label, value, icon], i) => `
       <span class="copy-cell"><button class="copy-btn" data-action="copyField" data-i="${i}" ${value ? '' : 'disabled'} title="${esc(label)}${value ? ': ' + esc(value) : ' — not set'}" aria-label="Copy ${esc(label)}">${icon}</button><span class="lbl">${esc(label)}</span></span>`).join('')}</div>`;
+  patchLocks();
+}
+
+// While a request for the current job is in flight (Generate, Mark as Applied, …) or Autofill /
+// Remember runs, the job and profile can't change — the answer must land on the job it was for.
+function patchLocks() {
+  const locked = !!(S.busy || S.fill.busy);
+  const js = $('#jobSearch'); if (js) js.disabled = !S.queue.length || locked;
+  const ps = $('#profileSelect'); if (ps) ps.disabled = !S.profiles.length || locked;
 }
 
 // ---------- events ----------
@@ -708,6 +887,13 @@ async function onClick(e) {
       case 'reportSubmit': await reportJob(); break;
       case 'skipSubmit': await skipJob(); break;
       case 'refresh': setError(''); setMessage(''); await refresh(); break;
+      case 'dismissAlert': setAlert(t.dataset.k, ''); break;
+      case 'togglePreview':
+        S.previewOpen = !S.previewOpen;
+        try { localStorage.setItem('panelPreviewOpen', S.previewOpen ? '1' : '0'); } catch { /* storage blocked */ }
+        patchPreview(); break;
+      case 'setShortcut': e.preventDefault(); await chrome.tabs.create({ url: 'chrome://extensions/shortcuts' }); break;
+      case 'skipReason': { const ta = $('#skipReason'); if (ta) { ta.value = t.dataset.r; ta.focus(); } break; }
       case 'autofill': await autofill(); break;
       case 'remember': await rememberAnswers(); break;
       case 'copyField': {
@@ -716,7 +902,7 @@ async function onClick(e) {
         break;
       }
     }
-  } catch (err) { if (S.screen === 'main') setError(err?.message || String(err)); }
+  } catch (err) { if (S.screen === 'main') showError(err); }
 }
 
 // Follow the shared session: signed in from another panel window → load;
@@ -737,6 +923,8 @@ async function boot() {
   if (!cfg.token) { S.screen = 'login'; renderLogin(); return; }
   S.screen = 'main';
   renderMain();
+  loadShortcut();
   await loadProfiles();
+  if (await takeAutofillRequest()) autofill({ fromShortcut: true }).catch(showError);
 }
 boot();

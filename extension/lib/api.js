@@ -38,7 +38,9 @@ export async function request(path, { method = 'GET', body, raw = false } = {}) 
   } catch (e) {
     throw new ApiError('Network error — is the server reachable?', 0);
   }
-  if (resp.status === 401) {
+  // Only a request that carried a token can have an expired session; a 401 from the sign-in
+  // call itself means wrong credentials and must show the server's own message.
+  if (resp.status === 401 && token) {
     await clearSession();
     throw new ApiError('Session expired — please sign in again.', 401);
   }

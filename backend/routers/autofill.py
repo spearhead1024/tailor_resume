@@ -44,6 +44,36 @@ def _require_bidder(user: dict, profile_id: str) -> dict:
     return _profile_or_404(profile_id)
 
 
+def _salary(p: dict) -> dict[str, str]:
+    """The profile's expected salary as form-ready text. Stored as {min, max, currency,
+    period} — str() of that dict is what used to land in salary fields. Unset (0/0)
+    gives '' so the field is left for the bidder, never filled with "0".
+    """
+    raw = p.get("expected_salary")
+    if isinstance(raw, str):                      # legacy free-text value
+        plain = raw.replace(",", "").strip()     # an amount only if it's just a number ("90k-100k" isn't)
+        return {"expected_salary": raw.strip(), "expected_salary_amount": plain if plain.isdigit() else "",
+                "salary_currency": "", "salary_period": ""}
+    sal = raw if isinstance(raw, dict) else {}
+    def num(v) -> int:
+        try:
+            return int(float(v or 0))
+        except (TypeError, ValueError):
+            return 0
+    lo, hi = num(sal.get("min")), num(sal.get("max"))
+    if not lo and not hi:
+        return {"expected_salary": "", "expected_salary_amount": "", "salary_currency": "", "salary_period": ""}
+    cur = str(sal.get("currency") or "USD").upper()
+    per = str(sal.get("period") or "year").lower()
+    rng = f"{lo:,}–{hi:,}" if lo and hi and lo != hi else f"{(lo or hi):,}"
+    return {
+        "expected_salary": f"{rng} {cur} per {per}",      # e.g. "120,000–140,000 USD per year"
+        "expected_salary_amount": str(lo or hi),           # number-only fields get the lower bound
+        "salary_currency": cur,
+        "salary_period": per,
+    }
+
+
 def profile_values(p: dict) -> dict[str, str]:
     """Every profile value a form field can be mapped to, keyed by field name."""
     s = lambda x: str(x or "").strip()  # noqa: E731
@@ -89,8 +119,8 @@ def profile_values(p: dict) -> dict[str, str]:
         "university": s(edu.get("university")),
         "degree": s(edu.get("degree")),
         "graduation_year": grad[-1] if grad else "",
-        "years_experience": str(years) if years not in (None, "") else "",
-        "expected_salary": s(p.get("expected_salary")),
+        "years_experience": str(years) if years not in (None, "", 0, "0") else "",   # never fill "0"
+        **_salary(p),
     }
 
 
@@ -119,8 +149,20 @@ def autofill_learn(body: dict, user: dict = Depends(get_current_user)):
     by_value = {v.lower(): k for k, v in values.items() if len(v) >= 3 and not v.isdigit()}
     labels = storage.autofill_labels()
     answers, learned_labels = 0, 0
-    for f in (body.get("fields") or [])[:150]:
-        if not isinstance(f, dict) or f.get("field"):
+    fields = body.get("fields") or []
+    if not isinstance(fields, list):
+        raise HTTPException(status_code=400, detail="fields must be a list")
+    for f in fields[:150]:
+        if not isinstance(f, dict):
+            continue
+        # A question the scanner recognized AND the profile can answer needs no learning.
+        # One it recognized but the profile can't (e.g. salary not set on the profile)
+        # is learned like any other, so the bidder's typed answer is reused next time.
+        # A question the scanner recognized AND answered with the profile's own value needs no
+        # learning. If the bidder typed something else there (the rule misread the question, e.g.
+        # "years of experience with Rust"), learn it — the exact-key answer then wins next time.
+        fv = str(values.get(str(f.get("field") or "")) or "").strip().lower()
+        if f.get("field") and fv and str(f.get("value") or "").strip().lower() == fv:
             continue
         key = question_key(f.get("question"))
         value = str(f.get("value") or "").strip()

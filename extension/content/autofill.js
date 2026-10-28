@@ -70,32 +70,40 @@
     'address-level2': 'city', 'address-level1': 'state', 'postal-code': 'zip', country: 'country',
     'country-name': 'country', organization: 'current_company', 'organization-title': 'current_title', url: 'portfolio',
   };
-  // [field, pattern, max label length]. First match wins. 'skip' marks look-alikes
-  // that must NOT receive a profile value.
+  // [field, pattern, max label length, unless]. First match wins. 'skip' marks look-alikes
+  // that must NOT receive a profile value. Short field names ("Phone", "City", "State") are
+  // anchored or length-capped: a long label is a QUESTION ("Please state your notice period",
+  // "Describe your mobile development experience") and must not get a profile value.
+  const NOT_TOTAL_YEARS = /\b(with|in|using|on)\s+(?!total\b|this\b|the (field|industry)\b|industry\b|software (engineering|development)\b|(a |an )?(professional|similar|relevant)\b)\w|\byears of (?!(professional|relevant|work|total|industry|overall)\b)\w+ (\w+ )?experience\b/;
   const RULES = [
     ['skip', /\b(middle name|address line 2|apt|suite|phone (type|extension)|country code|confirm password|password)\b/, 80],
     ['skip', /\b(company|employer|school|university|reference|manager|emergency|referr\w*|user) name\b/, 80],
-    ['first_name', /\b(first|given|fore|preferred first)\s*name\b|\bfname\b/, 80],
-    ['last_name', /\b(last|family|sur)\s*name\b|\bsurname\b|\blname\b/, 80],
+    // someone ELSE's contact details: referrer, reference, emergency contact, manager…
+    ['skip', /\b(referr\w*|references?|emergency|manager|supervisor|recruiter)\b.*\b(e ?mail|phone|mobile|telephone|number|contact)\b|\b(e ?mail|phone|telephone|contact)\b.*\b(referr\w*|references?|emergency|manager|supervisor|recruiter)\b/, 200],
+    ['first_name', /\b(first|given|fore|preferred first)\s*name\b|\bfname\b|^first$/, 80],
+    ['last_name', /\b(last|family|sur)\s*name\b|\bsurname\b|\blname\b|^last$/, 80],
     ['full_name', /^(your |full |legal |candidate )?(full )?name$|\bfull name\b|\blegal name\b/, 80],
-    ['email', /\be ?mail\b/, 80],
-    ['phone', /\b(phone|mobile|cell|telephone)\b/, 80],
+    ['email', /^(your |personal |primary )?e ?mail( address)?$|\be ?mail address\b|^e ?mail\b/, 40],
+    ['phone', /^(your |personal |primary )?(mobile |cell |home |work )?(phone|telephone|mobile|cell)( number| no)?$|\b(phone|telephone) number\b/, 40],
     ['linkedin', /\blinked ?in\b/, 120],
     ['github', /\bgit ?hub\b/, 120],
     ['portfolio', /\b(portfolio|personal (web ?)?site|website|blog|other (url|link|website))\b/, 120],
-    ['street', /\b(street|address line 1|address 1|mailing address|home address)\b|^address$/, 80],
-    ['city', /\bcity\b|\btown\b/, 80],
-    ['state', /\bstate\b|\bprovince\b/, 80],
-    ['zip', /\b(zip|postal|post code|postcode)\b/, 80],
+    // salary before the address rules: "Please state your expected salary" is not a state field
+    ['expected_salary', /\b(salary|compensation|pay|rate) (expectation|requirement|range)s?\b|\b(expected|desired) (salary|compensation|pay|rate)\b|\bexpected (hourly|daily|monthly|annual) (rate|salary|pay)\b|\b(hourly|daily) rate\b/, 160],
+    ['address_full', /^(full |postal |mailing |current )?address$|^(postal|mailing) address\b/, 40],
+    ['street', /\b(street( address)?|address line 1|address 1|home address)\b/, 40],
+    ['city', /^(current )?(city|town)( of residence)?$|^city town$|\blocation city\b|^city\b/, 30],
+    ['state', /^(current )?(state|province|region)( of residence)?$|^state (province|or province|region)$/, 30],
+    ['zip', /^(zip|postal|post)( code)?$|\bzip( code)?\b|\bpostal code\b|\bpostcode\b/, 30],
     ['country', /^(country|country of residence|current country)\b/, 80],
-    ['location', /^(current )?location\b|\bwhere are you (currently )?(located|based)\b|\bwhere do you (currently )?live\b|\bcurrent city\b/, 120],
+    ['location', /^(current )?location\b|\bwhere are you (currently )?(located|based)\b|\bwhere do you (currently )?live\b|\bcurrent city\b|\b(city|where)\b.*\b(reside|live|located|based)\b/, 120],
     ['current_company', /\b(current|most recent|present) (company|employer)\b|^(company|employer)( name)?$/, 80],
     ['current_title', /\b(current|most recent) (job )?(title|role|position)\b|^(job )?title$/, 80],
     ['university', /^(school|university|college|institution)( name)?$|\bschool name\b|\buniversity name\b/, 80],
     ['degree', /^degree\b|\bhighest degree\b|\bdegree (type|level)\b/, 80],
     ['graduation_year', /\bgraduat\w* (year|date)\b/, 80],
-    ['years_experience', /\b(total )?years of (professional |relevant |work )?experience\b|\bhow many years\b/, 160],
-    ['expected_salary', /\b(salary|compensation|pay) (expectation|requirement|range)s?\b|\bexpected (salary|compensation|pay)\b|\bdesired (salary|pay|compensation)\b/, 160],
+    // total years only — "years of experience with Rust" is a per-technology question
+    ['years_experience', /\b(total )?years of (professional |relevant |work |industry |overall )?experience\b|\bhow many years\b/, 160, NOT_TOTAL_YEARS],
   ];
 
   function classify(f, labels = {}) {
@@ -105,30 +113,72 @@
     if (key && labels[key]) return labels[key];
     const label = norm(f.label);
     const attrs = norm(humanize(`${f.el.name || ''} ${f.el.id || ''}`));
-    for (const [field, re, max] of RULES) {
+    for (const [field, re, max, unless] of RULES) {
+      if (label && unless && unless.test(label)) continue;
       if ((label && label.length <= max && re.test(label)) || (!label && re.test(attrs))) return field;
     }
     // A bare name/id like "email" or "phone" when the visible label said nothing useful.
-    for (const [field, re] of RULES) if (attrs && attrs.length <= 40 && re.test(attrs)) return field;
+    if (!label || label.length <= 40) {
+      for (const [field, re, , unless] of RULES) {
+        if (attrs && attrs.length <= 40 && !(unless && unless.test(attrs)) && re.test(attrs)) return field;
+      }
+    }
     return null;
   }
 
+  // Salary: only when the question's currency / period (if it names one) match the
+  // profile's — a USD figure must never go into "…salary in EUR". A number-only field
+  // gets the bare amount; otherwise the readable range ("120,000–140,000 USD per year").
+  const CURRENCY_RE = {
+    USD: /\b(usd|us dollars?)\b|\$/, EUR: /\b(eur|euros?)\b|€/, GBP: /\b(gbp|pounds? sterling)\b|£/,
+    RON: /\b(ron|lei)\b/, PLN: /\b(pln|zloty|złoty)\b/, BGN: /\b(bgn|leva)\b/, CAD: /\b(cad)\b/, CHF: /\b(chf)\b/,
+  };
+  const PERIOD_RE = { hour: /\b(hour|hourly)\b/, day: /\b(day|daily)\b/, month: /\b(month|monthly)\b/, year: /\b(annual|annually|yearly|year|per annum|p\.?a\.?)\b/ };
+  function salaryValue(f, v) {
+    if (!v.expected_salary) return '';
+    const text = String(f.label || '').toLowerCase();
+    const asked = Object.keys(CURRENCY_RE).find((c) => CURRENCY_RE[c].test(text));
+    if (asked && v.salary_currency && asked !== v.salary_currency) return '';
+    const per = Object.keys(PERIOD_RE).find((k) => PERIOD_RE[k].test(text));
+    if (per && v.salary_period && per !== v.salary_period) return '';
+    const numeric = f.el.type === 'number' || f.el.inputMode === 'numeric' || /\b(numbers? only|digits only)\b/.test(text);
+    return numeric ? (v.expected_salary_amount || '') : v.expected_salary;
+  }
+  function profileValue(f, field, values) {
+    if (!field) return '';
+    if (field === 'expected_salary') return salaryValue(f, values);
+    return values[field] || '';
+  }
+
+  // Words that may differ between two wordings of the SAME question. Anything else that
+  // differs — a country, a company, a technology — makes it a different question: "authorized
+  // to work in the United Kingdom" must not reuse the answer for "…the United States".
+  const FILLER = new Set(('the and you your are for with this that have has any our will can would now future '
+    + 'currently legally please its all from into been ever able ready willing does did were was who which '
+    + 'what when where how being also there their they them per such other others some more most yes not '
+    + 'require required requires need needs position role job company').split(' '));
+  function exactAnswer(label, answers) {
+    const key = qkey(label);
+    return key ? (answers.find((a) => a.question_key === key)?.answer || '') : '';
+  }
   function findAnswer(label, answers) {
     const key = qkey(label);
     if (!key) return '';
-    const exact = answers.find((a) => a.question_key === key);
-    if (exact) return exact.answer;
-    // Same question, slightly different wording on another site: token overlap.
+    const exact = exactAnswer(label, answers);
+    if (exact) return exact;
+    // Same question, slightly different wording on another site.
     const tok = (s) => new Set(s.split(' ').filter((w) => w.length > 2 || /\d/.test(w)));
     const a = tok(key);
     let best = null, bestScore = 0;
     for (const ans of answers) {
       const b = tok(ans.question_key);
+      const diff = [...a].filter((w) => !b.has(w)).concat([...b].filter((w) => !a.has(w)));
+      if (diff.some((w) => !FILLER.has(w))) continue;
       const inter = [...a].filter((w) => b.has(w)).length;
       const score = inter / (a.size + b.size - inter || 1);
       if (score > bestScore) { best = ans; bestScore = score; }
     }
-    return bestScore >= 0.75 ? best.answer : '';
+    return bestScore >= 0.6 ? best.answer : '';
   }
 
   // ---------- label discovery ----------
@@ -173,18 +223,56 @@
     // (reverse order, so a previous question's label never wins over this one's).
     // Real <label>/<legend> first, so a help line under the label ("This should be
     // the location you're physically…") never stands in for the question itself.
+    // The walk stops at a container that also holds ANOTHER field: past that point the
+    // nearest label belongs to a sibling ("First name" above an unlabelled "Last name").
+    const own = ownControls(el);
+    const foreign = (node) => [...node.querySelectorAll('input:not([type="hidden"]), select, textarea, button[aria-pressed], [role="radio"]')]
+      .some((c) => !own.has(c));
     let node = el.parentElement;
-    for (let depth = 0; node && depth < 4; depth++, node = node.parentElement) {
+    for (let depth = 0; node && depth < 4 && !foreign(node); depth++, node = node.parentElement) {
       for (const sel of ['label, legend', LABELISH]) {
         for (const cand of [...node.querySelectorAll(sel)].reverse()) {
           if (cand.contains(el) || cand.querySelector('input, select, textarea')) continue;
+          if (cand.control && own.has(cand.control)) continue;      // an option's own label ("Male"), not the question
           if (!(cand.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)) continue;
           const t = textOf(cand);
           if (t && t.length > 1) return labelled(el, cand, t);
         }
       }
+      // Floating labels sit AFTER their input; inside a box holding only this field that's safe.
+      // (Not for a radio/checkbox group: the labels after its inputs are the OPTIONS.)
+      for (const cand of group ? [] : node.querySelectorAll('label')) {
+        if (cand.contains(el) || cand.querySelector('input, select, textarea')) continue;
+        if (cand.control && !own.has(cand.control)) continue;    // labels another field
+        const t = textOf(cand);
+        if (t && t.length > 1) return labelled(el, cand, t);
+      }
     }
-    return clean(el.getAttribute('placeholder') || humanize(el.name || el.id || ''));
+    const described = byIds(el.getAttribute('aria-describedby'));
+    return clean(el.getAttribute('placeholder') || (described.length <= 80 ? described : '') || humanize(el.name || el.id || ''));
+  }
+
+  // The controls that belong to this field: itself, its radio/checkbox group (same name),
+  // or the sibling buttons + hidden input of a choice-button group.
+  function ownControls(el) {
+    const set = new Set([el]);
+    if ((el.type === 'radio' || el.type === 'checkbox') && el.name) {
+      const scope = el.form || document;
+      for (const c of scope.querySelectorAll(`input[name="${CSS.escape(el.name)}"]`)) set.add(c);
+    }
+    if (el.matches?.('button[aria-pressed], [role="radio"]:not(input)') && el.parentElement) {
+      for (const c of el.parentElement.querySelectorAll('button, [role="radio"], input')) set.add(c);
+    }
+    return set;
+  }
+
+  // The QUESTION a radio/checkbox group sits under, from its fieldset legend or an ARIA group.
+  function groupQuestion(el) {
+    const fs = el.closest('fieldset');
+    const legend = fs?.querySelector('legend');
+    if (legend && textOf(legend)) return textOf(legend);
+    const grp = el.closest('[role="radiogroup"], [role="group"]');
+    return grp ? clean(grp.getAttribute('aria-label') || byIds(grp.getAttribute('aria-labelledby'))) : '';
   }
 
   function isRequired(f) {
@@ -241,9 +329,13 @@
     for (const el of document.querySelectorAll('button[aria-haspopup="listbox"], [role="button"][aria-haspopup="listbox"]')) {
       if (visible(el) && !el.disabled) fields.push({ el, kind: 'listbox', label: labelFor(el) });
     }
-    // A lone checkbox ("I agree…") is a yes/no question, labelled by its own text.
+    // A lone checkbox ("I accept the privacy notice") is a yes/no question in its own words —
+    // labelled by its own text unless a fieldset/ARIA group names the question. (Taking the
+    // nearest label above it used to file "Yes" under the PREVIOUS question.)
     for (const f of fields) {
-      if (f.kind === 'checkbox' && f.options.length === 1 && !f.label) f.label = f.options[0].text;
+      if (f.kind === 'checkbox' && f.options.length === 1) {
+        f.label = groupQuestion(f.el) || f.options[0].text || f.label;
+      }
     }
     return fields.filter((f) => f.label || f.kind === 'file');
   }
@@ -383,8 +475,11 @@
     for (const f of fields) {
       if (f.kind === 'file' || !f.el.isConnected || widgetValue(f)) continue;
       const field = classify(f, data.labels || {});
-      if (field === 'skip') continue;
-      const value = (field && data.values[field]) || findAnswer(f.label, data.answers || []);
+      // What the bidder taught for THIS exact question wins (it corrects a wrong rule match);
+      // then the profile's value; then a learned answer to the same question worded differently.
+      const taught = exactAnswer(f.label, data.answers || []);
+      if (field === 'skip' && !taught) continue;
+      const value = taught || profileValue(f, field === 'skip' ? null : field, data.values) || findAnswer(f.label, data.answers || []);
       if (!value) { miss(f); flash(f.el, false); continue; }
       const location = field === 'location' || field === 'city';
       // Dropdowns, and location boxes that suggest places as you type, need real keystrokes.
