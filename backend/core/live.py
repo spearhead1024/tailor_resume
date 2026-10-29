@@ -313,7 +313,7 @@ def on_row_changed(row_id: str, before: dict, after: dict, actor: dict) -> None:
                 b["orig"].setdefault(cid, before.get(cid, ""))
                 b["new"][cid] = after.get(cid, "")
             # Keep a follow-up already folded into this batch (note_followup): replacing the cells
-            # dropped it, so "Passed, then Approved within a minute" announced no follow-up at all.
+            # dropped it, so "Passed, then another edit within a minute" announced no follow-up at all.
             followup = b["cells"].get(_FOLLOWUP)
             b["cells"] = deepcopy(after)
             if followup is not None:
@@ -437,18 +437,9 @@ def _notify_row_change(row_id: str, before: dict, after: dict, actor: dict, *, c
         if ou:
             add({ou["id"]}, "Interview reassigned", f"{who} moved {name} away from you")
 
-        # A caller/manager answering on a call → tell whoever booked it.
-        #
-        # BOTH fields count. Only Status used to, which left the more important one silent: Approved
-        # is the caller saying whether the call will happen at all, so a caller could reject a call and
-        # the person who booked it would never be told. If one save changes both, they are reported
-        # together in a single message rather than as two pings.
-        answered = [(lbl, str(after.get(cid) or "").strip() or "—")
-                    for cid, lbl in (("c_approved", "Approved"), ("c_status", "Status"))
-                    if str(after.get(cid, "")) != str(before.get(cid, ""))]
-        if answered and (is_caller or is_manager):
-            summary = ", ".join(f"{lbl}: {val}" for lbl, val in answered)
-            add(creator_ids, verb, summary)
+        # A caller/manager answering on a call (its Status) → tell whoever booked it.
+        if (is_caller or is_manager) and str(after.get("c_status", "")) != str(before.get("c_status", "")):
+            add(creator_ids, verb, f"Status: {str(after.get('c_status') or '').strip() or '—'}")
 
         # the creator/admin changed the details of a call somebody already holds
         touched = [k for k in _CONTENT_CELLS if str(after.get(k, "")) != str(before.get(k, ""))]

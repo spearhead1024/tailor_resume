@@ -372,11 +372,11 @@ def _default_settings() -> dict:
         # and how long a generated resume stays in the Apply queue.
         'job_deadline_hours': 12,
         # Interview reminder push notifications. Hours are on the CALLER's clock. Only interviews whose
-        # Status is "Scheduled" ever notify; the creater/CBM heads-ups additionally require Approved:
-        # Confirmed. creator_enabled/cbm_enabled are whole-feature admin switches; WHEN each actually
-        # fires is each person's OWN lead-time list, set on their own Account page (see
-        # creator_lead_minutes_list/cbm_lead_minutes_list on the user record, below) — deliberately NOT
-        # part of this app-wide blob, so one person's preference can never silently become everyone's.
+        # Status is "Scheduled" ever notify. creator_enabled/cbm_enabled are whole-feature admin
+        # switches; WHEN each actually fires is each person's OWN lead-time list, set on their own
+        # Account page (see creator_lead_minutes_list/cbm_lead_minutes_list on the user record, below)
+        # — deliberately NOT part of this app-wide blob, so one person's preference can never
+        # silently become everyone's.
         'notifications': {
             'lead_enabled': True,
             'lead_minutes': 60,        # "Interview in 1 hour" — set 30 for half an hour, etc. App-wide;
@@ -718,7 +718,7 @@ def _normalize_template(item: dict, *, fallback_index: int = 0) -> dict:
 
 
 # 'manager' = team manager: runs one caller team (creates/approves that team's callers, and on the
-# interview board may re-assign a call within their team + set Approved/Status/Feedback).
+# interview board may re-assign a call within their team + set Status/Feedback).
 # 'call_board_manager' = oversees the whole call board: gets a creater-style heads-up before EVERY
 # scheduled call (see core/notify.py). Roles not listed here are silently stripped on save, so a new
 # role MUST be added here or the Users-page checkbox for it will never persist.

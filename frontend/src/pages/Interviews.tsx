@@ -9,7 +9,6 @@ import { dateKeyIn, thisWeek } from '../lib/board-dates';
 import CalendarView, { type CalPerson } from '../lib/CalendarView';
 import ProfileCard from '../lib/ProfileCard';
 import { insertRowAt, removeRow, upsertRow } from '../lib/board-merge';
-import { effCol } from '../lib/board-cols';
 import { disablePush, enablePush, initPushSound, notifPermission, pushSupported, sendTestPush, syncPushIfGranted } from '../lib/push';
 import { useAuth } from '../lib/auth';
 
@@ -31,7 +30,7 @@ type Grid = { columns: Col[]; rows: Row[] };
     clipboard all agree on the order. */
 /* ONE board, left → right:
      Index │ Scheduled_at (min) │ Call Type │ Company Info │ Position/Title │ Job Description │
-     Profile Name │ Caller/Approved │ Status │ Creater/Created_At
+     Profile Name │ Caller │ Status │ Creater/Created_At
 
    Everybody sees this board. The roles differ only in what is TAKEN AWAY from it, and in what may be
    typed into it — never in the order of the columns, which used to be shuffled per role and made two
@@ -42,16 +41,11 @@ type Grid = { columns: Col[]; rows: Row[] };
      team member  no Creater
      solo caller  no Creater, no Caller (every row on their board is already theirs)
 
-   Caller carries Approved beneath it — who makes the call and whether the call is agreed are two
-   halves of one decision. Status is the OUTCOME, a different question, so it stands alone.
-   A stacked column is ranked by its PRIMARY (c_caller), so c_approved needs no rank here. */
+   A stacked column is ranked by its PRIMARY column; its secondary fields need no rank here. */
 const COL_RANK_ADMIN: Record<string, number> = {
   c_index: 0, c_sched: 1, c_type: 2, c_company: 3, c_title: 4, c_jd: 5, c_account: 6,
   c_caller: 7, c_status: 8, c_creater: 9,
 };
-// Solo caller: with the Caller column gone there is nothing for Approved to stack under, so Approved
-// takes Caller's slot as a column of its own. Everything else is in exactly the same place.
-const COL_RANK_CALLER: Record<string, number> = { ...COL_RANK_ADMIN, c_approved: 7 };
 function orderColumns(g: Grid): Grid {
   const rank = (id: string) => (id in L.COL_RANK ? L.COL_RANK[id] : 100);   // unranked (hidden/custom) → after, stable
   return { ...g, columns: [...(g.columns || [])].sort((a, b) => rank(a.id) - rank(b.id)) };
@@ -137,9 +131,9 @@ const SEL_FILL = `linear-gradient(rgba(35,131,226,0.62), rgba(35,131,226,0.62))`
 // Fixed text columns: no ⋯ settings menu (can't be renamed/retyped/deleted). Still resizable + editable cells.
 // Merged primaries are locked so an admin can't rename/delete them out of sync with the MERGED map below
 // (admins can still edit their select-option lists via the ⋯ menu).
-// (c_approved and c_status are locked too: the layout maps, the filter bar and the server's workflow
-//  rule all name them, so deleting either from the schema would break the board.)
-const LOCKED_COLS = new Set(['c_index', 'c_title', 'c_skill', 'c_client', 'c_type', 'c_sched', 'c_caller', 'c_creater', 'c_account', 'c_jd', 'c_company', 'c_approved', 'c_status']);
+// (c_status is locked too: the layout maps, the filter bar, reminders and the follow-up flow all name
+//  it, so deleting it from the schema would break the board.)
+const LOCKED_COLS = new Set(['c_index', 'c_title', 'c_skill', 'c_client', 'c_type', 'c_sched', 'c_caller', 'c_creater', 'c_account', 'c_jd', 'c_company', 'c_status']);
 // Stacked columns: render { primary: secondary } as ONE column with two stacked cells
 // (primary on top, secondary below). The secondary column is hidden as a standalone column
 // but stays in the schema so its cells still save. Each sub-cell keeps its own type.
@@ -153,9 +147,6 @@ const MERGED_ADMIN: Record<string, SubField[]> = {
   c_company: [{ colId: 'c_company', row: 0 }, { colId: 'c_salary', row: 1 }],                     // Company Info / Salary Range
   c_type:    [{ colId: 'c_type', row: 0 }, { colId: 'c_client', row: 1 }],                        // Call Type / Interviewer(role)
   c_sched:   [{ colId: 'c_sched', row: 0 }, { colId: 'c_min', row: 0, width: 35, icon: '🕐', hdText: '(min)' }, { colId: 'c_link', row: 1, label: 'Meeting Link' }],  // Scheduled_at | 🕐 (min) / Meeting Link
-  // Caller carries Approved: whether a call is agreed only means anything once you know WHO is making
-  // it, so the two read together. Status — how the call went — is a separate question and stands alone.
-  c_caller:  [{ colId: 'c_caller', row: 0 }, { colId: 'c_approved', row: 1 }],                     // Caller / Approved
   c_creater: [{ colId: 'c_creater', row: 0 }, { colId: 'c_created', row: 1, label: 'Created_At' }], // Creater / Created_At
   c_account: [{ colId: 'c_account', row: 0 }, { colId: 'c_resume', row: 1, label: 'Resume' }],     // Profile Name(Country) / Resume
   c_jd:      [{ colId: 'c_jd', row: 0 }, { colId: 'c_feedback', row: 1, label: 'Chat & Feedback' }], // Job Description / Chat & Feedback
@@ -164,12 +155,9 @@ const MERGED_ADMIN: Record<string, SubField[]> = {
 // they cannot do with it is a question of permission (see MANAGER_EDITABLE / CALLER_EDITABLE), not of
 // layout, and the two were being confused.
 const MERGED_MANAGER = MERGED_ADMIN;
-// A solo caller loses the Caller stack — and losing it means losing the stack's SECOND field too, so
-// Approved would vanish with it. Drop the key and Approved stands on its own instead (COL_RANK_CALLER
-// puts it in Caller's slot). Every other stack is untouched.
-const MERGED_CALLER: Record<string, SubField[]> = Object.fromEntries(
-  Object.entries(MERGED_ADMIN).filter(([colId]) => colId !== 'c_caller'),
-);
+// A solo caller too: Caller is a plain column, so hiding it (ROLE_HIDDEN / STACK_HIDDEN below) takes
+// nothing else with it.
+const MERGED_CALLER = MERGED_ADMIN;
 // Written by the machine, never by a person — visible (Created_At now sits under Creater) but not
 // editable by anyone, admin included. Showing a value is not the same as inviting someone to retype it.
 const SYSTEM_COLS = new Set<string>(['c_created']);
@@ -189,7 +177,7 @@ function displayValue(row: Row, colId: string): any {
 // Displayed names that differ from the persisted column name (display-only override; used for headers AND cells).
 const DISPLAY_NAME: Record<string, string> = { c_account: 'Profile Name(Country)', c_jd: 'Job Description', c_feedback: 'Chat & Feedback' };
 // Select columns offered as dropdown filters above the table (c_caller + c_creater are admin-only).
-const FILTER_COLS = ['c_type', 'c_approved', 'c_status', 'c_account', 'c_caller', 'c_creater'];
+const FILTER_COLS = ['c_type', 'c_status', 'c_account', 'c_caller', 'c_creater'];
 // Filters only admins get. The API hands every user the full column list (the frontend is
 // what hides them), so without this a caller would be offered a Caller filter they can't see.
 // c_creater is in ROLE_HIDDEN for managers+callers, so listing it here keeps the filter admin-only.
@@ -232,7 +220,7 @@ type Layout = {
 const ADMIN_LAYOUT: Layout = { MERGED: MERGED_ADMIN, STACK_HIDDEN: STACK_HIDDEN_ADMIN, COL_RANK: COL_RANK_ADMIN, ROLE_HIDDEN: ROLE_HIDDEN_ADMIN };
 // A manager and a team member read the admin's board in the admin's order — same ranks, same stacks.
 const MANAGER_LAYOUT: Layout = { MERGED: MERGED_MANAGER, STACK_HIDDEN: STACK_HIDDEN_MANAGER, COL_RANK: COL_RANK_ADMIN, ROLE_HIDDEN: ROLE_HIDDEN_MANAGER };
-const CALLER_LAYOUT: Layout = { MERGED: MERGED_CALLER, STACK_HIDDEN: STACK_HIDDEN_CALLER, COL_RANK: COL_RANK_CALLER, ROLE_HIDDEN: ROLE_HIDDEN_CALLER };
+const CALLER_LAYOUT: Layout = { MERGED: MERGED_CALLER, STACK_HIDDEN: STACK_HIDDEN_CALLER, COL_RANK: COL_RANK_ADMIN, ROLE_HIDDEN: ROLE_HIDDEN_CALLER };
 let L: Layout = ADMIN_LAYOUT;
 const isMerged = (colId: string): boolean => colId in L.MERGED;
 // How long you must stay in a cell before it is claimed as yours. This is the exact width of the
@@ -244,9 +232,9 @@ const LOCK_CLAIM_MS = 700;
 // left-click is also how you SELECT a cell, so merely clicking across the board signed you as the
 // author of somebody else's row — and quietly redirected that row's 90-minute creator heads-up to you.
 
-// A caller is read-only on the board except these columns — Approved, Status, and the
+// A caller is read-only on the board except these columns — Status and the
 // Chat & Feedback thread (c_feedback); admins may edit everything. Backend enforces this too.
-const CALLER_EDITABLE = new Set<string>(['c_approved', 'c_status', 'c_feedback']);
+const CALLER_EDITABLE = new Set<string>(['c_status', 'c_feedback']);
 // A team manager may additionally hand a call to another caller — but only one on their own team
 // (the backend rejects anyone else, and their Caller dropdown only lists the team).
 const MANAGER_EDITABLE = new Set<string>([...CALLER_EDITABLE, 'c_caller']);
@@ -562,7 +550,7 @@ function SelectCell({ col, value, editing, seed, onCommit, onDone, onOpen, onPee
 
   // Place the list against the VIEWPORT, not the table. It's portalled out of .iv-wrap (which is
   // `overflow:auto`), so the table can no longer clip it — previously it was cut off below the last
-  // rows and past the right edge on the right-most column (the caller's Approved/Status). Flips above
+  // rows and past the right edge on the right-most column (the caller's Status). Flips above
   // the cell when it can't fit below, and is nudged left so it always stays on screen.
   useLayoutEffect(() => {
     if (!editing) { setPos(null); return; }
@@ -983,8 +971,7 @@ function StackedCell({ fields, row, subState, editSub, editSeed, meName, avatarB
   commit: (colId: string, v: any) => void;
 }) {
   const cellFor = (f: { col: Col; sub: number; width?: number }) => {
-    const { col: rawCol, sub } = f;
-    const col: Col = effCol(rawCol, row.cells);   // Approved can't be Confirmed with nobody assigned
+    const { col, sub } = f;
     const isSelect = col.type === 'select';
     const value = displayValue(row, col.id);
     const empty = value === '' || value === null || value === undefined;
@@ -1221,9 +1208,9 @@ function NotifBell() {
 export default function Interviews() {
   const toast = useToast();
   const { user: me } = useAuth();
-  // Pick the column layout for this session's role before render / listeners use it: callers see a
-  // combined Approved/Status column in place of the admin-only Caller & Creater columns; a team
-  // manager sees that same board plus the Caller column, so they can hand a call to a team-mate.
+  // Pick the column layout for this session's role before render / listeners use it: callers lose
+  // the admin-only Caller & Creater columns; a team manager sees that same board plus the Caller
+  // column, so they can hand a call to a team-mate.
   // `L.MERGED` and `L.STACK_HIDDEN` are stable per-session objects, so aliasing them is render-safe.
   const isTeamManager = !me?.is_admin && (me?.roles || []).includes('manager');
   // A caller who's on a team sees the team's whole schedule, so they get the same board as their
@@ -1369,8 +1356,8 @@ export default function Interviews() {
   /* Write permission for the once-bound document listeners (keyboard, paste, cut, fill).
    *
    * It takes the ROW, not just the column. Asking only "may you write this column?" was wrong for
-   * everyone who shares a board: a team member sees their team-mates' calls and may write Approved —
-   * on THEIR OWN calls. The column-only check let Enter open an editor on a team-mate's Approved (the
+   * everyone who shares a board: a team member sees their team-mates' calls and may write Status —
+   * on THEIR OWN calls. The column-only check let Enter open an editor on a team-mate's Status (the
    * typed value then vanished on commit, with no error), and let a paste or Ctrl+D spray writes across
    * team-mates' rows that the server answered with a 404 apiece. It also ignored per-cell locks, so
    * the same keys walked straight over a cell somebody else was in the middle of editing. */
@@ -1785,13 +1772,13 @@ export default function Interviews() {
   const undoRef = useRef(undo); undoRef.current = undo;
   const redoRef = useRef(redo); redoRef.current = redo;
 
-  // Callers may write only Approved, Status, and Feedback; admins anything. Backend enforces this too.
+  // Callers may write only Status and Feedback; admins anything. Backend enforces this too.
   const canEditCol = (colId: string) =>
     !SYSTEM_COLS.has(colId)
     && (!!me?.is_admin || (isTeamManager ? MANAGER_EDITABLE : CALLER_EDITABLE).has(colId));
   // Row-level rule. A team caller SEES the whole team's schedule but may only write their own calls
   // (the backend 404s on the rest) — without this the UI would happily let them edit a team-mate's
-  // Approved/Status and then silently drop it. Admins and the team's manager may write anywhere in
+  // Status and then silently drop it. Admins and the team's manager may write anywhere in
   // scope, so they short-circuit.
   const ownsRow = (row?: Row | null) => {
     if (me?.is_admin || isTeamManager) return true;
@@ -1840,9 +1827,6 @@ export default function Interviews() {
   };
   const heldColorOf = (rowId: string, colId: string): LockColor | null =>
     heldInfo(rowId, colId)?.color ?? null;
-  // Status is NOT gated on Approved. A call can be cancelled, rescheduled or no-showed long before
-  // anyone gets round to confirming it, and locking the outcome behind the paperwork just meant the
-  // board couldn't record what actually happened. (The server dropped the same rule.)
   const canEditCell = (row: Row | null | undefined, colId: string) => {
     if (row && lockedBy(row.id, colId)) return false;   // held by someone else — don't let me overwrite them
     return canEditCol(colId) && ownsRow(row);
@@ -2486,7 +2470,7 @@ export default function Interviews() {
                   const isEditing = !!editingView && editingView.r === ri && editingView.c === c && editingView.s === 0;
                   const cval = displayValue(row, col.id);   // Caller falls back to the Team it was handed to
                   // Somebody else is in this cell. The tag only ever showed on STACKED cells, so a plain
-                  // one (Status always, Approved for a solo caller) just went quietly dead in your hands:
+                  // one (Status, Caller) just went quietly dead in your hands:
                   // no tag, and double-click did nothing. Same treatment for both kinds of cell now,
                   // tinted in the holder's own presence colour.
                   const held = heldInfo(row.id, col.id);
@@ -2497,7 +2481,7 @@ export default function Interviews() {
                         onMouseDown={(e) => selectCell(e, ri, c, 0, false)}
                         onMouseEnter={() => extendTo(ri, c)}
                         onDoubleClick={() => editCell(ri, c, 0)}>
-                      <CellEditor col={effCol(col, row.cells)} value={cval} editing={isEditing} seed={isEditing ? editing?.seed : undefined} tz={userTz}
+                      <CellEditor col={col} value={cval} editing={isEditing} seed={isEditing ? editing?.seed : undefined} tz={userTz}
                         avatar={col.type === 'person' ? avatarByName[String(cval ?? '')] : undefined}
                         onCommit={(v) => commitCell(row.id, col.id, v)} onDone={(dir) => { setEditing(null); if (dir) moveActive(dir, false); }}
                         onOpen={col.type === 'button' ? () => openModal(row, col) : () => editCell(ri, c, 0)}

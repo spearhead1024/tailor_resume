@@ -15,7 +15,6 @@ import {
   minutesOfDay, startOfDay, wallClockIn, zonedToInstant,
   type Availability, type Band, type DailyMeeting, type MeetingBand,
 } from './availability';
-import { effCol } from './board-cols';
 
 export type CalOpt = { label: string; color?: string; kind?: 'team' | 'member'; group?: string };
 export type CalCol = { id: string; name: string; type: string; options?: CalOpt[] };
@@ -90,7 +89,7 @@ const DETAIL_FIELDS = [
   'c_index', 'c_sched', 'c_min', 'c_type',
   'c_company', 'c_title', 'c_account', 'c_client',
   'c_skill', 'c_salary', 'c_link',
-  'c_caller', 'c_approved', 'c_status', 'c_creater',
+  'c_caller', 'c_status', 'c_creater',
 ];
 
 const HOUR_PX = 44;                     // one hour of the day
@@ -968,9 +967,8 @@ function EventDetail({ row, columns, hideFields, canEdit, userTz, onPatch, onDel
 
   const field = (cid: string) => {
     if (hideFields?.has(cid)) return null;          // not for this role — see hideFields
-    const raw = colById[cid];
-    if (!raw) return null;
-    const col = effCol(raw, row.cells);             // Approved can't be Confirmed with nobody assigned
+    const col = colById[cid];
+    if (!col) return null;
     // Somebody else is in this exact field right now. The server would refuse our write (409) — so make
     // it read-only and name them, rather than letting us type into something that will be thrown away.
     const heldBy = lockOf(row.id, cid);

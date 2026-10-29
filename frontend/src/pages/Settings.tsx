@@ -292,14 +292,6 @@ export default function Settings() {
                 </span>
               </div>
               <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-                <span style={{ fontSize: '1rem' }}>✅</span>
-                <span style={{ fontSize: '0.85rem' }}>
-                  The <strong>Creator</strong> and <strong>Board mgr</strong> heads-ups additionally require{' '}
-                  <strong>Approved is “Confirmed”</strong> — a call still Pending or Rejected doesn't page them yet.
-                  The <strong>Caller</strong>'s reminder and the daily summary are not affected by Approved.
-                </span>
-              </div>
-              <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
                 <span style={{ fontSize: '1rem' }}>👤</span>
                 <span style={{ fontSize: '0.85rem' }}>
                   <strong>Creator</strong>/<strong>Board mgr</strong> lead times below are <strong>per person</strong> —
@@ -326,8 +318,7 @@ export default function Settings() {
                   when={<MinutesListEditor values={creatorMins} disabled={!notif.creator_enabled}
                     onChange={(v) => { setCreatorMins(v); setRemindersDirty(true); }} />}
                   note={<>Your <strong>own</strong> times — Creater is always the signed-in admin who books the call.
-                    Names the caller. Sent <strong>once per time</strong>, even if you reschedule.
-                    Requires Approved: Confirmed.</>}
+                    Names the caller. Sent <strong>once per time</strong>, even if you reschedule.</>}
                   preview={creatorMins.map((m) => `Interview you booked — in ${leadLabel(m)}`)} />
 
                 {hasRole(user, 'call_board_manager') ? (
@@ -337,8 +328,7 @@ export default function Settings() {
                     when={<MinutesListEditor values={cbmMins} disabled={!notif.cbm_enabled}
                       onChange={(v) => { setCbmMins(v); setRemindersDirty(true); }} />}
                     note={<>Your <strong>own</strong> times, as a Call Board Manager. Sent for <em>every</em>
-                      scheduled call, and it names the caller. Sent <strong>once per time</strong> per call.
-                      Requires Approved: Confirmed.</>}
+                      scheduled call, and it names the caller. Sent <strong>once per time</strong> per call.</>}
                     preview={cbmMins.map((m) => `Board interview — <creater> — in ${leadLabel(m)}`)} />
                 ) : (
                   <ReminderCard
@@ -346,7 +336,7 @@ export default function Settings() {
                     icon="📋" title="Heads-up to the call board manager" to="Board mgr"
                     when={<Hint>on — you aren't a Call Board Manager, so there's nothing of yours to set here;
                       each CBM sets their own time when they're signed in.</Hint>}
-                    note="Sent to everyone with the Call Board Manager role, for every scheduled call. Requires Approved: Confirmed."
+                    note="Sent to everyone with the Call Board Manager role, for every scheduled call."
                     preview="Board interview — <creater> — in …" />
                 )}
 

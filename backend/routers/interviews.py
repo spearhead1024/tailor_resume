@@ -35,11 +35,11 @@ router = APIRouter(prefix="/api/interviews", tags=["interviews"])
 
 # Admins, callers and team managers can all use the board.
 _access = require_role("admin", "caller", "manager")
-# A caller is read-only on the board except Approved and Status. The Chat & Feedback thread
+# A caller is read-only on the board except Status. The Chat & Feedback thread
 # (c_feedback) is NOT cell-editable for them: it changes only through the /chat endpoints, which
 # append and let you delete only your own messages — a cell PATCH would replace the whole thread
 # (wipe others' messages, or post under anyone's name). Non-editable keys are dropped in patch_row.
-_CALLER_EDITABLE = {"c_approved", "c_status"}
+_CALLER_EDITABLE = {"c_status"}
 # A manager can additionally hand a call to a different caller — but only one of their own (enforced
 # in patch_row: writing c_caller with someone outside the team is rejected, not silently accepted).
 _MANAGER_EDITABLE = _CALLER_EDITABLE | {"c_caller"}
@@ -155,7 +155,7 @@ def _writability(user: dict):
     """WRITE scope — deliberately NARROWER than the read scope.
 
     A team member can see the whole team's schedule but may only edit their OWN calls; without this
-    split, widening visibility would have silently let any caller set Approved/Status/Feedback on a
+    split, widening visibility would have silently let any caller set Status/Feedback on a
     team-mate's interview. A manager may write anywhere in their team (that's their job)."""
     if user.get("is_admin"):
         return lambda row: True
@@ -259,8 +259,6 @@ def _default_grid() -> dict:
         {"id": "c_created", "name": "Created_at", "type": "date", "width": 130},
         {"id": "c_team", "name": "Team", "type": "select", "width": 140, "options": []},
         {"id": "c_caller", "name": "Caller", "type": "select", "width": 140, "options": []},
-        {"id": "c_approved", "name": "Approved", "type": "select", "width": 120, "options": [
-            s("Confirmed", "#4F9768"), s("Pending", "#C19138"), s("Rejected", "#BE524B")]},
         {"id": "c_creater", "name": "Creater", "type": "person", "width": 140},
         # Where the call has got to. Starts before the call exists in anyone's diary (Not Scheduled →
         # Scheduled), then how it went. Ordered by the life of a call, for the same reason as Call Type.
@@ -303,13 +301,12 @@ _REQUIRED_COLS = [
 # list before use — a mismatch is skipped rather than written, so renaming an option can't strand a row.
 _NEW_ROW_DEFAULTS = {
     "c_status": "Not Scheduled",
-    "c_approved": "Pending",
     "c_type": "Intro1",
 }
 
 
 def _apply_new_row_defaults(cells: dict, columns: list[dict]) -> None:
-    """Fill blank status/approved/type on a new row with their defaults — in place. Only touches a cell
+    """Fill blank status/type on a new row with their defaults — in place. Only touches a cell
     that is empty AND whose column exists AND still offers that option, so an explicit value always
     wins and a default can never point at an option that has been renamed away."""
     by_id = {c["id"]: c for c in columns}
@@ -373,8 +370,9 @@ def _bootstrap() -> None:
                 for i, r in enumerate(legacy["rows"]):
                     storage.insert_interview_row(r["id"], r.get("cells") or {}, i)
         storage.append_interview_columns(_REQUIRED_COLS)  # add newly-required columns
+        _drop_retired_columns()                           # e.g. Approved — column AND its cells
         _migrate_sched_db()                               # legacy wall-clock Scheduled_at → UTC
-        _migrate_option_colors()                          # repaint Status/Approved pills (see below)
+        _migrate_option_colors()                          # repaint Status pills (see below)
         _ensure_status_options()                          # add "Passed" to legacy boards' Status
         _bootstrapped = True
 
@@ -389,8 +387,25 @@ _OPTION_COLORS = {
         "Not Done": "#CB7B37", "Failed": "#BE524B", "OnSite": "#865DBB",
         "On-hold": "#C19138", "Account": "#BA4A78", "Filled": "#A27763", "Closed": "#9B9B9B",
     },
-    "c_approved": {"Confirmed": "#4F9768", "Pending": "#C19138", "Rejected": "#BE524B"},
 }
+
+# Columns the board no longer has. Removed from existing boards on bootstrap — the column AND every
+# row's value for it (replace_interview_columns prunes cells whose column is gone), so nothing keeps
+# a dead field alive. Listed by id, never by name: an admin may later add their own column that
+# happens to reuse a retired NAME, and that one must survive.
+#   c_approved — "Approved" (Confirmed/Pending/Rejected). Retired; Status alone tracks a call.
+_RETIRED_COLS = {"c_approved"}
+
+
+def _drop_retired_columns() -> None:
+    """Remove the retired columns (and their cells) from a board created before they were dropped.
+    Idempotent: a board that no longer has them is left untouched (no write at all)."""
+    cols = storage.get_interview_columns()
+    keep = [c for c in cols if c.get("id") not in _RETIRED_COLS]
+    if len(keep) != len(cols):
+        storage.replace_interview_columns(keep)
+        log.info("interviews: dropped retired column(s) %s",
+                 sorted({c.get("id") for c in cols} & _RETIRED_COLS))
 
 # Status options that must exist on EVERY board (added to legacy boards on bootstrap).
 # "Passed" drives the auto-clone follow-up flow, so it has to be selectable everywhere.
@@ -424,7 +439,7 @@ def _ensure_status_options() -> None:
 
 
 def _migrate_option_colors() -> None:
-    """Repaint known Status/Approved options to the professional palette. Idempotent, and only touches
+    """Repaint known Status options to the professional palette. Idempotent, and only touches
     the options it knows by name, so a board an admin has customised keeps their own additions."""
     cols = storage.get_interview_columns()
     changed = False
@@ -679,6 +694,8 @@ def put_schema(body: dict, user: dict = Depends(_access)):
         if not isinstance(c, dict):
             continue
         col = _normalize_column(c)
+        if col["id"] in _RETIRED_COLS:
+            continue                   # a tab still running the old page must not bring one back
         if col["id"] in seen:
             col["id"] = _new_id("c")
         seen.add(col["id"])
@@ -869,8 +886,6 @@ def _build_clone_cells(src_cells: dict, rows: list[dict], valid: set[str]) -> di
         if cid in valid:
             cells[cid] = ""
     # Reset workflow + stamp.
-    if "c_approved" in valid:
-        cells["c_approved"] = "Pending"          # the option's label — lowercase showed as a separate value
     if "c_status" in valid:
         cells["c_status"] = ""          # fresh follow-up, no outcome yet
     if "c_created" in valid:
@@ -882,7 +897,7 @@ def _build_clone_cells(src_cells: dict, rows: list[dict], valid: set[str]) -> di
 def clone_row(row_id: str, user: dict = Depends(_access)):
     """Create a follow-up row from a 'passed' call: copies every cell verbatim
     (incl. the Chat & Feedback thread), chains the index, clears schedule/link/
-    duration/type, sets Approved=pending, and appends it at the bottom. Admin-only.
+    duration/type, clears Status, and appends it at the bottom. Admin-only.
     Guards against duplicate follow-ups (one child per source row)."""
     if not user.get("is_admin"):
         raise HTTPException(status_code=403, detail="Only admins can create follow-up rows.")
@@ -1019,26 +1034,6 @@ def detach_team(team_name: str, new_name: str = "") -> int:
     return len(touched)
 
 
-def _check_workflow(before: dict, patch: dict) -> None:
-    """Interview workflow rules, enforced server-side so the UI can't be worked around.
-
-    ONE rule: Approved can only be 'Confirmed' once a Caller is assigned — you cannot confirm a call
-    that nobody is going to make. Unassigned calls stay 'Pending'.
-
-    Checked against the row as it will look AFTER the patch, so assigning the caller and confirming in
-    the same write is fine.
-
-    Status is deliberately NOT gated. It used to require the call to be 'Confirmed' first, which meant a
-    call that fell through before anyone confirmed it could never be marked Cancelled or On hold — the
-    outcome was locked behind an agreement that never happened. Status now stands on its own.
-    """
-    after = {**before, **patch}
-    caller = str(after.get("c_caller", "") or "").strip()
-
-    if str(patch.get("c_approved", "") or "").strip() == "Confirmed" and not caller:
-        raise HTTPException(status_code=400, detail="Assign a caller before confirming this interview.")
-
-
 @router.patch("/rows/{row_id}")
 def patch_row(row_id: str, body: dict, user: dict = Depends(_access)):
     _bootstrap()
@@ -1048,7 +1043,7 @@ def patch_row(row_id: str, body: dict, user: dict = Depends(_access)):
     # the sender's cached copy, so e.g. an admin pasting across the column wrote back a stale thread
     # and deleted every message posted since their board loaded.
     patch.pop(_CHAT_COL, None)
-    if not user.get("is_admin"):     # callers: Approved/Status/Feedback. Managers: + Caller.
+    if not user.get("is_admin"):     # callers: Status. Managers: + Caller.
         patch = {k: v for k, v in patch.items() if k in _editable_cols(user)}
         # A manager may hand a call to another caller — but only one of their own team's. Reject
         # rather than drop it, so a bad re-assign is never silently ignored (it would also make
@@ -1075,7 +1070,6 @@ def patch_row(row_id: str, body: dict, user: dict = Depends(_access)):
     if not patch:                    # nothing this user is allowed to change → no-op
         return _public_row(row, is_admin)
     before = dict(row.get("cells") or {})
-    _check_workflow(before, patch)
     updated = storage.patch_interview_row(row_id, patch)   # one-row UPDATE, in a transaction
     if updated is None:
         raise HTTPException(status_code=404, detail="Row not found")
