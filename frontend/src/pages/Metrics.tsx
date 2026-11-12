@@ -11,8 +11,9 @@ import { useAuth, hasRole } from '../lib/auth';
 // stale — a bidder created AFTER the admin last saved the filter (e.g. remy_1) would
 // never be in the saved set and would stay hidden forever. With an exclude-list, any
 // user not explicitly hidden shows by default, so new bidders appear automatically.
-// (New key: the old `metrics_selected_users` include-lists are ignored/discarded.)
-const USER_FILTER_KEY = 'metrics_hidden_users_v2';
+// v3: admins are no longer hidden by default (their applies and job uploads are part of the
+// picture now), so the v2 lists — which hid every admin — are discarded and re-seeded.
+const USER_FILTER_KEY = 'metrics_hidden_users_v3';
 function loadHiddenUsers(): string[] {
   try {
     const raw = localStorage.getItem(USER_FILTER_KEY);
@@ -26,8 +27,8 @@ function saveHiddenUsers(ids: string[]) {
     localStorage.setItem(USER_FILTER_KEY, JSON.stringify(ids));
   } catch { /* ignore quota / disabled storage */ }
 }
-// One-time cleanup: drop the legacy include-list key so it can't linger.
-try { localStorage.removeItem('metrics_selected_users'); } catch { /* */ }
+// One-time cleanup: drop the legacy keys so they can't linger.
+try { for (const k of ['metrics_selected_users', 'metrics_hidden_users_v2']) localStorage.removeItem(k); } catch { /* */ }
 
 type Cell = { applied: number; total: number };
 type Row = {
@@ -35,6 +36,7 @@ type Row = {
   username: string;
   profile_id: string;
   profile_name: string;
+  assigned: boolean;   // false = not their profile — they applied on it this week anyway (e.g. an admin)
   daily: Cell[];
   week: Cell;
   lifetime: Cell;
@@ -72,11 +74,14 @@ function isoMonday(d: Date): string {
   return toLocalIso(dt);
 }
 
+/** A Metrics day starts at 5pm JST (UTC+9, no DST) = 08:00 UTC and is labelled by the date it
+ *  starts on — the server's routers/metrics.py `_metrics_day` uses the same boundary. */
+const DAY_START_UTC_MS = 8 * 3600_000;
+
 function todayIsoMonday(): string {
-  // Anchor on today's ET date (the calendar the whole app uses), not the
-  // browser's local date — so the week is correct regardless of viewer TZ.
-  const etToday = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  const [y, m, d] = etToday.split('-').map(Number);
+  // Today's Metrics day, not the browser's local date — so the week is the same for every viewer.
+  const today = new Date(Date.now() - DAY_START_UTC_MS).toISOString().slice(0, 10);
+  const [y, m, d] = today.split('-').map(Number);
   return isoMonday(new Date(y, m - 1, d));
 }
 
@@ -118,8 +123,8 @@ function JobCellView({ cell }: { cell: JobCell }) {
   return (
     <span style={{ fontVariantNumeric: 'tabular-nums' }}>
       <strong style={{ color: empty ? 'var(--muted)' : 'var(--text)' }}>{cell.uploaded}</strong>
-      {cell.approved > 0 && <span style={{ color: '#16a34a', marginLeft: 4 }}>✓{cell.approved}</span>}
-      {cell.rejected > 0 && <span style={{ color: '#dc2626', marginLeft: 4 }}>✗{cell.rejected}</span>}
+      {cell.approved > 0 && <span style={{ color: 'var(--metric-ok, #16a34a)', marginLeft: 4 }}>✓{cell.approved}</span>}
+      {cell.rejected > 0 && <span style={{ color: 'var(--metric-bad, #dc2626)', marginLeft: 4 }}>✗{cell.rejected}</span>}
     </span>
   );
 }
@@ -214,17 +219,17 @@ function UserFilter({ users, hidden, onChange }: {
   );
 }
 
+/** One person's slice of the table: their profile rows (applications) and their job uploads. */
+type UserBlock = { user_id: string; username: string; apps: Row[]; jobs: JobRow | null };
+
 export default function Metrics() {
   const { user } = useAuth();
   const isAdmin = !!user?.is_admin;
-  // Which metric sets this user can see. A dual-role user (bidder + job_adder)
+  // Which metric groups this user can see. A dual-role user (bidder + job_adder)
   // and admins see BOTH; others see only the one matching their role.
-  const canSeeApps = isAdmin || hasRole(user, 'bidder');
-  const canSeeJobs = isAdmin || hasRole(user, 'job_adder');
-  // View + week live in the URL (lib/urlState) so a refresh keeps them.
-  const [urlView, setView] = useUrlState<'apps' | 'jobs'>('view', canSeeApps ? 'apps' : 'jobs');
-  // A link (or a tab another user left on ?view=jobs) can name a view this user can't see — fall back.
-  const view = urlView === 'jobs' ? (canSeeJobs ? 'jobs' : 'apps') : (canSeeApps ? 'apps' : 'jobs');
+  const showApps = isAdmin || hasRole(user, 'bidder');
+  const showJobs = isAdmin || hasRole(user, 'job_adder');
+  // The week lives in the URL (lib/urlState) so a refresh keeps it.
   const [weekStart, setWeekStart] = useUrlState('week', todayIsoMonday());
   // Admin-only user filter, stored as the set of HIDDEN user ids (see the note by
   // loadHiddenUsers). Anyone not in this set shows — so a new bidder appears without
@@ -238,71 +243,64 @@ export default function Metrics() {
     refetchInterval: 60_000,
   });
 
-  // Roles per user, so the default filter can exclude admins. Admin-only endpoint;
-  // only fetched for admins (the only ones who see the filter).
+  // Who is an admin, for the small "admin" tag by their name. Admin-only endpoint;
+  // only fetched for admins (the only ones who see other people's rows).
   const { data: allAppUsers = [] } = useQuery({
     queryKey: ['users'],
     queryFn: () => api.get<any[]>('/api/users'),
     enabled: isAdmin,
   });
-  const isDefaultExcluded = (uid: string, username: string): boolean => {
-    if (username === 'intern_bidder') return true;                 // excluded test account
-    const u = allAppUsers.find((x: any) => x.id === uid);
-    return !!u && (u.is_admin || (u.roles || []).includes('admin'));  // admins excluded by default
-  };
+  const adminIds = useMemo(
+    () => new Set(allAppUsers.filter((u: any) => u.is_admin || (u.roles || []).includes('admin')).map((u: any) => u.id)),
+    [allAppUsers]);
 
-  // Group rows by user_id so we can rowSpan the user cell and add per-user
-  // subtotal rows when a user has 2+ profiles.
-  const allGroups = useMemo(() => {
-    const m = new Map<string, { user_id: string; username: string; rows: Row[] }>();
-    for (const r of data?.rows || []) {
-      let g = m.get(r.user_id);
-      if (!g) { g = { user_id: r.user_id, username: r.username, rows: [] }; m.set(r.user_id, g); }
-      g.rows.push(r);
-    }
-    return [...m.values()];
-  }, [data]);
-  const allJobRows = data?.job_rows || [];
+  // One block per person, holding BOTH their applications and their job uploads, so the
+  // two read side by side in one table (they used to be two sub-tabs).
+  const allBlocks = useMemo(() => {
+    const m = new Map<string, UserBlock>();
+    const blockOf = (id: string, name: string) => {
+      let b = m.get(id);
+      if (!b) { b = { user_id: id, username: name, apps: [], jobs: null }; m.set(id, b); }
+      return b;
+    };
+    if (showApps) for (const r of data?.rows || []) blockOf(r.user_id, r.username).apps.push(r);
+    if (showJobs) for (const r of data?.job_rows || []) blockOf(r.user_id, r.username).jobs = r;
+    return [...m.values()].sort((a, b) => a.username.toLowerCase().localeCompare(b.username.toLowerCase()));
+  }, [data, showApps, showJobs]);
 
-  // Every user that appears in either table — the options for the filter.
-  const userOptions = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const g of allGroups) m.set(g.user_id, g.username);
-    for (const r of allJobRows) if (!m.has(r.user_id)) m.set(r.user_id, r.username);
-    return [...m.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
-  }, [allGroups, allJobRows]);
+  // Every user in the table — the options for the filter.
+  const userOptions = useMemo(
+    () => allBlocks.map((b) => ({ id: b.user_id, name: b.username })),
+    [allBlocks]);
 
   // Smart default (admins only): the FIRST time this admin opens Metrics with nothing
-  // saved yet, HIDE admins + intern_bidder by default (add them to the hidden set).
-  // Everyone else — including any bidder created later — shows automatically. Once the
-  // admin has saved anything (even an empty hidden set), this never re-seeds.
+  // saved yet, hide the intern_bidder test account. Everyone else — admins included, and
+  // any user created later — shows automatically. Once the admin has saved anything (even
+  // an empty hidden set), this never re-seeds.
   const didSeedDefault = useRef(false);
   useEffect(() => {
     if (!isAdmin || didSeedDefault.current) return;
     if (localStorage.getItem(USER_FILTER_KEY) != null) { didSeedDefault.current = true; return; }  // already chosen
-    if (userOptions.length === 0 || allAppUsers.length === 0) return;                                // wait for data
-    const toHide = userOptions.filter((u) => isDefaultExcluded(u.id, u.name)).map((u) => u.id);
+    if (userOptions.length === 0) return;                                                           // wait for data
     didSeedDefault.current = true;
-    applyHiddenUsers(toHide);
-  }, [isAdmin, userOptions, allAppUsers]);
+    applyHiddenUsers(userOptions.filter((u) => u.name === 'intern_bidder').map((u) => u.id));
+  }, [isAdmin, userOptions]);
 
-  // Apply the admin's filter: a user shows unless they're in the hidden set. New users
-  // (not yet in the set) show by default. Non-admins never filter.
+  // Apply the admin's filter: a user shows unless they're in the hidden set. Non-admins never filter.
   const hiddenSet = useMemo(() => new Set(hiddenUserIds), [hiddenUserIds]);
-  const showUser = (uid: string) => !isAdmin || !hiddenSet.has(uid);
-  const groups = isAdmin ? allGroups.filter((g) => showUser(g.user_id)) : allGroups;
-  const jobRows = isAdmin ? allJobRows.filter((r) => showUser(r.user_id)) : allJobRows;
+  const blocks = isAdmin ? allBlocks.filter((b) => !hiddenSet.has(b.user_id)) : allBlocks;
 
   // GRAND TOTAL reflects only the visible (selected) users, so it matches the rows
   // on screen rather than the backend's all-users total.
   const appsTotals = useMemo(() => {
     // Nobody filtered out → the server's totals, which also count a job two people both marked once.
-    if (data?.totals && groups.length === allGroups.length) return data.totals;
-    const rows = poolOncePerProfile(groups.flatMap((g) => g.rows));
+    if (data?.totals && blocks.length === allBlocks.length) return data.totals;
+    const rows = poolOncePerProfile(blocks.flatMap((b) => b.apps));
     if (rows.length === 0) return null;
     return { daily: aggregateAcrossRows(rows.map((r) => r.daily)), week: sumApplied(rows.map((r) => r.week)) };
-  }, [groups, allGroups, data]);
+  }, [blocks, allBlocks, data]);
   const jobTotals = useMemo(() => {
+    const jobRows = blocks.flatMap((b) => (b.jobs ? [b.jobs] : []));
     if (jobRows.length === 0) return null;
     const days = jobRows[0].daily.length;
     const sumCells = (cells: JobCell[]): JobCell => ({
@@ -313,14 +311,29 @@ export default function Metrics() {
     return {
       daily: Array.from({ length: days }, (_, i) => sumCells(jobRows.map((r) => r.daily[i]))),
       week: sumCells(jobRows.map((r) => r.week)),
-      lifetime: sumCells(jobRows.map((r) => r.lifetime)),
     };
-  }, [jobRows]);
+  }, [blocks]);
 
   const isCurrentWeek = weekStart === todayIsoMonday();
 
   if (isLoading) return <div><span className="spinner" /> Loading metrics…</div>;
   if (!data) return <div className="card"><span className="muted">No metrics data.</span></div>;
+
+  const nDays = data.days.length;
+  const appCols = nDays + 1;                                   // days + This Week
+  const jobCols = nDays + 1;                                   // days + This Week
+  const leadCols = (isAdmin ? 1 : 0) + (showApps ? 1 : 0);     // User, Profile
+  const allCols = leadCols + (showApps ? appCols : 0) + (showJobs ? jobCols : 0);
+  const centered = { textAlign: 'center' as const };
+  // The first column of the Jobs-added group carries the rule that separates the two groups.
+  const jobSec = (i: number) => (showApps && i === 0 ? 'metrics-sec' : undefined);
+  const dayHeads = (sec: boolean) => data.days.map((d, i) => (
+    <th key={d} className={sec && i === 0 ? 'metrics-sec' : undefined} style={centered}>{shortDay(d)}</th>
+  ));
+  const jobCells = (r: JobRow | null, rowSpan: number) => r
+    ? [...r.daily, r.week].map((c, i) => (
+        <td key={`j${i}`} rowSpan={rowSpan} className={jobSec(i)} style={centered}><JobCellView cell={c} /></td>))
+    : [<td key="j" rowSpan={rowSpan} colSpan={jobCols} className={jobSec(0)} style={centered}><span className="muted">—</span></td>];
 
   return (
     <div>
@@ -347,159 +360,116 @@ export default function Metrics() {
           onClick={() => setWeekStart(todayIsoMonday())}>
           This week
         </button>
+        {isFetching && <span className="spinner" />}
         {isAdmin && userOptions.length > 0 && (
           <div style={{ marginLeft: 'auto' }}>
             <UserFilter users={userOptions} hidden={hiddenUserIds} onChange={applyHiddenUsers} />
           </div>
         )}
-        <span className="muted" style={{ fontSize: '0.82rem', marginLeft: isAdmin ? 0 : 'auto' }}>
-          {view === 'apps'
-            ? 'Each cell = applied / total To-Do'
-            : 'Each cell = uploaded ( ✓ approved · ✗ rejected )'}
-          {isFetching && <> <span className="spinner" /></>}
-        </span>
       </div>
 
-      {/* Applications / Job uploads switch — only when the user can see both */}
-      {canSeeApps && canSeeJobs && (
-        <div style={{ display: 'flex', gap: 4, marginBottom: '1rem', borderBottom: '1px solid var(--border)' }}>
-          {([['apps', '📨 Applications'], ['jobs', '📥 Job uploads']] as const).map(([k, label]) => (
-            <button key={k} onClick={() => setView(k)}
-              style={{
-                background: 'transparent', border: 'none', borderRadius: 0,
-                borderBottom: `2px solid ${view === k ? 'var(--accent, #2563eb)' : 'transparent'}`,
-                color: view === k ? 'var(--text)' : 'var(--muted)',
-                fontWeight: view === k ? 700 : 400, padding: '8px 16px', fontSize: '0.95rem',
-              }}>
-              {label}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* Applications table */}
-      {view === 'apps' && canSeeApps && (
+      {/* Applications and job uploads, one table: a person's profile rows on the left, the
+          jobs they added on the right (spanning their rows). */}
       <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
         <table className="metrics-table">
           <thead>
             <tr>
-              {isAdmin && <th>User</th>}
-              <th>Profile</th>
-              {data.days.map((d) => <th key={d} style={{ textAlign: 'center' }}>{shortDay(d)}</th>)}
-              <th style={{ textAlign: 'center' }}>This Week</th>
+              {isAdmin && <th rowSpan={2}>User</th>}
+              {showApps && <th rowSpan={2}>Profile</th>}
+              {showApps && (
+                <th colSpan={appCols} className="metrics-group-head">
+                  📨 Applications<small>applied / total To-Do</small>
+                </th>
+              )}
+              {showJobs && (
+                <th colSpan={jobCols} className={`metrics-group-head${showApps ? ' metrics-sec' : ''}`}>
+                  📥 Jobs added<small>uploaded ( ✓ approved · ✗ rejected )</small>
+                </th>
+              )}
+            </tr>
+            <tr>
+              {showApps && <>{dayHeads(false)}<th style={centered}>This Week</th></>}
+              {showJobs && <>{dayHeads(showApps)}<th style={centered}>This Week</th></>}
             </tr>
           </thead>
           <tbody>
-            {groups.length === 0 ? (
+            {blocks.length === 0 ? (
               <tr>
-                <td colSpan={(isAdmin ? 2 : 1) + data.days.length + 1}
-                  style={{ padding: '1.5rem', textAlign: 'center' }}>
+                <td colSpan={allCols} style={{ padding: '1.5rem', textAlign: 'center' }}>
                   <span className="muted">
                     {isAdmin
-                      ? 'No bidder activity yet. Profile assignments + applies will appear here.'
-                      : 'You have no profiles assigned to your account.'}
+                      ? 'No activity yet. Profile assignments, applies and job uploads will appear here.'
+                      : showApps ? 'You have no profiles assigned to your account.' : 'No job uploads yet.'}
                   </span>
                 </td>
               </tr>
             ) : (
-              groups.map((g) => {
-                const showSubtotal = g.rows.length >= 2;
-                const userRowSpan = g.rows.length + (showSubtotal ? 1 : 0);
-                const subtotalDaily = aggregateAcrossRows(g.rows.map((r) => r.daily));
-                const subtotalWeek = sumApplied(g.rows.map((r) => r.week));
-                return (
-                  <>
-                    {g.rows.map((r, idx) => (
-                      <tr key={`${r.user_id}-${r.profile_id}`}>
-                        {isAdmin && idx === 0 && (
-                          <td rowSpan={userRowSpan} className="metrics-user-cell">
-                            {g.username}
-                          </td>
-                        )}
-                        <td>{r.profile_name}</td>
-                        {r.daily.map((c, i) => (
-                          <td key={i} style={{ textAlign: 'center' }}><CellView cell={c} /></td>
-                        ))}
-                        <td style={{ textAlign: 'center' }}><CellView cell={r.week} /></td>
-                      </tr>
-                    ))}
-                    {showSubtotal && (
-                      <tr key={`${g.rows[0].user_id}-subtotal`} className="metrics-subtotal">
-                        <td><em>{g.username} — total</em></td>
-                        {subtotalDaily.map((c, i) => (
-                          <td key={i} style={{ textAlign: 'center' }}><CellView cell={c} /></td>
-                        ))}
-                        <td style={{ textAlign: 'center' }}><CellView cell={subtotalWeek} /></td>
-                      </tr>
-                    )}
-                  </>
+              blocks.map((b) => {
+                const showSubtotal = b.apps.length >= 2;
+                // Lines this person takes: one per profile (at least one, so the jobs have a row
+                // to sit on), plus the subtotal. Without the Applications group, a single line.
+                const lines = showApps ? Math.max(1, b.apps.length) + (showSubtotal ? 1 : 0) : 1;
+                const userCell = isAdmin && (
+                  <td rowSpan={lines} className="metrics-user-cell">
+                    {b.username}
+                    {adminIds.has(b.user_id) && <span className="metrics-tag">admin</span>}
+                  </td>
                 );
+                const appLine = (i: number) => {
+                  if (!showApps) return null;
+                  const r = b.apps[i];
+                  if (r) return (
+                    <>
+                      <td title={r.assigned ? undefined : 'Not assigned to this profile — applied on it this week'}>
+                        {r.profile_name}
+                        {!r.assigned && <span className="metrics-tag">not assigned</span>}
+                      </td>
+                      {r.daily.map((c, k) => <td key={k} style={centered}><CellView cell={c} /></td>)}
+                      <td style={centered}><CellView cell={r.week} /></td>
+                    </>
+                  );
+                  if (b.apps.length === 0) return (
+                    <><td><span className="muted">—</span></td>
+                      <td colSpan={appCols} style={centered}><span className="muted">—</span></td></>
+                  );
+                  // The subtotal line (only reached when showSubtotal).
+                  const daily = aggregateAcrossRows(b.apps.map((x) => x.daily));
+                  return (
+                    <>
+                      <td><em>{b.username} — total</em></td>
+                      {daily.map((c, k) => <td key={k} style={centered}><CellView cell={c} /></td>)}
+                      <td style={centered}><CellView cell={sumApplied(b.apps.map((x) => x.week))} /></td>
+                    </>
+                  );
+                };
+                return Array.from({ length: lines }, (_, i) => (
+                  <tr key={`${b.user_id}-${i}`}
+                    className={showSubtotal && i === lines - 1 ? 'metrics-subtotal' : undefined}>
+                    {i === 0 && userCell}
+                    {appLine(i)}
+                    {i === 0 && showJobs && jobCells(b.jobs, lines)}
+                  </tr>
+                ));
               })
             )}
           </tbody>
-          {isAdmin && appsTotals && groups.length > 0 && (
+          {isAdmin && blocks.length > 0 && (appsTotals || jobTotals) && (
             <tfoot>
               <tr className="metrics-grand-total">
-                <td colSpan={2}><strong>GRAND TOTAL</strong></td>
-                {appsTotals.daily.map((c, i) => (
-                  <td key={i} style={{ textAlign: 'center' }}><CellView cell={c} /></td>
-                ))}
-                <td style={{ textAlign: 'center' }}><CellView cell={appsTotals.week} /></td>
+                <td colSpan={leadCols}><strong>GRAND TOTAL</strong></td>
+                {showApps && (appsTotals
+                  ? <>{appsTotals.daily.map((c, i) => <td key={`a${i}`} style={centered}><CellView cell={c} /></td>)}
+                      <td style={centered}><CellView cell={appsTotals.week} /></td></>
+                  : <td colSpan={appCols} />)}
+                {showJobs && (jobTotals
+                  ? [...jobTotals.daily, jobTotals.week].map((c, i) => (
+                      <td key={`j${i}`} className={jobSec(i)} style={centered}><JobCellView cell={c} /></td>))
+                  : <td colSpan={jobCols} className={jobSec(0)} />)}
               </tr>
             </tfoot>
           )}
         </table>
       </div>
-      )}
-
-      {/* Job-uploads table */}
-      {view === 'jobs' && canSeeJobs && (
-      <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
-        <table className="metrics-table">
-          <thead>
-            <tr>
-              {isAdmin && <th>User</th>}
-              {data.days.map((d) => <th key={d} style={{ textAlign: 'center' }}>{shortDay(d)}</th>)}
-              <th style={{ textAlign: 'center' }}>This Week</th>
-              <th style={{ textAlign: 'center' }}>All-time</th>
-            </tr>
-          </thead>
-          <tbody>
-            {jobRows.length === 0 ? (
-              <tr>
-                <td colSpan={(isAdmin ? 1 : 0) + data.days.length + 2}
-                  style={{ padding: '1.5rem', textAlign: 'center' }}>
-                  <span className="muted">No job uploads in this week.</span>
-                </td>
-              </tr>
-            ) : (
-              jobRows.map((r) => (
-                <tr key={r.user_id}>
-                  {isAdmin && <td className="metrics-user-cell">{r.username}</td>}
-                  {r.daily.map((c, i) => (
-                    <td key={i} style={{ textAlign: 'center' }}><JobCellView cell={c} /></td>
-                  ))}
-                  <td style={{ textAlign: 'center' }}><JobCellView cell={r.week} /></td>
-                  <td style={{ textAlign: 'center' }}><JobCellView cell={r.lifetime} /></td>
-                </tr>
-              ))
-            )}
-          </tbody>
-          {isAdmin && jobTotals && jobRows.length > 0 && (
-            <tfoot>
-              <tr className="metrics-grand-total">
-                <td><strong>GRAND TOTAL</strong></td>
-                {jobTotals.daily.map((c, i) => (
-                  <td key={i} style={{ textAlign: 'center' }}><JobCellView cell={c} /></td>
-                ))}
-                <td style={{ textAlign: 'center' }}><JobCellView cell={jobTotals.week} /></td>
-                <td style={{ textAlign: 'center' }}><JobCellView cell={jobTotals.lifetime} /></td>
-              </tr>
-            </tfoot>
-          )}
-        </table>
-      </div>
-      )}
     </div>
   );
 }

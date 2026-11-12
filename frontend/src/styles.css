@@ -449,6 +449,20 @@ tbody tr:hover td { background: var(--panel-2); color: var(--text); }
   font-size: 0.85rem;
 }
 .metrics-subtotal td em { color: var(--text-soft); font-style: normal; }
+/* One table, two metric groups: the group header spans its columns, and a rule down the
+   left edge of each group's first column keeps Applications and Jobs added apart. */
+.metrics-group-head {
+  text-align: center;
+  font-size: 0.8rem;
+  letter-spacing: 0.02em;
+  background: var(--panel-2);
+}
+.metrics-group-head small { display: block; font-weight: 400; color: var(--muted); font-size: 0.74rem; text-transform: none; letter-spacing: 0; }
+.metrics-table .metrics-sec { border-left: 2px solid var(--border-soft); }
+.metrics-tag {
+  display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 999px;
+  font-size: 0.7rem; font-weight: 500; color: var(--muted); border: 1px solid var(--border);
+}
 .metrics-grand-total td {
   background: var(--panel-3);
   color: var(--text);
