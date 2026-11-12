@@ -33,8 +33,13 @@ server {
     }
 
     # SPA fallback — all other routes serve index.html
+    # index.html (and every SPA route that falls back to it) and sw.js must never be cached:
+    # with no Cache-Control a browser guesses a lifetime from Last-Modified, and after a quiet
+    # week that kept it on the OLD index.html — the old JS bundle — for hours after a deploy.
+    # The hashed /assets/* files below are safe to cache forever.
     location / {
         try_files $uri $uri/ /index.html;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
     }
 
     # Long cache for hashed assets
