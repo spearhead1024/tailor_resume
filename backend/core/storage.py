@@ -56,6 +56,50 @@ _ALLOWED_REGIONS = {'ANY', 'US', 'EU', 'LATAM'}
 # both inherit this default.
 COMPANY_DEDUP_DAYS = 15
 
+# The Jobs tab's "Added by" name lives only in the job's JSON (synced jobs have a VPS1
+# adder but no local user id), so the filter reads it from there. ~7k rows: fast enough.
+_ADDED_BY_SQL = JobRow.data['created_by_username'].as_string()
+# ?added_by= value selecting jobs with no adder on record (never a real username).
+ADDED_BY_NONE = '__none__'
+
+
+def _job_filter_conditions(*, status: str = '', region: str = '', company: str = '', q: str = '',
+                           date_from: datetime | None = None, date_to: datetime | None = None,
+                           reported: bool = False, created_by: str = '', added_by: str = '') -> list:
+    """SQL WHERE conditions for the Jobs tab's filters — shared by the job list, its status
+    counts and the "Added by" counts, so every number on the tab means the same filtered set.
+    Dates are naive-UTC bounds: date_from inclusive, date_to exclusive."""
+    from sqlalchemy import func, or_
+
+    conds = []
+    if status:
+        conds.append(JobRow.status == status)
+    if reported:
+        # Reported jobs are flagged=True in the JSON data column.
+        conds.append(JobRow.data['flagged'].as_boolean() == True)  # noqa: E712
+    if created_by:
+        # Restrict to jobs this user uploaded (job_adder scoping).
+        conds.append(JobRow.created_by_user_id == created_by)
+    if added_by == ADDED_BY_NONE:
+        conds.append(func.coalesce(func.trim(_ADDED_BY_SQL), '') == '')
+    elif added_by.strip():
+        conds.append(func.lower(func.trim(_ADDED_BY_SQL)) == added_by.strip().lower())
+    if region and region.upper() not in ('', 'ALL', 'ANY'):
+        conds.append(JobRow.region == region.upper())
+    if company:
+        conds.append(func.lower(JobRow.company) == company.strip().lower())
+    if q:
+        like = f"%{q.strip().lower()}%"
+        conds.append(or_(
+            func.lower(JobRow.company).like(like),
+            func.lower(JobRow.job_title).like(like),
+        ))
+    if date_from is not None:
+        conds.append(JobRow.submitted_at >= date_from)
+    if date_to is not None:
+        conds.append(JobRow.submitted_at < date_to)
+    return conds
+
 _URL_TRACKING_PARAMS = frozenset({
     'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
     'ref', 'source', 'src', 'referral', 'referer', 'fbclid', 'gclid',
@@ -1870,10 +1914,15 @@ class Storage:
         date_to: datetime | None = None,
         reported: bool = False,
         created_by: str = '',
+        added_by: str = '',
         page: int = 1,
         page_size: int = 20,
     ) -> dict:
         """Server-side filtered + paginated job listing.
+
+        `added_by` matches the "Added by" name shown on each job (created_by_username,
+        case-insensitive) — a local user for manual jobs, the VPS1 adder for synced ones.
+        ADDED_BY_NONE selects the jobs with no adder on record.
 
         Returns {jobs: [...light dicts...], total, page, page_size,
         counts: {status -> n}} where counts respect every filter EXCEPT
@@ -1883,30 +1932,10 @@ class Storage:
         from sqlalchemy import func, or_
 
         def _base_conditions(include_status: bool):
-            conds = []
-            if include_status and status:
-                conds.append(JobRow.status == status)
-            if reported:
-                # Reported jobs are flagged=True in the JSON data column.
-                conds.append(JobRow.data['flagged'].as_boolean() == True)  # noqa: E712
-            if created_by:
-                # Restrict to jobs this user uploaded (job_adder scoping).
-                conds.append(JobRow.created_by_user_id == created_by)
-            if region and region.upper() not in ('', 'ALL', 'ANY'):
-                conds.append(JobRow.region == region.upper())
-            if company:
-                conds.append(func.lower(JobRow.company) == company.strip().lower())
-            if q:
-                like = f"%{q.strip().lower()}%"
-                conds.append(or_(
-                    func.lower(JobRow.company).like(like),
-                    func.lower(JobRow.job_title).like(like),
-                ))
-            if date_from is not None:
-                conds.append(JobRow.submitted_at >= date_from)
-            if date_to is not None:
-                conds.append(JobRow.submitted_at < date_to)
-            return conds
+            return _job_filter_conditions(
+                status=status if include_status else '', region=region, company=company, q=q,
+                date_from=date_from, date_to=date_to, reported=reported,
+                created_by=created_by, added_by=added_by)
 
         page = max(1, int(page or 1))
         page_size = max(1, min(int(page_size or 20), 200))
@@ -1967,6 +1996,54 @@ class Storage:
             'page_size': page_size,
             'counts': counts,
         }
+
+    def active_account_names(self) -> set[str] | None:
+        """Lower-cased usernames + full names of every account that exists right now: this
+        server's users and VPS1's (the vps1_users mirror, re-read from VPS1 every hour by
+        core/vps1_sync.py — an account deleted on VPS1 drops out within the hour).
+
+        Filter lists built from history (who added a job, who applied) use this to leave out
+        deleted accounts. None when the VPS1 mirror is empty (never synced, or VPS1 not set up):
+        then nothing can be told apart, and callers must not filter at all."""
+        remote = self.get_vps1_users()
+        if not remote:
+            return None
+        names: set[str] = set()
+        for u in list(self.get_users()) + list(remote):
+            for k in ('username', 'full_name'):
+                v = str(u.get(k) or '').strip().lower()
+                if v:
+                    names.add(v)
+        return names
+
+    def job_adders(self, **filters) -> list[dict]:
+        """The Jobs tab's "Added by" options: everyone with a live account who added a job in the
+        set the OTHER filters select (period, status, region, search…; `filters` takes
+        _job_filter_conditions' arguments except added_by) — [{name, count}] sorted by name, plus
+        {name: '', count} for jobs with no adder on record. A count is exactly what picking that
+        option would list. Grouped case-insensitively (one person, one option); the spelling
+        shown is the most common one."""
+        from sqlalchemy import func
+
+        filters.pop('added_by', None)
+        key = func.lower(func.trim(func.coalesce(_ADDED_BY_SQL, '')))
+        stmt = select(key, func.trim(_ADDED_BY_SQL), func.count()).select_from(JobRow)
+        for c in _job_filter_conditions(**filters):
+            stmt = stmt.where(c)
+        with session_scope(self.db_path) as session:
+            rows = session.execute(stmt.group_by(key, func.trim(_ADDED_BY_SQL))).all()
+        by_key: dict[str, dict] = {}
+        for k, spelled, n in rows:
+            entry = by_key.setdefault(k or '', {'name': spelled or '', 'count': 0, '_best': 0})
+            entry['count'] += int(n)
+            if int(n) > entry['_best']:
+                entry['name'], entry['_best'] = spelled or '', int(n)
+        # Deleted accounts (here or on VPS1) are left out; their jobs keep the name they were
+        # added under, and "All" still shows them.
+        active = self.active_account_names()
+        out = [{'name': e['name'], 'count': e['count']} for k, e in by_key.items()
+               if active is None or not k or k in active]
+        return sorted(out, key=lambda e: (e['name'] == '', e['name'].lower()))
 
     # ── Company intelligence (startup / size / age) ─────────────────────────
     @staticmethod

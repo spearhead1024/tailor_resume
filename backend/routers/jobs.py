@@ -140,6 +140,7 @@ def list_jobs(
     date_from: str = Query(""),
     date_to: str = Query(""),
     reported: bool = Query(False),
+    added_by: str = Query(""),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     user: dict = Depends(get_current_user),
@@ -149,9 +150,11 @@ def list_jobs(
     Returns {jobs, total, page, page_size, counts}. The `jobs` list omits the
     heavy description/note fields — GET /api/jobs/{id} returns the full row.
     Pass reported=true to show only flagged (reported) jobs for review.
+    added_by (admins only) narrows to one adder's jobs — see storage.query_jobs.
     """
     # Job-adders only see jobs they uploaded; admins see every job.
-    created_by = "" if user.get("is_admin") else user.get("id", "")
+    is_admin = bool(user.get("is_admin"))
+    created_by = "" if is_admin else user.get("id", "")
     return storage.query_jobs(
         status=status,
         region=region,
@@ -161,9 +164,30 @@ def list_jobs(
         date_to=_et_date_to_utc(date_to, end=True),
         reported=reported,
         created_by=created_by,
+        added_by=added_by if is_admin else "",   # a job_adder's list is already just their own
         page=page,
         page_size=page_size,
     )
+
+
+@router.get("/adders")
+def list_job_adders(
+    status: str = Query(""),
+    region: str = Query(""),
+    company: str = Query(""),
+    q: str = Query(""),
+    date_from: str = Query(""),
+    date_to: str = Query(""),
+    reported: bool = Query(False),
+    user: dict = Depends(require_role("admin")),
+):
+    """Options for the Jobs tab's "Added by" filter: [{name, count}], counted within the same
+    filters as the list (GET /api/jobs, minus added_by itself) — so each count is what picking
+    that adder would show. name '' = no adder on record. Admin only, like the Added by column."""
+    return storage.job_adders(
+        status=status, region=region, company=company, q=q,
+        date_from=_et_date_to_utc(date_from), date_to=_et_date_to_utc(date_to, end=True),
+        reported=reported)
 
 
 @router.post("/sync-now")

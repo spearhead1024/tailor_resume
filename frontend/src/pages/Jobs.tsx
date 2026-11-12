@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useQuery, useQueryClient, useMutation, keepPreviousData } from '@tanstack/react-query';
 import { useUrlState, useOnChange } from '../lib/urlState';
 import { api } from '../api/client';
@@ -15,7 +15,6 @@ const LAST_REGION_KEY = 'jobs.lastRegion';
 const lastRegion = () => { try { return localStorage.getItem(LAST_REGION_KEY) || 'US'; } catch { return 'US'; } };
 const rememberRegion = (r: string) => { try { localStorage.setItem(LAST_REGION_KEY, r); } catch { /* storage blocked */ } };
 const blankJob = () => ({ ...BLANK_JOB, region: lastRegion() });
-type GroupBy = 'day' | 'region' | 'status' | 'company';
 
 function formatJobError(err: any, fallback: string): string {
   const d = err?.response?.data?.detail;
@@ -66,7 +65,7 @@ function DuplicateNotice({ checking, conflicts }: { checking: boolean; conflicts
   if (!conflicts.length) return null;
   return (
     <div style={{ margin: '-4px 0 12px', padding: '0.55rem 0.75rem', borderRadius: 8, fontSize: '0.85rem',
-      background: 'rgba(220,38,38,0.10)', border: '1px solid rgba(220,38,38,0.45)', color: 'var(--danger,#f87171)' }}>
+      background: 'rgba(220,38,38,0.10)', border: '1px solid rgba(220,38,38,0.45)', color: 'var(--st-danger-fg, var(--danger))' }}>
       <strong>Can't save — duplicate:</strong>
       <ul style={{ margin: '4px 0 0', paddingLeft: '1.1rem' }}>
         {conflicts.map((c, i) => <li key={i}>{c.message}</li>)}
@@ -83,6 +82,24 @@ interface JobsResponse {
   counts: Record<string, number>;
 }
 
+// Compact filter-bar controls: the global input/select rule is width:100%, which is what stretched
+// the old bar over two lines. Every control here has its own width and never grows.
+// One size for every control — inputs, selects, date pickers and buttons alike: the same height,
+// font size and weight, with the padding set so the content box can't push the height around.
+const CTRL_H = 34;
+const FILTER: CSSProperties = {
+  flex: '0 0 auto', height: CTRL_H, boxSizing: 'border-box', padding: '0 0.6rem',
+  fontSize: '0.84rem', fontWeight: 400, lineHeight: 'normal',
+};
+const FILTER_BTN: CSSProperties = { ...FILTER, padding: '0 0.75rem', fontWeight: 500, whiteSpace: 'nowrap', justifyContent: 'center' };
+const FILTER_LABEL: CSSProperties = {
+  flex: '0 0 auto', fontSize: '0.84rem', color: 'var(--muted)', whiteSpace: 'nowrap',
+  textTransform: 'none', letterSpacing: 0, fontWeight: 400, margin: 0,
+};
+
+// ?added_by= value for "no adder on record" — must match storage.ADDED_BY_NONE on the server.
+const ADDED_BY_NONE = '__none__';
+
 export default function Jobs() {
   const { user } = useAuth();
   const qc = useQueryClient();
@@ -98,11 +115,12 @@ export default function Jobs() {
   const [statusFilter, setStatusFilter] = useUrlState('status', 'approved');
   const [regionFilter, setRegionFilter] = useUrlState('region', '');
   const [companyFilter, setCompanyFilter] = useUrlState('company', '');
+  // Admin-only: one adder's jobs (the "Added by" column). ADDED_BY_NONE = jobs with no adder on record.
+  const [addedByFilter, setAddedByFilter] = useUrlState('added_by', '');
   // Default to today (ET) so the Jobs tab opens on today's intake.
   const [dateFrom, setDateFrom] = useUrlState('from', todayETKey());
   const [dateTo, setDateTo] = useUrlState('to', todayETKey());
   const [reportedOnly, setReportedOnly] = useUrlState('reported', false);
-  const [groupBy, setGroupBy] = useUrlState<GroupBy>('group', 'day');
   const [page, setPage] = useUrlState('page', 1);
   const [pageSize, setPageSize] = useUrlState('size', 20);
 
@@ -123,9 +141,11 @@ export default function Jobs() {
   }, [query]);
 
   // Back to page 1 whenever a filter changes (not on load — the URL's page stands).
-  useOnChange([debouncedQuery, statusFilter, regionFilter, companyFilter, dateFrom, dateTo, reportedOnly, pageSize], () => setPage(1));
+  useOnChange([debouncedQuery, statusFilter, regionFilter, companyFilter, addedByFilter, dateFrom, dateTo, reportedOnly, pageSize], () => setPage(1));
 
-  const params = useMemo(() => {
+  // Every filter EXCEPT Added by — also what the "Added by" counts are computed within, so each
+  // option's count is exactly what picking it would list.
+  const filterParams = useMemo(() => {
     const sp = new URLSearchParams();
     // In reported-review mode, ignore the status filter so flagged jobs of any
     // status surface together.
@@ -136,10 +156,15 @@ export default function Jobs() {
     if (dateFrom) sp.set('date_from', dateFrom);
     if (dateTo) sp.set('date_to', dateTo);
     if (reportedOnly) sp.set('reported', 'true');
+    return sp.toString();
+  }, [statusFilter, regionFilter, companyFilter, debouncedQuery, dateFrom, dateTo, reportedOnly]);
+  const params = useMemo(() => {
+    const sp = new URLSearchParams(filterParams);
+    if (isAdmin && addedByFilter) sp.set('added_by', addedByFilter);
     sp.set('page', String(page));
     sp.set('page_size', String(pageSize));
     return sp.toString();
-  }, [statusFilter, regionFilter, companyFilter, debouncedQuery, dateFrom, dateTo, reportedOnly, page, pageSize]);
+  }, [filterParams, addedByFilter, isAdmin, page, pageSize]);
 
   const { data, isLoading, isFetching } = useQuery({
     queryKey: ['jobs', params],
@@ -148,6 +173,15 @@ export default function Jobs() {
     // While any visible company is still being checked (a just-added job), poll so
     // its startup/size badge fills in on its own; stop once all are resolved.
     refetchInterval: (q) => (q.state.data?.jobs || []).some((j: any) => j.company_info?.status === 'pending') ? 5000 : false,
+  });
+
+  // Options for the "Added by" filter — adders with jobs in the current filters (period, status,
+  // region, search…), each with that count. Kept while the next one loads so the list doesn't blink.
+  const { data: adders = [] } = useQuery({
+    queryKey: ['jobs', 'adders', filterParams],
+    queryFn: () => api.get<{ name: string; count: number }[]>(`/api/jobs/adders?${filterParams}`),
+    enabled: isAdmin,
+    placeholderData: keepPreviousData,
   });
 
   const jobs = data?.jobs || [];
@@ -242,12 +276,9 @@ export default function Jobs() {
   };
   const bulkDelete = () => { if (!confirm(`Delete ${selected.size} selected job(s)?`)) return; runBulk('Deleted', (id) => api.delete(`/api/jobs/${id}`)); };
 
-  // Group the current page by the selected dimension.
+  // Group the current page by the day each job was added (ET).
   const groups = useMemo(() => {
     const keyOf = (job: any): { key: string; label: string } => {
-      if (groupBy === 'region') return { key: job.region || '—', label: `Region: ${job.region || '—'}` };
-      if (groupBy === 'status') return { key: job.status || '—', label: `Status: ${job.status || '—'}` };
-      if (groupBy === 'company') return { key: job.company || '—', label: job.company || '—' };
       const ts = job.submitted_at || job.approved_at || '';
       return { key: etDateKey(ts), label: formatDay(ts) };
     };
@@ -259,7 +290,7 @@ export default function Jobs() {
       else out.push({ key, label, jobs: [job] });
     }
     return out;
-  }, [jobs, groupBy]);
+  }, [jobs]);
 
   async function handleCreate(keepOpen = false) {
     // Manually-added jobs (by admins or job_adders) go live as approved.
@@ -297,14 +328,14 @@ export default function Jobs() {
 
   // "Today" resets dates to today (the default view); "all dates" clears them.
   function resetToToday() {
-    setQuery(''); setRegionFilter(''); setCompanyFilter('');
+    setQuery(''); setRegionFilter(''); setCompanyFilter(''); setAddedByFilter('');
     setDateFrom(todayETKey()); setDateTo(todayETKey());
   }
   function showAllDates() { setDateFrom(''); setDateTo(''); }
 
   const today = todayETKey();
   const isTodayOnly = dateFrom === today && dateTo === today;
-  const hasExtraFilters = !!(regionFilter || companyFilter || query || !isTodayOnly);
+  const hasExtraFilters = !!(regionFilter || companyFilter || addedByFilter || query || !isTodayOnly);
 
   return (
     <div>
@@ -325,50 +356,73 @@ export default function Jobs() {
         </button>
       </div>
 
-      {/* Filter bar */}
-      <div style={{ display: 'flex', gap: 8, marginBottom: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
+      {/* Filter bar — ONE line on a desktop screen: every control is compact and fixed-width, only
+          the search box flexes. On a screen too narrow to fit it the line scrolls sideways rather
+          than wrapping, so the controls never reflow under each other. */}
+      <div style={{ display: 'flex', gap: 6, marginBottom: '0.75rem', alignItems: 'center', flexWrap: 'nowrap', overflowX: 'auto', paddingBottom: 2 }}>
         <input placeholder="Search company or title…" value={query}
-          onChange={(e) => setQuery(e.target.value)} style={{ maxWidth: 220 }} />
-        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ maxWidth: 150 }}>
+          onChange={(e) => setQuery(e.target.value)} style={{ ...FILTER, flex: '1 1 170px', minWidth: 120, maxWidth: 260 }} />
+        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ ...FILTER, width: 110 }} title="Status">
           <option value="">All statuses</option>
           <option value="approved">Approved</option>
           <option value="pending">Pending</option>
           <option value="rejected">Rejected</option>
           <option value="deleted">Deleted</option>
         </select>
-        <select value={regionFilter} onChange={(e) => setRegionFilter(e.target.value)} style={{ maxWidth: 120 }}>
+        <select value={regionFilter} onChange={(e) => setRegionFilter(e.target.value)} style={{ ...FILTER, width: 100 }} title="Region">
           <option value="">All regions</option>
           <option value="US">US</option><option value="EU">EU</option>
           <option value="ASIA">ASIA</option><option value="GLOBAL">GLOBAL</option>
         </select>
-        <input placeholder="Company (exact)" value={companyFilter}
-          onChange={(e) => setCompanyFilter(e.target.value)} style={{ maxWidth: 160 }} />
-        <label style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>From</label>
-        <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} style={{ maxWidth: 150 }} title="ET date" />
-        <label style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>To</label>
-        <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} style={{ maxWidth: 150 }} title="ET date" />
-        <button className={isTodayOnly ? '' : 'secondary'} onClick={resetToToday}
-          style={{ fontSize: '0.82rem' }} title="Show only today's jobs (ET)">Today</button>
-        {(dateFrom || dateTo) && (
-          <button className="secondary" onClick={showAllDates} style={{ fontSize: '0.82rem' }} title="Remove the date filter">All dates</button>
+        {isAdmin && <label htmlFor="jobs-added-by" style={FILTER_LABEL}>Added by</label>}
+        {isAdmin && (
+          <select id="jobs-added-by" value={addedByFilter} onChange={(e) => setAddedByFilter(e.target.value)}
+            style={{ ...FILTER, width: 124 }} title="Show only the jobs one person added">
+            <option value="">All</option>
+            {/* The person picked may have no jobs under the other filters (or be a deleted account
+                named in a link) — keep them shown as the selection, not blank. */}
+            {addedByFilter && addedByFilter !== ADDED_BY_NONE
+              && !adders.some((a) => a.name.toLowerCase() === addedByFilter.toLowerCase())
+              && <option value={addedByFilter}>{addedByFilter} (0)</option>}
+            {adders.filter((a) => a.name).map((a) => (
+              <option key={a.name} value={a.name}>{a.name} ({a.count})</option>
+            ))}
+            {adders.some((a) => !a.name) && (
+              <option value={ADDED_BY_NONE}>— Unknown ({adders.find((a) => !a.name)?.count}) —</option>
+            )}
+          </select>
         )}
-        <label style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>Group by</label>
-        <select value={groupBy} onChange={(e) => setGroupBy(e.target.value as GroupBy)} style={{ maxWidth: 120 }}>
-          <option value="day">Day</option>
-          <option value="region">Region</option>
-          <option value="status">Status</option>
-          <option value="company">Company</option>
-        </select>
+        {/* There is no Company box any more (Search covers it), but a link can still open one company
+            (the Screenshots tab's "Job" button does) — show that filter so it can be seen and removed. */}
+        {companyFilter && (
+          <span style={{ ...FILTER, display: 'inline-flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap', maxWidth: 200,
+            border: '1px solid var(--border-soft)', borderRadius: 999, background: 'var(--panel-2)', color: 'var(--text-soft)' }}
+            title={`Company: ${companyFilter}`}>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>Company: {companyFilter}</span>
+            <button className="ghost" onClick={() => setCompanyFilter('')} title="Remove the company filter"
+              style={{ padding: '0 4px', border: 0, fontSize: '0.8rem' }}>✕</button>
+          </span>
+        )}
+        <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} style={{ ...FILTER, width: 130 }}
+          title="Added from (ET date)" aria-label="Added from" />
+        <span style={FILTER_LABEL}>–</span>
+        <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} style={{ ...FILTER, width: 130 }}
+          title="Added to (ET date)" aria-label="Added to" />
+        <button className={isTodayOnly ? '' : 'secondary'} onClick={resetToToday}
+          style={FILTER_BTN} title="Show only today's jobs (ET)">Today</button>
+        {(dateFrom || dateTo) && (
+          <button className="secondary" onClick={showAllDates} style={FILTER_BTN} title="Remove the date filter">All dates</button>
+        )}
         {hasExtraFilters && (
-          <button className="secondary" onClick={resetToToday} style={{ fontSize: '0.82rem' }}>Clear filters</button>
+          <button className="secondary" onClick={resetToToday} style={FILTER_BTN} title="Reset every filter to today's jobs">Clear</button>
         )}
         <label style={{
-          display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: '0.85rem',
+          ...FILTER_LABEL, display: 'inline-flex', alignItems: 'center', gap: 6, height: CTRL_H,
           marginLeft: 'auto', cursor: 'pointer',
-          color: reportedOnly ? 'var(--danger, #dc2626)' : 'var(--text)', fontWeight: reportedOnly ? 700 : 400,
+          color: reportedOnly ? 'var(--danger, #dc2626)' : 'var(--text)', fontWeight: reportedOnly ? 600 : 400,
         }}>
           <input type="checkbox" checked={reportedOnly} onChange={(e) => setReportedOnly(e.target.checked)} />
-          ⚑ Reported only
+          <span title="Show only jobs someone reported">⚑ Reported</span>
         </label>
       </div>
 
