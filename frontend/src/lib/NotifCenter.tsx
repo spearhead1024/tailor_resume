@@ -74,7 +74,7 @@ function NotifDialog({ n, onClose, onOpenBoard }: { n: Notif; onClose: () => voi
   const tag = (txt: string, bg: string, fg: string) => (
     <span style={{ fontSize: '0.66rem', fontWeight: 700, padding: '1px 6px', borderRadius: 4, background: bg, color: fg, marginLeft: 6 }}>{txt}</span>);
   return (
-    <div onMouseDown={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 400,
+    <div onMouseDown={onClose} style={{ position: 'fixed', inset: 0, background: 'var(--overlay)', zIndex: 400,
       display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem' }}>
       <div className="card" role="dialog" aria-modal="true" aria-label={n.title} onMouseDown={(e) => e.stopPropagation()}
         style={{ width: 'min(560px, 100%)', maxHeight: '82vh', overflowY: 'auto', padding: '1rem 1.15rem' }}>

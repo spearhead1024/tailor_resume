@@ -26,10 +26,10 @@ export type CompanyInfo = {
 };
 
 const PILL: Record<string, { label: string; bg: string; fg: string }> = {
-  startup:     { label: 'Startup',     bg: 'rgba(22,163,74,0.16)',   fg: '#4ade80' },
-  not_startup: { label: 'Not startup', bg: 'rgba(148,163,184,0.16)', fg: '#94a3b8' },
-  unknown:     { label: 'Unknown',     bg: 'rgba(234,179,8,0.14)',   fg: '#facc15' },
-  pending:     { label: 'Checking…',   bg: 'rgba(59,130,246,0.14)',  fg: '#93c5fd' },
+  startup:     { label: 'Startup',     bg: 'rgba(22,163,74,0.16)',   fg: 'var(--badge-green-fg)' },
+  not_startup: { label: 'Not startup', bg: 'rgba(148,163,184,0.16)', fg: 'var(--badge-gray-fg)' },
+  unknown:     { label: 'Unknown',     bg: 'rgba(234,179,8,0.14)',   fg: 'var(--badge-yellow-fg)' },
+  pending:     { label: 'Checking…',   bg: 'rgba(59,130,246,0.14)',  fg: 'var(--badge-blue-fg)' },
 };
 
 export default function CompanyBadge({ info, isAdmin, onChanged, compact }: {

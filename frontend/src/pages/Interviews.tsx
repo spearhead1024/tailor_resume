@@ -76,7 +76,10 @@ const TYPES: { value: string; label: string }[] = [
   { value: 'email', label: 'Email' }, { value: 'phone', label: 'Phone' },
 ];
 /* Notion's documented dark-mode tag tokens — each select option resolves to one
-   of these {bg, text} pairs, so pills get Notion's muted look (not neon). */
+   of these {bg, text} pairs, so pills get Notion's muted look (not neon).
+   The `text` hex is also the option's stored identity (option.color). What's PAINTED comes from
+   styles.css (--iv-tag-<name>-bg/-fg, via tagPaint): the same values in dark, Notion's light tag
+   tokens in light. */
 const NOTION: Record<string, { bg: string; text: string }> = {
   gray:   { bg: '#252525', text: '#9B9B9B' },
   brown:  { bg: '#2E2724', text: '#A27763' },
@@ -89,6 +92,12 @@ const NOTION: Record<string, { bg: string; text: string }> = {
   red:    { bg: '#332523', text: '#BE524B' },
 };
 const NOTION_LIST = Object.values(NOTION);
+const NOTION_NAME = new Map(Object.entries(NOTION).map(([k, c]) => [c.text, k]));
+/** Theme-aware paint for a Notion token — CSS variables, so pills follow the light/dark theme. */
+const tagPaint = (c: { text: string }) => {
+  const k = NOTION_NAME.get(c.text) || 'gray';
+  return { bg: `var(--iv-tag-${k}-bg)`, fg: `var(--iv-tag-${k}-fg)` };
+};
 const PALETTE = NOTION_LIST.map((c) => c.text); // option.color stores the token's text hex
 
 /* Presence colours — WHO is editing a cell right now. The opposite job from the status pills above:
@@ -127,7 +136,7 @@ const SEL = '#2383E2';        // Coda/Sheets selection blue — the anchor cell'
  * ONE constant, used by both the plain cells (cellSel) and the stacked ones (StackedCell). It used to
  * be a hardcoded '#15212e' in StackedCell AND a separate `.iv-td-fill` rule in the CSS; the two drifted,
  * so selecting a row lit up the one unstacked column and left every stacked one looking untouched. */
-const SEL_FILL = `linear-gradient(rgba(35,131,226,0.62), rgba(35,131,226,0.62))`;
+const SEL_FILL = `linear-gradient(var(--iv-sel-fill), var(--iv-sel-fill))`;   // rgba(35,131,226,0.62) in dark; lighter in light (styles.css)
 // Fixed text columns: no ⋯ settings menu (can't be renamed/retyped/deleted). Still resizable + editable cells.
 // Merged primaries are locked so an admin can't rename/delete them out of sync with the MERGED map below
 // (admins can still edit their select-option lists via the ⋯ menu).
@@ -453,8 +462,8 @@ function FilterDropdown({ label, options, selected, onChange }: {
 }
 
 function Pill({ opt }: { opt: Opt }) {
-  const c = resolveNotion(opt.color);
-  return <span className="iv-pill" style={{ background: c.bg, color: c.text }}>{opt.label}</span>;
+  const c = tagPaint(resolveNotion(opt.color));
+  return <span className="iv-pill" style={{ background: c.bg, color: c.fg }}>{opt.label}</span>;
 }
 
 /* ---- cells: display-by-default, EDIT controlled by the grid (double-click) ----
@@ -642,7 +651,7 @@ function PersonCell({ value, editing, seed, avatar, onCommit, onDone }: Omit<Cel
       {name ? <>
         {avatar
           ? <img className="iv-av" src={avatar} alt="" style={{ objectFit: 'cover' }} />
-          : <span className="iv-av" style={{ background: 'rgba(68,122,203,0.20)', color: '#447ACB' }}>{initials(name)}</span>}
+          : <span className="iv-av" style={{ background: 'rgba(68,122,203,0.20)', color: 'var(--iv-person-fg)' }}>{initials(name)}</span>}
         <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
       </> : <span style={{ flex: 1 }} />}
       <span className="iv-caret">▾</span>
@@ -665,7 +674,7 @@ function LinkCell({ value, editing, seed, onCommit, onDone }: Omit<CellProps, 'c
       {href
         ? <a href={href} target="_blank" rel="noreferrer noopener" title={url} onClick={(e) => e.stopPropagation()} onMouseDown={stop} style={{ fontSize: '0.95rem', textDecoration: 'none', lineHeight: 1 }}>🌐</a>
         : <span title={`Unsafe link: ${url}`} style={{ opacity: 0.35, fontSize: '0.95rem', lineHeight: 1 }}>🌐</span>}
-      <span title={url} style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.78rem', color: href ? '#60a5fa' : '#9B9B9B' }}>{url}</span>
+      <span title={url} style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.78rem', color: href ? 'var(--iv-link)' : 'var(--iv-muted)' }}>{url}</span>
       <button className="iv-copybtn" title="Copy meeting link" onMouseDown={stop} onClick={copy}>⧉</button>
     </div>
   );
@@ -710,7 +719,7 @@ function ResumeCell({ value, editing, seed, onCommit, onDone }: Omit<CellProps, 
       <span onClick={downloadable ? open : undefined} onMouseDown={stop} title={downloadable ? 'Open / download resume' : raw}
         style={{ fontSize: '0.95rem', lineHeight: 1, cursor: downloadable ? 'pointer' : 'default', opacity: downloadable ? 1 : 0.55 }}>📄</span>
       <span onClick={downloadable ? open : undefined} onMouseDown={stop} title={raw}
-        style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.78rem', color: downloadable ? '#60a5fa' : '#9B9B9B', cursor: downloadable ? 'pointer' : 'default' }}>{label}</span>
+        style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.78rem', color: downloadable ? 'var(--iv-link)' : 'var(--iv-muted)', cursor: downloadable ? 'pointer' : 'default' }}>{label}</span>
       <button className="iv-copybtn" title="Copy resume link" onMouseDown={stop} onClick={copy}>⧉</button>
     </div>
   );
@@ -797,7 +806,7 @@ function ConfirmModal({ title, message, confirmLabel = 'Delete', danger, onConfi
     <div className="iv-modal-backdrop" onMouseDown={onCancel}>
       <div className="iv-modal iv-modal--sm" onMouseDown={(e) => e.stopPropagation()}>
         <div className="iv-modal-hd"><div className="iv-modal-title">{title}</div></div>
-        <div style={{ padding: '2px 18px 6px', fontSize: '0.86rem', color: '#CFCFCF', lineHeight: 1.55 }}>{message}</div>
+        <div style={{ padding: '2px 18px 6px', fontSize: '0.86rem', color: 'var(--iv-text-soft)', lineHeight: 1.55 }}>{message}</div>
         <div className="iv-modal-ft">
           <span />
           <div style={{ display: 'flex', gap: 8 }}>
@@ -1018,16 +1027,16 @@ function SwatchPicker({ value, onChange }: { value: string; onChange: (hex: stri
   return (
     <div ref={ref} style={{ position: 'relative', flex: '0 0 auto' }}>
       <button type="button" title="Pill color" onClick={() => setOpen((o) => !o)}
-        style={{ width: 24, height: 24, borderRadius: 4, border: '1px solid rgba(255,255,255,0.15)', background: cur.bg, cursor: 'pointer', padding: 0 }}>
-        <span style={{ display: 'block', width: 10, height: 10, borderRadius: '50%', background: cur.text, margin: '0 auto' }} />
+        style={{ width: 24, height: 24, borderRadius: 4, border: '1px solid rgba(var(--iv-ink),0.15)', background: tagPaint(cur).bg, cursor: 'pointer', padding: 0 }}>
+        <span style={{ display: 'block', width: 10, height: 10, borderRadius: '50%', background: tagPaint(cur).fg, margin: '0 auto' }} />
       </button>
       {open && (
         <div className="card" style={{ position: 'absolute', top: '112%', left: 0, zIndex: 70, padding: 8, display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 6, width: 178 }}>
           {NOTION_LIST.map((c) => (
             <button key={c.text} type="button" title={c.text} onClick={() => { onChange(c.text); setOpen(false); }}
-              style={{ width: 26, height: 26, borderRadius: 5, padding: 0, cursor: 'pointer', background: c.bg,
-                border: cur.text === c.text ? '2px solid #2383e2' : '1px solid rgba(255,255,255,0.12)' }}>
-              <span style={{ display: 'block', width: 11, height: 11, borderRadius: '50%', background: c.text, margin: '0 auto' }} />
+              style={{ width: 26, height: 26, borderRadius: 5, padding: 0, cursor: 'pointer', background: tagPaint(c).bg,
+                border: cur.text === c.text ? '2px solid #2383e2' : '1px solid rgba(var(--iv-ink),0.12)' }}>
+              <span style={{ display: 'block', width: 11, height: 11, borderRadius: '50%', background: tagPaint(c).fg, margin: '0 auto' }} />
             </button>
           ))}
         </div>
@@ -2510,7 +2519,7 @@ export default function Interviews() {
             {isAdmin && (
               <tr className="iv-addrow" onClick={() => addRow()}   /* not {addRow} — that would spread the MouseEvent into the new row's cells */
                   title={hasFilters ? 'Add a row (clears the filters, or the new empty row would be filtered out)' : 'Add a row'}>
-                <td className="iv-gutter" style={{ cursor: 'pointer', color: '#9B9B9B' }}>+</td>
+                <td className="iv-gutter" style={{ cursor: 'pointer', color: 'var(--iv-muted)' }}>+</td>
                 <td colSpan={ncols} style={{ cursor: 'pointer' }} />
                 <td className="iv-rowend" />
               </tr>

@@ -150,7 +150,7 @@ function ResumePreview({ resumeId, profileName }: { resumeId: string; profileNam
             ⭳ Download PDF
           </button>
         </div>
-        <div style={{ flex: 1, minHeight: 0, background: '#262626' }}>
+        <div style={{ flex: 1, minHeight: 0, background: 'var(--preview-bg)' }}>
           {!resumeId && (
             <div className="muted" style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '2rem' }}>
               Generate a resume to preview it here.

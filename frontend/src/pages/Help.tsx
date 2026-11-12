@@ -343,7 +343,7 @@ function AutoUpdateGuide({ extId }: { extId: string }) {
   return (
     <div className="card" style={{ marginBottom: '1rem' }}>
       <h2 style={{ marginTop: 0 }}>Auto-update setup — managed policy (one-time, needs admin)</h2>
-      <div className="card" style={{ background: '#3a1a1a', border: '1px solid #a51f30', fontSize: '0.85rem', marginBottom: 12 }}>
+      <div className="card" style={{ background: 'var(--callout-danger-bg)', border: '1px solid var(--callout-danger-bd)', fontSize: '0.85rem', marginBottom: 12 }}>
         🛑 <strong>Requires an enterprise-managed Chrome.</strong> Chrome only force-installs a self-hosted (non-Web-Store)
         extension on machines that are <strong>domain-joined</strong> or enrolled in <strong>Chrome Browser Cloud
         Management</strong>. On a normal/personal PC this policy is <strong>blocked</strong> — at <code>chrome://policy</code>

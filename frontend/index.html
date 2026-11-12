@@ -8,6 +8,22 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="mask-icon" href="/favicon.svg" color="#1a3287" />
     <meta name="theme-color" content="#16307d" />
+    <!-- Theme, applied BEFORE first paint so there is no flash of the wrong one. Preference lives in
+         localStorage 'tailorresume.theme' ('light' | 'dark'; absent = follow the system). Kept in sync
+         with src/lib/theme.ts, which takes over once the app loads. -->
+    <script>
+      (function () {
+        var p = null, t;
+        try { p = localStorage.getItem('tailorresume.theme'); } catch (e) {}
+        if (p === 'light' || p === 'dark') t = p;
+        else t = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        var d = document.documentElement;
+        d.setAttribute('data-theme', t);
+        d.style.colorScheme = t;
+        var m = document.querySelector('meta[name="theme-color"]');
+        if (m) m.setAttribute('content', t === 'light' ? '#ffffff' : '#16307d');
+      })();
+    </script>
     <title>TailorResume</title>
   </head>
   <body>

@@ -1,5 +1,11 @@
-/* ── Design tokens ──────────────────────────────────────────────────────── */
-:root {
+/* ── Design tokens ──────────────────────────────────────────────────────────
+   Every colour in the app is a token. <html data-theme="dark|light"> picks the set (resolved by the
+   inline script in index.html and src/lib/theme.ts). DARK is the default and the original look —
+   its values are the app's historical colours, unchanged; LIGHT overrides them below.
+   Groups: core chrome · status (banners/pills/badges) · --iv-* the Interviews board (Notion tokens) ·
+   --cal-* the calendar (slate). Overlay hairlines/hovers use an "ink" triplet: rgba(var(--ink), a). */
+:root,
+:root[data-theme="dark"] {
   --bg:          #090e1a;
   --panel:       #0f1629;
   --panel-2:     #141e35;
@@ -19,9 +25,284 @@
   --warning:     #f59e0b;
   --warning-bg:  rgba(245,158,11,0.12);
 
+  --ink:         255,255,255;
+  --shadow-card: 0 1px 3px rgba(0,0,0,0.35), 0 4px 12px rgba(0,0,0,0.2);
+  --shadow-btn:  0 1px 3px rgba(0,0,0,0.25);
+  --shadow-lg:   0 8px 40px rgba(0,0,0,0.45);
+  --shadow-pop:  0 8px 28px rgba(0,0,0,0.55);
+  --overlay:     rgba(0,0,0,0.55);
+
+  /* status text — sits on the translucent status tints (banners, pills, badges) */
+  --st-success-fg: #6ee7b7;
+  --st-danger-fg:  #fca5a5;
+  --st-warning-fg: #fcd34d;
+  --st-info-fg:    #93c5fd;
+  --st-neutral-fg: #94a3b8;
+  --selection-fg:  #c2d6f6;
+  --link-soft:     #7fb0ec;
+  --avatar-bg:     #3b82f640;
+  --avatar-fg:     #93c5fd;
+  --detail-bg:     #1c1c1f;
+  --toast-bg:      #141a2b;
+  --preview-bg:    #262626;
+  --stage-bg:      #0b1120;
+  --callout-danger-bg: #3a1a1a;
+  --callout-danger-bd: #a51f30;
+  --badge-green-fg:  #4ade80;
+  --badge-gray-fg:   #94a3b8;
+  --badge-yellow-fg: #facc15;
+  --badge-blue-fg:   #93c5fd;
+  --src-remote:      #a855f7;
+  --src-onsite:      #22c55e;
+
+  /* Interviews board — Notion's dark tokens */
+  --iv-ink:          255,255,255;
+  --iv-bg:           #191919;
+  --iv-row-odd:      #202024;
+  --iv-row-hover:    #2e2f36;
+  --iv-row-next:     #3b3418;
+  --iv-row-next-hover: #574c1d;
+  --iv-row-past:     #232428;
+  --iv-row-past-hover: #383a43;
+  --iv-row-past-text: #74767e;
+  --iv-past-dim:     0.62;
+  --iv-sel-fill:     rgba(35,131,226,0.62);
+  --iv-text:         #D4D4D4;
+  --iv-text-hi:      #E6E6E6;
+  --iv-text-soft:    #CFCFCF;
+  --iv-title:        #EDEDED;
+  --iv-icon:         #c9c9c9;
+  --iv-muted:        #9B9B9B;
+  --iv-muted-2:      #8b8b8b;
+  --iv-faint:        #6b6b6b;
+  --iv-focus:        #2383E2;
+  --iv-link:         #60a5fa;
+  --iv-link-chat:    #6ab0ff;
+  --iv-blue-fg:      #7aa7e0;
+  --iv-on-fg:        #6a9ce0;
+  --iv-person-fg:    #447ACB;
+  --iv-danger:       #ff6b6b;
+  --iv-panel:        #1f1f1f;
+  --iv-input-bg:     #2a2a2a;
+  --iv-bubble:       #262626;
+  --iv-bubble-mine:  #1d3a5f;
+  --iv-chat-text:    #E9E9E9;
+  --iv-chat-meta:    #8a8a8a;
+  --iv-chat-del:     #b06a6a;
+  --iv-pc-strong:    #E4E4E4;
+  --iv-pc-text:      #C4C4C4;
+  --iv-pc-bullet:    #B8B8B8;
+  --iv-pc-err:       #f0a3a3;
+  --iv-pc-tag:       #cfe0f5;
+  --iv-modal-shadow: 0 16px 48px rgba(0,0,0,0.5);
+  /* select pills (Notion tag tokens) */
+  --iv-tag-gray-bg:   #252525; --iv-tag-gray-fg:   #9B9B9B;
+  --iv-tag-brown-bg:  #2E2724; --iv-tag-brown-fg:  #A27763;
+  --iv-tag-orange-bg: #36291F; --iv-tag-orange-fg: #CB7B37;
+  --iv-tag-yellow-bg: #372E20; --iv-tag-yellow-fg: #C19138;
+  --iv-tag-green-bg:  #242B26; --iv-tag-green-fg:  #4F9768;
+  --iv-tag-blue-bg:   #1F282D; --iv-tag-blue-fg:   #447ACB;
+  --iv-tag-purple-bg: #2A2430; --iv-tag-purple-fg: #865DBB;
+  --iv-tag-pink-bg:   #2E2328; --iv-tag-pink-fg:   #BA4A78;
+  --iv-tag-red-bg:    #332523; --iv-tag-red-fg:    #BE524B;
+
+  /* Calendar — slate */
+  --cal-surface:   #0d1119;
+  --cal-border:    #1e293b;
+  --cal-line:      #161f30;
+  --cal-hover:     #151d2c;
+  --cal-active:    #1e293b;
+  --cal-ring:      #334155;
+  --cal-label:     #64748b;
+  --cal-text:      #cbd5e1;
+  --cal-text-2:    #94a3b8;
+  --cal-text-hi:   #e2e8f0;
+  --cal-text-max:  #f1f5f9;
+  --cal-ro:        #475569;
+  --cal-chip:      #0f1725;
+  --cal-item:      #111827;
+  --cal-item-hover: #172033;
+  --cal-modal:     #0f1420;
+  --cal-modal-bd:  #263349;
+  --cal-modal-ft:  #0c111b;
+  --cal-tog-bd:    #243049;
+  --cal-accent:    #60a5fa;
+  --cal-warn:      #fbbf24;
+  --cal-backdrop:  rgba(2, 6, 14, 0.66);
+  --cal-shadow:    0 18px 50px rgba(0, 0, 0, 0.6);
+  --cal-draft-bg:  rgba(37, 99, 235, 0.38);
+  --cal-draft-fg:  #eff6ff;
+  --cal-draft-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+  --cal-grip:      rgba(255, 255, 255, 0.28);
+  --cal-ev-hover:  brightness(1.25);
+  --cal-del-bg:    #7f1d1d;
+  --cal-del-bd:    #b91c1c;
+  --cal-del-fg:    #fecaca;
+  --cal-del-hover: #991b1b;
+  /* per-caller event colours (CalendarView PALETTE); the border/swatch hue is shared by both themes */
+  --cal-ev-blue-bg:   #1e3a5f; --cal-ev-blue-fg:   #bfdbfe;
+  --cal-ev-green-bg:  #14532d; --cal-ev-green-fg:  #bbf7d0;
+  --cal-ev-purple-bg: #4c1d95; --cal-ev-purple-fg: #e9d5ff;
+  --cal-ev-orange-bg: #7c2d12; --cal-ev-orange-fg: #fed7aa;
+  --cal-ev-cyan-bg:   #164e63; --cal-ev-cyan-fg:   #a5f3fc;
+  --cal-ev-pink-bg:   #701a3f; --cal-ev-pink-fg:   #fbcfe8;
+  --cal-ev-yellow-bg: #713f12; --cal-ev-yellow-fg: #fef08a;
+  --cal-ev-none-bg:   #2a2f3d; --cal-ev-none-fg:   #d1d5db;
+
+  color-scheme: dark;
+}
+
+/* Light — cool off-white canvas, white panels, slate text. Text tokens meet WCAG AA on the panels
+   they sit on; status text is the dark shade of its hue on the same light tints as dark mode. */
+:root[data-theme="light"] {
+  /* Metrics ✓/✗ counts: their mid-tone dark-theme colours are under AA on white — darker shades here only. */
+  --metric-ok: #15803d;
+  --metric-bad: #b91c1c;
+  --bg:          #f4f6fa;
+  --panel:       #ffffff;
+  --panel-2:     #f1f4f9;
+  --panel-3:     #e6ebf3;
+  --border:      #dde3ec;
+  --border-soft: #c9d3e1;
+  --text:        #111a2e;
+  --text-soft:   #334155;
+  --muted:       #586883;
+  --accent:      #2563eb;
+  --accent-glow: rgba(37,99,235,0.14);
+  --accent-dim:  #1d4ed8;
+  --success:     #047857;
+  --success-bg:  rgba(16,185,129,0.12);
+  --danger:      #dc2626;
+  --danger-bg:   rgba(239,68,68,0.10);
+  --warning:     #b45309;
+  --warning-bg:  rgba(245,158,11,0.14);
+
+  --ink:         15,23,42;
+  --shadow-card: 0 1px 2px rgba(15,23,42,0.06), 0 2px 8px rgba(15,23,42,0.05);
+  --shadow-btn:  0 1px 2px rgba(15,23,42,0.12);
+  --shadow-lg:   0 8px 32px rgba(15,23,42,0.12);
+  --shadow-pop:  0 8px 28px rgba(15,23,42,0.16);
+  --overlay:     rgba(15,23,42,0.4);
+
+  --st-success-fg: #065f46;
+  --st-danger-fg:  #991b1b;
+  --st-warning-fg: #854d0e;
+  --st-info-fg:    #1e40af;
+  --st-neutral-fg: #475569;
+  --selection-fg:  #1e3a8a;
+  --link-soft:     #1d4ed8;
+  --avatar-bg:     #dbeafe;
+  --avatar-fg:     #1d4ed8;
+  --detail-bg:     #f8fafc;
+  --toast-bg:      #ffffff;
+  --preview-bg:    #e5e7eb;
+  --stage-bg:      #e2e8f0;
+  --callout-danger-bg: #fef2f2;
+  --callout-danger-bd: #f5a3ad;
+  --badge-green-fg:  #166534;
+  --badge-gray-fg:   #475569;
+  --badge-yellow-fg: #854d0e;
+  --badge-blue-fg:   #1d4ed8;
+  --src-remote:      #7e22ce;
+  --src-onsite:      #15803d;
+
+  /* Interviews board — Notion's light tokens (text #37352F, ink rgb(55,53,47)) */
+  --iv-ink:          55,53,47;
+  --iv-bg:           #ffffff;
+  --iv-row-odd:      #f7f7f5;
+  --iv-row-hover:    #ececea;
+  --iv-row-next:     #fbf3db;
+  --iv-row-next-hover: #f5e6b5;
+  --iv-row-past:     #f1f1ef;
+  --iv-row-past-hover: #e5e5e2;
+  --iv-row-past-text: #7d7c78;
+  --iv-past-dim:     0.72;
+  --iv-sel-fill:     rgba(35,131,226,0.20);
+  --iv-text:         #37352f;
+  --iv-text-hi:      #2f2e2a;
+  --iv-text-soft:    #37352f;
+  --iv-title:        #1f1e1b;
+  --iv-icon:         #55534e;
+  --iv-muted:        #6b6a65;
+  --iv-muted-2:      #6b6a65;
+  --iv-faint:        #787772;
+  --iv-focus:        #2383E2;
+  --iv-link:         #1a6dc4;
+  --iv-link-chat:    #1a6dc4;
+  --iv-blue-fg:      #2c5ea8;
+  --iv-on-fg:        #2c5ea8;
+  --iv-person-fg:    #2c5ea8;
+  --iv-danger:       #c4342d;
+  --iv-panel:        #ffffff;
+  --iv-input-bg:     #ffffff;
+  --iv-bubble:       #f1f1ef;
+  --iv-bubble-mine:  #dcebfb;
+  --iv-chat-text:    #2f2e2a;
+  --iv-chat-meta:    #6b6a65;
+  --iv-chat-del:     #b4413c;
+  --iv-pc-strong:    #1f1e1b;
+  --iv-pc-text:      #45433e;
+  --iv-pc-bullet:    #55534e;
+  --iv-pc-err:       #b42318;
+  --iv-pc-tag:       #1e3a8a;
+  --iv-modal-shadow: 0 16px 48px rgba(15,15,15,0.16);
+  --iv-tag-gray-bg:   #e3e2e0; --iv-tag-gray-fg:   #32302c;
+  --iv-tag-brown-bg:  #eee0da; --iv-tag-brown-fg:  #442a1e;
+  --iv-tag-orange-bg: #fadec9; --iv-tag-orange-fg: #49290e;
+  --iv-tag-yellow-bg: #fdecc8; --iv-tag-yellow-fg: #402c1b;
+  --iv-tag-green-bg:  #dbeddb; --iv-tag-green-fg:  #1c3829;
+  --iv-tag-blue-bg:   #d3e5ef; --iv-tag-blue-fg:   #183347;
+  --iv-tag-purple-bg: #e8deee; --iv-tag-purple-fg: #412454;
+  --iv-tag-pink-bg:   #f5e0e9; --iv-tag-pink-fg:   #4c2337;
+  --iv-tag-red-bg:    #ffe2dd; --iv-tag-red-fg:    #5d1715;
+
+  --cal-surface:   #ffffff;
+  --cal-border:    #e2e8f0;
+  --cal-line:      #eef2f7;
+  --cal-hover:     #f1f5f9;
+  --cal-active:    #e2e8f0;
+  --cal-ring:      #cbd5e1;
+  --cal-label:     #64748b;
+  --cal-text:      #334155;
+  --cal-text-2:    #475569;
+  --cal-text-hi:   #0f172a;
+  --cal-text-max:  #0f172a;
+  --cal-ro:        #94a3b8;
+  --cal-chip:      #f1f5f9;
+  --cal-item:      #f8fafc;
+  --cal-item-hover: #eef2f7;
+  --cal-modal:     #ffffff;
+  --cal-modal-bd:  #dde3ec;
+  --cal-modal-ft:  #f8fafc;
+  --cal-tog-bd:    #c9d3e1;
+  --cal-accent:    #2563eb;
+  --cal-warn:      #b45309;
+  --cal-backdrop:  rgba(15, 23, 42, 0.4);
+  --cal-shadow:    0 18px 50px rgba(15, 23, 42, 0.18);
+  --cal-draft-bg:  rgba(37, 99, 235, 0.16);
+  --cal-draft-fg:  #1e3a8a;
+  --cal-draft-shadow: 0 2px 10px rgba(15, 23, 42, 0.15);
+  --cal-grip:      rgba(15, 23, 42, 0.18);
+  --cal-ev-hover:  brightness(0.96);
+  --cal-del-bg:    #fef2f2;
+  --cal-del-bd:    #fca5a5;
+  --cal-del-fg:    #b91c1c;
+  --cal-del-hover: #fee2e2;
+  --cal-ev-blue-bg:   #dbeafe; --cal-ev-blue-fg:   #1e3a8a;
+  --cal-ev-green-bg:  #dcfce7; --cal-ev-green-fg:  #14532d;
+  --cal-ev-purple-bg: #f3e8ff; --cal-ev-purple-fg: #581c87;
+  --cal-ev-orange-bg: #ffedd5; --cal-ev-orange-fg: #7c2d12;
+  --cal-ev-cyan-bg:   #cffafe; --cal-ev-cyan-fg:   #164e63;
+  --cal-ev-pink-bg:   #fce7f3; --cal-ev-pink-fg:   #831843;
+  --cal-ev-yellow-bg: #fef9c3; --cal-ev-yellow-fg: #713f12;
+  --cal-ev-none-bg:   #f1f5f9; --cal-ev-none-fg:   #334155;
+
+  color-scheme: light;
+}
+
+:root {
   font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
   font-size: 15px;
-  color-scheme: dark;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -82,6 +363,9 @@ p  { line-height: 1.65; }
 .topnav .user-info { margin-left: 0.9rem; }   /* breathing room next to the notification bell */
 .topnav .user-info { font-size: 0.82rem; text-align: right; color: var(--muted); white-space: nowrap; }
 .topnav .user-info > div:first-child { color: var(--text-soft); font-weight: 500; margin-bottom: 1px; }
+/* Theme toggle (System → Light → Dark) — sized to sit beside the notification bell, same ghost style. */
+.topnav .theme-toggle { padding: 0.3rem 0.5rem; margin-right: 6px; line-height: 1; }
+.topnav .theme-toggle svg { display: block; }
 
 /* ── Cards ──────────────────────────────────────────────────────────────── */
 .card {
@@ -89,7 +373,7 @@ p  { line-height: 1.65; }
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 1.25rem 1.35rem;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.35), 0 4px 12px rgba(0,0,0,0.2);
+  box-shadow: var(--shadow-card);
 }
 
 /* ── Buttons ────────────────────────────────────────────────────────────── */
@@ -108,9 +392,15 @@ button {
   cursor: pointer;
   transition: background 0.14s, box-shadow 0.14s, opacity 0.14s;
   white-space: nowrap;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+  box-shadow: var(--shadow-btn);
 }
-button:hover:not(:disabled) {
+/* Primary-button hover. In DARK this keeps its original weight (0,2,1), which also outranks the base
+   background of many component buttons (.cal-person, .iv-copybtn, ghost buttons…) — so those turn
+   accent-blue on hover, with their light text still readable. In LIGHT that same blue under their
+   dark text would be unreadable, so there the rule drops to (0,0,1) via :where() and each
+   component's own background / :hover rule wins. Plain primary buttons darken as before. */
+:where(:root:not([data-theme="light"])) button:hover:not(:disabled),
+:where(:root[data-theme="light"]) button:where(:hover:not(:disabled)) {
   background: var(--accent-dim);
   box-shadow: 0 2px 8px rgba(59,130,246,0.3);
 }
@@ -235,10 +525,10 @@ tbody tr:hover td { background: var(--panel-2); color: var(--text); }
   align-items: center;
   gap: 8px;
 }
-.banner.error   { background: var(--danger-bg); border: 1px solid rgba(239,68,68,0.3);  color: #fca5a5; }
-.banner.success { background: var(--success-bg); border: 1px solid rgba(16,185,129,0.3); color: #6ee7b7; }
-.banner.info    { background: var(--accent-glow); border: 1px solid rgba(59,130,246,0.3); color: #93c5fd; }
-.banner.warning { background: var(--warning-bg); border: 1px solid rgba(245,158,11,0.3);  color: #fcd34d; }
+.banner.error   { background: var(--danger-bg); border: 1px solid rgba(239,68,68,0.3);  color: var(--st-danger-fg); }
+.banner.success { background: var(--success-bg); border: 1px solid rgba(16,185,129,0.3); color: var(--st-success-fg); }
+.banner.info    { background: var(--accent-glow); border: 1px solid rgba(59,130,246,0.3); color: var(--st-info-fg); }
+.banner.warning { background: var(--warning-bg); border: 1px solid rgba(245,158,11,0.3);  color: var(--st-warning-fg); }
 
 /* ── Pills / badges ─────────────────────────────────────────────────────── */
 .pill {
@@ -253,10 +543,10 @@ tbody tr:hover td { background: var(--panel-2); color: var(--text); }
   border: 1px solid var(--border);
   color: var(--muted);
 }
-.pill.approved { background: rgba(16,185,129,0.1); color: #6ee7b7; border-color: rgba(16,185,129,0.3); }
-.pill.pending  { background: rgba(245,158,11,0.1); color: #fcd34d; border-color: rgba(245,158,11,0.3); }
-.pill.rejected { background: rgba(239,68,68,0.1);  color: #fca5a5; border-color: rgba(239,68,68,0.3); }
-.pill.deleted  { background: rgba(100,116,139,0.1); color: #94a3b8; border-color: rgba(100,116,139,0.3); }
+.pill.approved { background: rgba(16,185,129,0.1); color: var(--st-success-fg); border-color: rgba(16,185,129,0.3); }
+.pill.pending  { background: rgba(245,158,11,0.1); color: var(--st-warning-fg); border-color: rgba(245,158,11,0.3); }
+.pill.rejected { background: rgba(239,68,68,0.1);  color: var(--st-danger-fg); border-color: rgba(239,68,68,0.3); }
+.pill.deleted  { background: rgba(100,116,139,0.1); color: var(--st-neutral-fg); border-color: rgba(100,116,139,0.3); }
 
 /* ── Utility ────────────────────────────────────────────────────────────── */
 .muted   { color: var(--muted); }
@@ -279,7 +569,7 @@ tbody tr:hover td { background: var(--panel-2); color: var(--text); }
   padding: 2.5rem 2.25rem;
   width: 100%;
   max-width: 420px;
-  box-shadow: 0 8px 40px rgba(0,0,0,0.45);
+  box-shadow: var(--shadow-lg);
 }
 .login-card h1 { text-align: center; margin-bottom: 1.75rem; }
 
@@ -481,7 +771,7 @@ tbody tr:hover td { background: var(--panel-2); color: var(--text); }
   background: var(--accent-glow);
   border: 1px solid rgba(59,130,246,0.45);
   font-size: 0.83rem;
-  color: #c2d6f6;
+  color: var(--selection-fg);
   white-space: nowrap;
 }
 .selection-badge strong {
@@ -557,17 +847,17 @@ tbody tr:hover td { background: var(--panel-2); color: var(--text); }
 .tz-list { overflow-y: auto; }
 .tz-opt { padding: 6px 9px; border-radius: 6px; cursor: pointer; font-size: 0.85rem; white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; }
-.tz-opt:hover { background: rgba(255,255,255,0.06); }
+.tz-opt:hover { background: rgba(var(--ink),0.06); }
 .tz-opt--hl { background: rgba(35,131,226,0.22); }
-.tz-opt--sel { color: #7fb0ec; }
+.tz-opt--sel { color: var(--link-soft); }
 
 /* Users tab — full-profile detail (admin-only view) */
-.u-expand { padding: 0 5px; margin-right: 4px; font-size: 0.7rem; color: #9B9B9B; }
-.u-detail-row > td { background: #1c1c1f; padding: 14px 16px; }
+.u-expand { padding: 0 5px; margin-right: 4px; font-size: 0.7rem; color: var(--iv-muted); }
+.u-detail-row > td { background: var(--detail-bg); padding: 14px 16px; }
 .u-detail { max-width: 860px; }
 .u-detail-hd { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
 .u-detail-av { width: 44px; height: 44px; border-radius: 50%; object-fit: cover; flex: 0 0 auto; }
-.u-detail-av--i { display: flex; align-items: center; justify-content: center; background: #3b82f640; color: #93c5fd; font-weight: 700; font-size: 0.95rem; }
+.u-detail-av--i { display: flex; align-items: center; justify-content: center; background: var(--avatar-bg); color: var(--avatar-fg); font-weight: 700; font-size: 0.95rem; }
 .u-detail-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px 22px; }
 .u-field-lbl { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin-bottom: 2px; }
 .u-field-val { font-size: 0.86rem; color: var(--text); word-break: break-word; }
@@ -578,17 +868,17 @@ tbody tr:hover td { background: var(--panel-2); color: var(--text); }
 /* multi-select (checkable) filter dropdown */
 .iv-flt-dd { position: relative; }
 .iv-flt-ddbtn { display: inline-flex; align-items: center; gap: 4px; max-width: 150px; padding: 0.3rem 0.5rem;
-  background: #202024; border: 1px solid rgba(255,255,255,0.14); border-radius: 6px; color: #CFCFCF; font-size: 0.8rem; cursor: pointer; }
-.iv-flt-ddbtn.on { border-color: rgba(35,131,226,0.55); color: #7fb0ec; }
+  background: var(--iv-row-odd); border: 1px solid rgba(var(--iv-ink),0.14); border-radius: 6px; color: var(--iv-text-soft); font-size: 0.8rem; cursor: pointer; }
+.iv-flt-ddbtn.on { border-color: rgba(35,131,226,0.55); color: var(--link-soft); }
 .iv-flt-ddtx { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .iv-flt-ddcaret { opacity: 0.55; font-size: 0.68rem; }
 .iv-flt-ddmenu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 40; min-width: 160px; max-width: 300px; max-height: 300px; overflow-y: auto; padding: 5px; }
 .iv-flt-ddopt { display: flex; align-items: center; gap: 8px; padding: 5px 7px; border-radius: 5px; cursor: pointer;
   font-size: 0.82rem; color: var(--text); text-align: left; }
-.iv-flt-ddopt:hover { background: rgba(255,255,255,0.06); }
+.iv-flt-ddopt:hover { background: rgba(var(--iv-ink),0.06); }
 /* reset the checkbox — the global input rule (width:100%, padding, gray bg) turned it into a big box */
 .iv-flt-ddopt input[type="checkbox"] { flex: 0 0 auto; width: 15px; height: 15px; min-width: 15px; padding: 0; margin: 0;
-  background: transparent; border: 0; border-radius: 0; accent-color: #2383E2; cursor: pointer; }
+  background: transparent; border: 0; border-radius: 0; accent-color: var(--iv-focus); cursor: pointer; }
 .iv-flt-ddopt span { flex: 1; min-width: 0; white-space: nowrap; }
 .iv-flt-ddclear { width: 100%; margin-top: 3px; font-size: 0.76rem; }
 /* Scrolls, but the bars are hidden — the board is busy enough without a track down its edge. Only the
@@ -603,39 +893,39 @@ tbody tr:hover td { background: var(--panel-2); color: var(--text); }
    rows. The gap shows the page background through the transparent .iv-wrap, so each call reads as its
    own band. Horizontal spacing stays 0 so columns still meet edge-to-edge. The rows' bottom hairline
    is gone with it: a separator line AND a gap would double up. */
-.iv-grid { border-collapse: separate; border-spacing: 0 3px; table-layout: fixed; width: 100%; font-size: 14px; line-height: 20px; color: #D4D4D4; user-select: none; }
+.iv-grid { border-collapse: separate; border-spacing: 0 3px; table-layout: fixed; width: 100%; font-size: 14px; line-height: 20px; color: var(--iv-text); user-select: none; }
 /* Range-selected cells are painted from SEL_FILL in Interviews.tsx — one constant shared by the plain
    and the stacked cells, so the two can't drift apart again. Nothing to do here. */
-.iv-grid td { background: #191919; border-right: 1px solid rgba(255,255,255,0.067); height: 32px; vertical-align: middle; }
+.iv-grid td { background: var(--iv-bg); border-right: 1px solid rgba(var(--iv-ink),0.067); height: 32px; vertical-align: middle; }
 /* Zebra — odd rows a touch lighter than the #191919 base. `.iv-row--odd td` weighs exactly (0,1,1),
    the SAME as `.iv-grid td` and as the state rules below (.iv-row--next td etc). Placed right after
    the base rule and before every state rule, so source order settles the ties: zebra beats the base,
    and next/past/hover/selection all beat zebra — a "next call" stays yellow, a hovered row stays
    hovered, a selected cell stays blue. */
-.iv-row--odd td { background: #202024; }
+.iv-row--odd td { background: var(--iv-row-odd); }
 .iv-grid thead th {
   position: sticky; top: 0; z-index: 12;
-  background: #191919; color: #9B9B9B;
+  background: var(--iv-bg); color: var(--iv-muted);
   font-weight: 500; font-size: 13px; text-align: left;
   text-transform: none; letter-spacing: normal;        /* override global uppercase th */
   padding: 6px 8px; white-space: nowrap;
-  border-right: 1px solid rgba(255,255,255,0.067);
-  border-bottom: 1px solid rgba(255,255,255,0.094);
+  border-right: 1px solid rgba(var(--iv-ink),0.067);
+  border-bottom: 1px solid rgba(var(--iv-ink),0.094);
 }
 /* Hover — the tint lands on the panel cells only, never the transparent margins either side. It is a
    deliberately clear step up from the row's resting colour (the old +7 shade was almost invisible),
    and the first data cell carries an accent bar so the whole row reads as picked out at a glance. */
-.iv-row:hover td:not(.iv-gutter):not(.iv-rowend) { background: #2e2f36; }
+.iv-row:hover td:not(.iv-gutter):not(.iv-rowend) { background: var(--iv-row-hover); }
 .iv-row:hover td.iv-gutter + td { box-shadow: inset 2px 0 0 0 var(--accent); }
 /* The NEXT upcoming call — the only *highlighted* row on the board (yellow). Every call after the
    next one stays plain. Placed after `.iv-grid td` so it wins the equal-specificity tie. */
-.iv-row--next td { background: #3b3418; }
-.iv-row--next:hover td:not(.iv-gutter):not(.iv-rowend) { background: #574c1d; }
+.iv-row--next td { background: var(--iv-row-next); }
+.iv-row--next:hover td:not(.iv-gutter):not(.iv-rowend) { background: var(--iv-row-next-hover); }
 /* A call whose time has already gone: greyed out — still readable, clearly finished. The text is
    dimmed as well as the background, so a past row reads as inactive at a glance. */
-.iv-row--past td { background: #232428; color: #74767e; }
-.iv-row--past:hover td:not(.iv-gutter):not(.iv-rowend) { background: #383a43; }
-.iv-row--past .iv-disp, .iv-row--past .iv-cell { opacity: 0.62; }
+.iv-row--past td { background: var(--iv-row-past); color: var(--iv-row-past-text); }
+.iv-row--past:hover td:not(.iv-gutter):not(.iv-rowend) { background: var(--iv-row-past-hover); }
+.iv-row--past .iv-disp, .iv-row--past .iv-cell { opacity: var(--iv-past-dim); }
 /* Flash a row that just re-sorted after a Scheduled_at edit, so its jump to a new position is
    obvious. A fading overlay (pseudo-element) is used so it doesn't fight the cell background or
    the selection box-shadow. */
@@ -650,57 +940,57 @@ tbody tr:hover td { background: var(--panel-2); color: var(--text); }
    this one row animates — the whole-table slide caused jitter and was removed. */
 .iv-row--flash td > * { animation: iv-row-settle 340ms cubic-bezier(0.22, 1, 0.36, 1); }
 @keyframes iv-row-settle { from { transform: translateY(-6px); opacity: 0.55; } to { transform: none; opacity: 1; } }
-.iv-input { width: 100%; border: none; background: transparent; color: #D4D4D4; font: inherit; font-size: 14px; padding: 6px 8px; outline: none; box-sizing: border-box; user-select: text; }
+.iv-input { width: 100%; border: none; background: transparent; color: var(--iv-text); font: inherit; font-size: 14px; padding: 6px 8px; outline: none; box-sizing: border-box; user-select: text; }
 .iv-input:focus { background: transparent; }   /* the cell's selection border shows the edit state */
 .iv-input[type=number] { -moz-appearance: textfield; }
 .iv-input[type=number]::-webkit-outer-spin-button,
 .iv-input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 /* display:block (not flex) so text-overflow:ellipsis works; line-height+padding centers the single line in the 32px row */
 .iv-disp { display: block; line-height: 20px; width: 100%; min-height: 32px; padding: 6px 8px; cursor: default;
-  overflow: hidden; white-space: nowrap; text-overflow: ellipsis; box-sizing: border-box; color: #D4D4D4; }
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis; box-sizing: border-box; color: var(--iv-text); }
 .iv-cell { cursor: pointer; }
 /* stacked column: two cells in one column (Position/Title over Skillset) */
 .iv-stack { display: flex; flex-direction: column; }
-.iv-stack-div { flex: 0 0 1px; height: 1px; background: rgba(255,255,255,0.067); }
+.iv-stack-div { flex: 0 0 1px; height: 1px; background: rgba(var(--iv-ink),0.067); }
 .iv-stack-row { display: flex; align-items: stretch; }
 .iv-stack-row > * { min-width: 0; }
-.iv-stack-vdiv { flex: 0 0 1px; align-self: stretch; background: rgba(255,255,255,0.067); }
-.iv-sub .iv-disp, .iv-sub .iv-input { color: #9B9B9B; font-size: 13px; }
+.iv-stack-vdiv { flex: 0 0 1px; align-self: stretch; background: rgba(var(--iv-ink),0.067); }
+.iv-sub .iv-disp, .iv-sub .iv-input { color: var(--iv-muted); font-size: 13px; }
 .iv-hd-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.iv-hd-sub { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #6b6b6b; font-size: 12px; }
+.iv-hd-sub { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--iv-faint); font-size: 12px; }
 /* Second header line: the stacked field's label on the left, and (Scheduled_at only) the account
    timezone badge on the right — sitting under "(min)" so the column's times are never ambiguous. */
 .iv-hd-sub-row { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .iv-hd-sub-row .iv-hd-sub { flex: 1; min-width: 0; }
-.iv-hd-tz { flex: 0 0 auto; color: #9B9B9B; font-size: 11px; line-height: 14px; white-space: nowrap;
-  padding: 0 4px; border: 1px solid rgba(255,255,255,0.14); border-radius: 3px; }
+.iv-hd-tz { flex: 0 0 auto; color: var(--iv-muted); font-size: 11px; line-height: 14px; white-space: nowrap;
+  padding: 0 4px; border: 1px solid rgba(var(--iv-ink),0.14); border-radius: 3px; }
 .iv-hd-name-row { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
-.iv-hd-tr { flex: 0 0 auto; max-width: 84px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #9B9B9B; font-size: 12px; }
-.iv-hd-icon { font-size: 1.05rem; line-height: 1; color: #c9c9c9; }
+.iv-hd-tr { flex: 0 0 auto; max-width: 84px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--iv-muted); font-size: 12px; }
+.iv-hd-icon { font-size: 1.05rem; line-height: 1; color: var(--iv-icon); }
 .iv-pill { border-radius: 3px; padding: 2px 8px; font-size: 13px; font-weight: 400; white-space: nowrap; display: inline-block; line-height: 16px; }
-.iv-caret { color: #9B9B9B; font-size: 0.7rem; opacity: .4; flex: 0 0 auto; cursor: pointer; padding: 0 1px; transition: opacity .1s ease; }
+.iv-caret { color: var(--iv-muted); font-size: 0.7rem; opacity: .4; flex: 0 0 auto; cursor: pointer; padding: 0 1px; transition: opacity .1s ease; }
 .iv-cell:hover .iv-caret { opacity: .85; }
 .iv-caret:hover { opacity: 1; }
 .iv-av { width: 20px; height: 20px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
   font-size: 0.6rem; font-weight: 600; flex: 0 0 auto; }
-.iv-hd-btn { opacity: 0; color: #9B9B9B; }
+.iv-hd-btn { opacity: 0; color: var(--iv-muted); }
 .iv-hd:hover .iv-hd-btn { opacity: .8; }
 /* column resize: a thin grab strip on each header's right edge; blue line on hover */
 .iv-resize { position: absolute; top: 0; right: 0; width: 7px; height: 100%; cursor: col-resize; z-index: 18; }
 .iv-resize::after { content: ''; position: absolute; top: 4px; bottom: 4px; right: 0; width: 2px; border-radius: 2px; background: transparent; transition: background .1s ease; }
-.iv-resize:hover::after { background: #2383E2; }
+.iv-resize:hover::after { background: var(--iv-focus); }
 body.iv-col-resizing { cursor: col-resize !important; user-select: none !important; }
-.iv-addrow td { color: #9B9B9B; }
-.iv-addrow:hover td:not(.iv-gutter) { background: #202024; }
+.iv-addrow td { color: var(--iv-muted); }
+.iv-addrow:hover td:not(.iv-gutter) { background: var(--iv-row-odd); }
 /* row-number gutter — a thin index margin (not a data column) */
-.iv-grid td.iv-gutter { position: relative; width: 32px; text-align: center; font-size: 12px; color: #6b6b6b; user-select: none;
+.iv-grid td.iv-gutter { position: relative; width: 32px; text-align: center; font-size: 12px; color: var(--iv-faint); user-select: none;
   background: transparent; border-right-color: transparent; border-bottom-color: transparent; }
 .iv-grid thead th.iv-gutter-hd { background: var(--bg); border-right-color: transparent; border-bottom-color: transparent; }
 /* the panel's left edge — drawn on the first data column so the index numbers read as outside the table */
-.iv-grid td.iv-gutter + td, .iv-grid thead th.iv-gutter-hd + th { border-left: 1px solid rgba(255,255,255,0.094); }
+.iv-grid td.iv-gutter + td, .iv-grid thead th.iv-gutter-hd + th { border-left: 1px solid rgba(var(--iv-ink),0.094); }
 .iv-num { opacity: 0; transition: opacity .08s ease; }     /* hidden unless marked or the row is hovered */
 .iv-num--mark { opacity: 1; }                              /* shown on every 5th row */
-.iv-row:hover .iv-num { opacity: 1; color: #cfcfcf; }      /* reveal this row's number on hover */
+.iv-row:hover .iv-num { opacity: 1; color: var(--iv-text-soft); }      /* reveal this row's number on hover */
 /* Delete — in the .iv-rowend margin to the RIGHT of the panel, mirroring the row-number gutter on the
    left. Hidden until its row is hovered, so the board isn't a wall of ✕. */
 .iv-grid td.iv-rowend { width: 12px; background: transparent; border-right-color: transparent;
@@ -709,25 +999,25 @@ body.iv-col-resizing { cursor: col-resize !important; user-select: none !importa
 /* Deliberately tiny — it is a margin affordance, not a primary action. The box is only 7px wide, so the
    glyph is allowed to overflow it rather than be clipped; the full row height stays clickable. */
 .iv-del { display: inline-flex; align-items: center; justify-content: center; width: 7px; height: 14px;
-  padding: 0; border-radius: 3px; color: #6b6b6b; font-size: 8px; line-height: 1; overflow: visible;
+  padding: 0; border-radius: 3px; color: var(--iv-faint); font-size: 8px; line-height: 1; overflow: visible;
   opacity: 0; transition: opacity .08s ease, color .08s ease, background .08s ease; }
 .iv-row:hover .iv-del { opacity: 1; }
-.iv-del:hover { color: #ff6b6b; background: rgba(255,107,107,0.13); }
-.iv-opt:hover { background: rgba(255,255,255,0.055); }
+.iv-del:hover { color: var(--iv-danger); background: rgba(255,107,107,0.13); }
+.iv-opt:hover { background: rgba(var(--iv-ink),0.055); }
 .iv-opt-hl { background: rgba(35,131,226,0.22); }   /* keyboard-highlighted dropdown option */
-.iv-search { width: 100%; margin-bottom: 6px; padding: 5px 8px; background: #2a2a2a; border: 1px solid rgba(255,255,255,0.12);
-  border-radius: 6px; color: #D4D4D4; font-size: 13px; outline: none; box-sizing: border-box; user-select: text; }
+.iv-search { width: 100%; margin-bottom: 6px; padding: 5px 8px; background: var(--iv-input-bg); border: 1px solid rgba(var(--iv-ink),0.12);
+  border-radius: 6px; color: var(--iv-text); font-size: 13px; outline: none; box-sizing: border-box; user-select: text; }
 
 /* Meeting-link copy button */
-.iv-copybtn { flex: 0 0 auto; padding: 1px 5px; background: transparent; border: 1px solid rgba(255,255,255,0.13);
-  border-radius: 5px; color: #9B9B9B; font-size: 0.74rem; line-height: 1.35; cursor: pointer; }
-.iv-copybtn:hover { background: rgba(255,255,255,0.08); color: #CFCFCF; }
+.iv-copybtn { flex: 0 0 auto; padding: 1px 5px; background: transparent; border: 1px solid rgba(var(--iv-ink),0.13);
+  border-radius: 5px; color: var(--iv-muted); font-size: 0.74rem; line-height: 1.35; cursor: pointer; }
+.iv-copybtn:hover { background: rgba(var(--iv-ink),0.08); color: var(--iv-text-soft); }
 /* Created_at revealed on Index hover */
 
 /* 👁 — opens the profile card. Sits left of the Profile Name, mirroring the 🌐 on a meeting link. */
 .iv-peekbtn { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
-  width: 20px; height: 20px; padding: 0; background: transparent; border: 1px solid rgba(255,255,255,0.13);
-  border-radius: 5px; color: #9B9B9B; font-size: 0.72rem; line-height: 1; cursor: pointer; opacity: 0.75; }
+  width: 20px; height: 20px; padding: 0; background: transparent; border: 1px solid rgba(var(--iv-ink),0.13);
+  border-radius: 5px; color: var(--iv-muted); font-size: 0.72rem; line-height: 1; cursor: pointer; opacity: 0.75; }
 .iv-peekbtn:hover { background: rgba(96,165,250,0.16); border-color: rgba(96,165,250,0.45); opacity: 1; }
 
 /* ── Profile card (the 👁) ─────────────────────────────────────────────────── */
@@ -736,42 +1026,42 @@ body.iv-col-resizing { cursor: col-resize !important; user-select: none !importa
    doubled up so they beat .cal-modal / .cal-modal-b regardless of source order. */
 .cal-modal.pc-modal { width: min(620px, 94vw); }
 .cal-modal-b.pc-body { display: block; max-height: 70vh; overflow-y: auto; }
-.pc-err { color: #f0a3a3; background: rgba(220,90,90,0.09); border: 1px solid rgba(220,90,90,0.28);
+.pc-err { color: var(--iv-pc-err); background: rgba(220,90,90,0.09); border: 1px solid rgba(220,90,90,0.28);
   border-radius: 8px; padding: 10px 12px; font-size: 0.84rem; }
-.pc-sec { padding: 12px 0; border-bottom: 1px solid rgba(255,255,255,0.07); }
+.pc-sec { padding: 12px 0; border-bottom: 1px solid rgba(var(--iv-ink),0.07); }
 .pc-sec:last-child { border-bottom: 0; }
-.pc-h { margin: 0 0 8px; font-size: 0.7rem; letter-spacing: 0.09em; text-transform: uppercase; color: #8b8b8b; font-weight: 600; }
+.pc-h { margin: 0 0 8px; font-size: 0.7rem; letter-spacing: 0.09em; text-transform: uppercase; color: var(--iv-muted-2); font-weight: 600; }
 .pc-line { display: flex; gap: 10px; padding: 3px 0; font-size: 0.84rem; }
-.pc-line-l { flex: 0 0 88px; color: #8b8b8b; }
-.pc-line-v { min-width: 0; color: #D4D4D4; overflow-wrap: anywhere; }
-a.pc-line-v { color: #60a5fa; text-decoration: none; }
+.pc-line-l { flex: 0 0 88px; color: var(--iv-muted-2); }
+.pc-line-v { min-width: 0; color: var(--iv-text); overflow-wrap: anywhere; }
+a.pc-line-v { color: var(--iv-link); text-decoration: none; }
 a.pc-line-v:hover { text-decoration: underline; }
-.pc-text { margin: 0; font-size: 0.84rem; color: #C4C4C4; line-height: 1.5; }
+.pc-text { margin: 0; font-size: 0.84rem; color: var(--iv-pc-text); line-height: 1.5; }
 .pc-tags { display: flex; flex-wrap: wrap; gap: 6px; }
-.pc-tag { padding: 2px 9px; border-radius: 999px; font-size: 0.75rem; color: #cfe0f5;
+.pc-tag { padding: 2px 9px; border-radius: 999px; font-size: 0.75rem; color: var(--iv-pc-tag);
   background: rgba(68,122,203,0.16); border: 1px solid rgba(68,122,203,0.3); }
 .pc-job { padding: 7px 0; }
-.pc-job + .pc-job { border-top: 1px dashed rgba(255,255,255,0.07); }
-.pc-job-h { font-size: 0.86rem; color: #E4E4E4; }
-.pc-job-c { color: #9B9B9B; font-weight: 400; }
-.pc-job-m { margin-top: 2px; font-size: 0.75rem; color: #8b8b8b; }
+.pc-job + .pc-job { border-top: 1px dashed rgba(var(--iv-ink),0.07); }
+.pc-job-h { font-size: 0.86rem; color: var(--iv-pc-strong); }
+.pc-job-c { color: var(--iv-muted); font-weight: 400; }
+.pc-job-m { margin-top: 2px; font-size: 0.75rem; color: var(--iv-muted-2); }
 .pc-bullets { margin: 6px 0 0; padding-left: 18px; }
-.pc-bullets li { font-size: 0.8rem; color: #B8B8B8; line-height: 1.45; margin-bottom: 3px; }
+.pc-bullets li { font-size: 0.8rem; color: var(--iv-pc-bullet); line-height: 1.45; margin-bottom: 3px; }
 
 /* JD / Feedback cell button (opens the editor modal) */
 .iv-cellbtn { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 3px 9px; cursor: pointer;
-  background: rgba(255,255,255,0.045); border: 1px solid rgba(255,255,255,0.10); border-radius: 6px;
-  color: #9B9B9B; font-size: 12px; line-height: 1.4; transition: background .1s ease, color .1s ease, border-color .1s ease; }
-.iv-cellbtn:hover { background: rgba(255,255,255,0.09); color: #CFCFCF; }
-.iv-cellbtn--on { color: #6a9ce0; border-color: rgba(68,122,203,0.42); background: rgba(68,122,203,0.12); }
+  background: rgba(var(--iv-ink),0.045); border: 1px solid rgba(var(--iv-ink),0.10); border-radius: 6px;
+  color: var(--iv-muted); font-size: 12px; line-height: 1.4; transition: background .1s ease, color .1s ease, border-color .1s ease; }
+.iv-cellbtn:hover { background: rgba(var(--iv-ink),0.09); color: var(--iv-text-soft); }
+.iv-cellbtn--on { color: var(--iv-on-fg); border-color: rgba(68,122,203,0.42); background: rgba(68,122,203,0.12); }
 .iv-cellbtn-ic { font-size: 12px; }
 .iv-cellbtn-tx { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Notion/Coda-style long-text editor modal (JD, Feedback) */
 .iv-modal-backdrop { position: fixed; inset: 0; z-index: 200; display: flex; align-items: center; justify-content: center;
-  padding: 24px; background: rgba(0,0,0,0.55); backdrop-filter: blur(2px); }
+  padding: 24px; background: var(--overlay); backdrop-filter: blur(2px); }
 .iv-modal { display: flex; flex-direction: column; width: min(680px, 94vw); max-height: 82vh; overflow: hidden;
-  background: #1f1f1f; border: 1px solid rgba(255,255,255,0.09); border-radius: 12px; box-shadow: 0 16px 48px rgba(0,0,0,0.5); }
+  background: var(--iv-panel); border: 1px solid rgba(var(--iv-ink),0.09); border-radius: 12px; box-shadow: var(--iv-modal-shadow); }
 .iv-modal--sm { width: min(420px, 92vw); }
 
 /* Chat & Feedback thread (Telegram-style) */
@@ -781,15 +1071,15 @@ a.pc-line-v:hover { text-decoration: underline; }
 .iv-chat-msg { display: flex; align-items: flex-end; gap: 7px; max-width: 84%; }
 .iv-chat-msg.mine { margin-left: auto; flex-direction: row-reverse; }
 .iv-chat-av { width: 26px; height: 26px; border-radius: 50%; object-fit: cover; flex: 0 0 auto; }
-.iv-chat-av--i { display: flex; align-items: center; justify-content: center; background: rgba(68,122,203,0.22); color: #7aa7e0; font-size: 0.62rem; font-weight: 700; }
-.iv-chat-bubble { min-width: 0; padding: 7px 11px; border-radius: 13px; background: #262626; border: 1px solid rgba(255,255,255,0.06); }
-.iv-chat-msg.mine .iv-chat-bubble { background: #1d3a5f; border-color: rgba(35,131,226,0.35); border-bottom-right-radius: 4px; }
+.iv-chat-av--i { display: flex; align-items: center; justify-content: center; background: rgba(68,122,203,0.22); color: var(--iv-blue-fg); font-size: 0.62rem; font-weight: 700; }
+.iv-chat-bubble { min-width: 0; padding: 7px 11px; border-radius: 13px; background: var(--iv-bubble); border: 1px solid rgba(var(--iv-ink),0.06); }
+.iv-chat-msg.mine .iv-chat-bubble { background: var(--iv-bubble-mine); border-color: rgba(35,131,226,0.35); border-bottom-right-radius: 4px; }
 .iv-chat-msg:not(.mine) .iv-chat-bubble { border-bottom-left-radius: 4px; }
-.iv-chat-author { font-size: 0.72rem; font-weight: 600; color: #7aa7e0; margin-bottom: 2px; }
-.iv-chat-text { font-size: 0.86rem; line-height: 1.5; color: #E9E9E9; white-space: pre-wrap; overflow-wrap: anywhere; }
-.iv-chat-text a { color: #6ab0ff; }
-.iv-chat-meta { display: flex; align-items: center; gap: 6px; justify-content: flex-end; margin-top: 3px; font-size: 0.64rem; color: #8a8a8a; }
-.iv-chat-del { background: transparent; border: 0; color: #b06a6a; cursor: pointer; font-size: 0.68rem; padding: 0 2px; opacity: 0; transition: opacity .1s; }
+.iv-chat-author { font-size: 0.72rem; font-weight: 600; color: var(--iv-blue-fg); margin-bottom: 2px; }
+.iv-chat-text { font-size: 0.86rem; line-height: 1.5; color: var(--iv-chat-text); white-space: pre-wrap; overflow-wrap: anywhere; }
+.iv-chat-text a { color: var(--iv-link-chat); }
+.iv-chat-meta { display: flex; align-items: center; gap: 6px; justify-content: flex-end; margin-top: 3px; font-size: 0.64rem; color: var(--iv-chat-meta); }
+.iv-chat-del { background: transparent; border: 0; color: var(--iv-chat-del); cursor: pointer; font-size: 0.68rem; padding: 0 2px; opacity: 0; transition: opacity .1s; }
 .iv-chat-msg:hover .iv-chat-del { opacity: 1; }
 .iv-chat-av--sm { width: 20px; height: 20px; }
 .iv-chat-img { max-width: 240px; max-height: 240px; border-radius: 8px; margin: 2px 0 4px; cursor: zoom-in; display: block; object-fit: cover; }
@@ -800,37 +1090,37 @@ a.pc-line-v:hover { text-decoration: underline; }
 .iv-lightbox-x { position: absolute; top: 16px; right: 20px; width: 38px; height: 38px; border-radius: 50%; border: 0;
   background: rgba(255,255,255,0.14); color: #fff; font-size: 18px; cursor: pointer; }
 .iv-lightbox-x:hover { background: rgba(255,255,255,0.26); }
-.iv-chat-img--load { display: flex; align-items: center; justify-content: center; width: 120px; height: 90px; background: rgba(255,255,255,0.05); border-radius: 8px; font-size: 1.2rem; }
-.iv-chat-composer-wrap { border-top: 1px solid rgba(255,255,255,0.07); }
+.iv-chat-img--load { display: flex; align-items: center; justify-content: center; width: 120px; height: 90px; background: rgba(var(--iv-ink),0.05); border-radius: 8px; font-size: 1.2rem; }
+.iv-chat-composer-wrap { border-top: 1px solid rgba(var(--iv-ink),0.07); }
 .iv-chat-as { display: flex; align-items: center; gap: 6px; padding: 7px 14px 0; }
-.iv-chat-attach { flex: 0 0 auto; width: 34px; height: 34px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.12); background: transparent; color: #9B9B9B; cursor: pointer; font-size: 15px; }
-.iv-chat-attach:hover { background: rgba(255,255,255,0.07); color: #CFCFCF; }
+.iv-chat-attach { flex: 0 0 auto; width: 34px; height: 34px; border-radius: 50%; border: 1px solid rgba(var(--iv-ink),0.12); background: transparent; color: var(--iv-muted); cursor: pointer; font-size: 15px; }
+.iv-chat-attach:hover { background: rgba(var(--iv-ink),0.07); color: var(--iv-text-soft); }
 .iv-chat-attach:disabled { opacity: 0.5; cursor: default; }
 .iv-chat-composer { display: flex; align-items: flex-end; gap: 8px; padding: 8px 14px 12px; }
 .iv-chat-input { flex: 1; resize: none; min-height: 40px; max-height: 150px; box-sizing: border-box; padding: 9px 12px;
-  background: #191919; border: 1px solid rgba(255,255,255,0.10); border-radius: 10px; outline: none;
-  color: #E6E6E6; font-family: inherit; font-size: 13.5px; line-height: 1.45; }
-.iv-chat-input:focus { border-color: #2383E2; }
+  background: var(--iv-bg); border: 1px solid rgba(var(--iv-ink),0.10); border-radius: 10px; outline: none;
+  color: var(--iv-text-hi); font-family: inherit; font-size: 13.5px; line-height: 1.45; }
+.iv-chat-input:focus { border-color: var(--iv-focus); }
 .iv-chat-send { flex: 0 0 auto; width: 40px; height: 40px; border-radius: 50%; border: 0; cursor: pointer;
-  background: #2383E2; color: #fff; font-size: 15px; display: flex; align-items: center; justify-content: center; }
+  background: var(--iv-focus); color: #fff; font-size: 15px; display: flex; align-items: center; justify-content: center; }
 .iv-chat-send:disabled { opacity: 0.45; cursor: default; }
 .iv-modal-hd { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
-  padding: 16px 18px 12px; border-bottom: 1px solid rgba(255,255,255,0.06); }
-.iv-modal-title { font-size: 15px; font-weight: 600; color: #EDEDED; }
+  padding: 16px 18px 12px; border-bottom: 1px solid rgba(var(--iv-ink),0.06); }
+.iv-modal-title { font-size: 15px; font-weight: 600; color: var(--iv-title); }
 .iv-modal-sub { margin-top: 2px; max-width: 540px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: 12.5px; color: #9B9B9B; }
+  font-size: 12.5px; color: var(--iv-muted); }
 .iv-modal-x { padding: 0 6px; font-size: 15px; line-height: 1.4; }
 .iv-modal-ta { flex: 1; min-height: 320px; margin: 14px 18px; padding: 12px 14px; box-sizing: border-box; resize: vertical;
-  background: #191919; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; outline: none;
-  color: #E6E6E6; font-family: inherit; font-size: 13.5px; line-height: 1.55; }
-.iv-modal-ta:focus { border-color: #2383E2; }
+  background: var(--iv-bg); border: 1px solid rgba(var(--iv-ink),0.08); border-radius: 8px; outline: none;
+  color: var(--iv-text-hi); font-family: inherit; font-size: 13.5px; line-height: 1.55; }
+.iv-modal-ta:focus { border-color: var(--iv-focus); }
 /* read-only document view (Job Details) — preserves the description's line breaks + spacing, selectable */
 .iv-modal-doc { flex: 1; min-height: 300px; max-height: 62vh; overflow: auto; margin: 14px 18px; padding: 12px 15px;
-  box-sizing: border-box; background: #191919; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px;
-  color: #E6E6E6; font-size: 13.5px; line-height: 1.62; white-space: pre-wrap; overflow-wrap: anywhere;
+  box-sizing: border-box; background: var(--iv-bg); border: 1px solid rgba(var(--iv-ink),0.08); border-radius: 8px;
+  color: var(--iv-text-hi); font-size: 13.5px; line-height: 1.62; white-space: pre-wrap; overflow-wrap: anywhere;
   user-select: text; -webkit-user-select: text; }
 .iv-modal-ft { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 18px 16px; }
-.iv-search:focus { border-color: #2383E2; }
+.iv-search:focus { border-color: var(--iv-focus); }
 
 /* ── Responsive ─────────────────────────────────────────────────────────────
    The app was built desktop-only: the top nav sits on one fixed-height line, forms are two-up, and
@@ -931,7 +1221,7 @@ td.iv-locked {
 .iv-offline {
   font-size: 0.78rem;
   font-weight: 600;
-  color: #fca5a5;
+  color: var(--st-danger-fg);
   background: rgba(239, 68, 68, 0.12);
   border: 1px solid rgba(239, 68, 68, 0.35);
   border-radius: 999px;
@@ -948,45 +1238,45 @@ td.iv-locked {
 
 /* ── Table | Calendar toggle ───────────────────────────────────────────────── */
 .iv-viewtog { display: inline-flex; gap: 2px; padding: 2px; border-radius: 8px;
-  background: #0f1420; border: 1px solid #243049; }
-.iv-viewtog button { background: transparent; border: 0; color: #94a3b8; cursor: pointer;
+  background: var(--cal-modal); border: 1px solid var(--cal-tog-bd); }
+.iv-viewtog button { background: transparent; border: 0; color: var(--cal-text-2); cursor: pointer;
   font-size: 0.8rem; font-weight: 600; padding: 5px 11px; border-radius: 6px; white-space: nowrap; }
-.iv-viewtog button:hover { color: #e2e8f0; }
-.iv-viewtog button.on { background: #1e293b; color: #f1f5f9; box-shadow: inset 0 0 0 1px #334155; }
+.iv-viewtog button:hover { color: var(--cal-text-hi); }
+.iv-viewtog button.on { background: var(--cal-active); color: var(--cal-text-max); box-shadow: inset 0 0 0 1px var(--cal-ring); }
 
 /* ── Calendar: 4/5 grid, 1/5 caller + availability rail ────────────────────── */
 .cal-wrap { display: grid; grid-template-columns: 4fr 1fr; gap: 14px; align-items: start; min-height: 0; }
-.cal-main { background: #0d1119; border: 1px solid #1e293b; border-radius: 12px; overflow: hidden; min-width: 0; }
+.cal-main { background: var(--cal-surface); border: 1px solid var(--cal-border); border-radius: 12px; overflow: hidden; min-width: 0; }
 
-.cal-head { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-bottom: 1px solid #1e293b; flex-wrap: wrap; }
+.cal-head { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--cal-border); flex-wrap: wrap; }
 .cal-nav { display: inline-flex; gap: 4px; align-items: center; }
 .cal-nav button { padding: 4px 10px; font-size: 0.9rem; line-height: 1.2; }
 .cal-today { font-size: 0.78rem !important; padding: 5px 12px !important; }
-.cal-month { margin: 0; font-size: 1rem; font-weight: 600; color: #e2e8f0; }
+.cal-month { margin: 0; font-size: 1rem; font-weight: 600; color: var(--cal-text-hi); }
 .cal-tz { margin-left: auto; font-size: 0.75rem; }
 
 /* day headers: one gutter column + 7 days, EXACTLY matching .cal-grid below */
-.cal-days { display: grid; grid-template-columns: 56px repeat(7, 1fr); border-bottom: 1px solid #1e293b; }
-.cal-gutter-head { border-right: 1px solid #1e293b; }
-.cal-dayhead { text-align: center; padding: 6px 2px 8px; border-right: 1px solid #161f30; }
+.cal-days { display: grid; grid-template-columns: 56px repeat(7, 1fr); border-bottom: 1px solid var(--cal-border); }
+.cal-gutter-head { border-right: 1px solid var(--cal-border); }
+.cal-dayhead { text-align: center; padding: 6px 2px 8px; border-right: 1px solid var(--cal-line); }
 .cal-dayhead:last-child { border-right: 0; }
-.cal-dow { display: block; font-size: 0.68rem; text-transform: uppercase; letter-spacing: .06em; color: #64748b; }
+.cal-dow { display: block; font-size: 0.68rem; text-transform: uppercase; letter-spacing: .06em; color: var(--cal-label); }
 .cal-dnum { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px;
-  margin-top: 3px; border-radius: 50%; font-size: 0.95rem; color: #cbd5e1; }
-.cal-dayhead--today .cal-dow { color: #60a5fa; }
+  margin-top: 3px; border-radius: 50%; font-size: 0.95rem; color: var(--cal-text); }
+.cal-dayhead--today .cal-dow { color: var(--cal-accent); }
 .cal-dayhead--today .cal-dnum { background: #2563eb; color: #fff; font-weight: 600; }
 
 .cal-body { max-height: 62vh; overflow-y: auto; overflow-x: hidden; }
 .cal-grid { display: grid; grid-template-columns: 56px repeat(7, 1fr); position: relative; }
 
-.cal-gutter { position: relative; border-right: 1px solid #1e293b; }
+.cal-gutter { position: relative; border-right: 1px solid var(--cal-border); }
 .cal-hour-lbl { position: absolute; right: 6px; transform: translateY(-50%); font-size: 0.68rem;
-  color: #64748b; font-variant-numeric: tabular-nums; }
+  color: var(--cal-label); font-variant-numeric: tabular-nums; }
 
-.cal-col { position: relative; border-right: 1px solid #161f30; overflow: hidden; }
+.cal-col { position: relative; border-right: 1px solid var(--cal-line); overflow: hidden; }
 .cal-col:last-child { border-right: 0; }
 .cal-col--bookable { cursor: copy; }
-.cal-hline { position: absolute; left: 0; right: 0; height: 0; border-top: 1px solid #161f30; }
+.cal-hline { position: absolute; left: 0; right: 0; height: 0; border-top: 1px solid var(--cal-line); }
 
 /* the selected caller's working hours, painted behind the calls */
 .cal-avail { position: absolute; left: 0; right: 0; background: rgba(34, 197, 94, 0.10);
@@ -999,49 +1289,49 @@ td.iv-locked {
 .cal-ev { position: absolute; z-index: 2; display: flex; flex-direction: column; gap: 1px;
   padding: 2px 5px; border: 0; border-radius: 5px; text-align: left; cursor: pointer;
   overflow: hidden; font-size: 0.72rem; line-height: 1.25; }
-.cal-ev:hover { filter: brightness(1.25); }
-.cal-ev--sel { outline: 2px solid #60a5fa; outline-offset: -1px; }
+.cal-ev:hover { filter: var(--cal-ev-hover); }
+.cal-ev--sel { outline: 2px solid var(--cal-accent); outline-offset: -1px; }
 .cal-ev--dim { opacity: 0.28; }              /* another caller, while one is selected */
 .cal-ev--past { opacity: 0.55; }
 .cal-ev-t { font-weight: 700; font-variant-numeric: tabular-nums; }
 .cal-ev-n { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cal-ev-c { opacity: 0.75; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.68rem; }
 .cal-ev-c--none { font-style: italic; }
-.cal-warn { color: #fbbf24; }
+.cal-warn { color: var(--cal-warn); }
 
 /* ── the 1/3 rail ──────────────────────────────────────────────────────────── */
 .cal-side { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-.cal-side-sec { background: #0d1119; border: 1px solid #1e293b; border-radius: 12px; padding: 12px; }
-.cal-side-h { margin: 0 0 8px; font-size: 0.72rem; text-transform: uppercase; letter-spacing: .07em; color: #64748b; }
+.cal-side-sec { background: var(--cal-surface); border: 1px solid var(--cal-border); border-radius: 12px; padding: 12px; }
+.cal-side-h { margin: 0 0 8px; font-size: 0.72rem; text-transform: uppercase; letter-spacing: .07em; color: var(--cal-label); }
 .cal-search { margin-bottom: 8px; font-size: 0.82rem; padding: 6px 9px; }
 .cal-empty { font-size: 0.78rem; margin: 4px 0 0; }
 
 .cal-people { display: flex; flex-direction: column; gap: 2px; }
 .cal-person { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; padding: 6px 8px;
-  background: transparent; border: 0; border-radius: 7px; color: #cbd5e1; cursor: pointer;
+  background: transparent; border: 0; border-radius: 7px; color: var(--cal-text); cursor: pointer;
   font-size: 0.83rem; text-align: left; overflow: hidden; }
-.cal-person:hover { background: #151d2c; }
-.cal-person--on { background: #1e293b; color: #f1f5f9; box-shadow: inset 0 0 0 1px #334155; }
+.cal-person:hover { background: var(--cal-hover); }
+.cal-person--on { background: var(--cal-active); color: var(--cal-text-max); box-shadow: inset 0 0 0 1px var(--cal-ring); }
 .cal-swatch { width: 10px; height: 10px; border-radius: 3px; flex: 0 0 auto; }
 .cal-person-n { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.cal-person-n2 { font-size: 0.7rem; color: #64748b; background: #0f1725; border-radius: 999px; padding: 1px 7px; }
+.cal-person-n2 { font-size: 0.7rem; color: var(--cal-label); background: var(--cal-chip); border-radius: 999px; padding: 1px 7px; }
 
-.cal-av-tz { font-size: 0.74rem; color: #94a3b8; line-height: 1.45; margin-bottom: 8px; }
-.cal-av-warn { color: #fbbf24; }
+.cal-av-tz { font-size: 0.74rem; color: var(--cal-text-2); line-height: 1.45; margin-bottom: 8px; }
+.cal-av-warn { color: var(--cal-warn); }
 .cal-av-list { list-style: none; margin: 0; padding: 0; }
-.cal-av-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px solid #151d2c; font-size: 0.79rem; }
+.cal-av-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--cal-hover); font-size: 0.79rem; }
 .cal-av-row:last-child { border-bottom: 0; }
 .cal-av-row--off { opacity: 0.45; }
-.cal-av-d { width: 34px; color: #64748b; font-weight: 600; }
-.cal-av-h { flex: 1; color: #cbd5e1; font-variant-numeric: tabular-nums; }
-.cal-av-own { font-size: 0.7rem; color: #64748b; font-variant-numeric: tabular-nums; }
-.cal-av-off { font-size: 0.74rem; color: #94a3b8; margin: 8px 0 0; }
+.cal-av-d { width: 34px; color: var(--cal-label); font-weight: 600; }
+.cal-av-h { flex: 1; color: var(--cal-text); font-variant-numeric: tabular-nums; }
+.cal-av-own { font-size: 0.7rem; color: var(--cal-label); font-variant-numeric: tabular-nums; }
+.cal-av-off { font-size: 0.74rem; color: var(--cal-text-2); margin: 8px 0 0; }
 
 .cal-unsched { display: flex; flex-direction: column; gap: 3px; margin-top: 6px; }
-.cal-unsched-i { text-align: left; background: #111827; border: 1px solid #1e293b; border-radius: 6px;
-  color: #cbd5e1; font-size: 0.76rem; padding: 5px 8px; cursor: pointer;
+.cal-unsched-i { text-align: left; background: var(--cal-item); border: 1px solid var(--cal-border); border-radius: 6px;
+  color: var(--cal-text); font-size: 0.76rem; padding: 5px 8px; cursor: pointer;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.cal-unsched-i:hover { background: #172033; }
+.cal-unsched-i:hover { background: var(--cal-item-hover); }
 
 /* Narrow: the rail drops BELOW the calendar rather than squeezing it to nothing. */
 @media (max-width: 1100px) {
@@ -1067,44 +1357,44 @@ body.cal-dragging .cal-ev { cursor: grabbing; }
    could land on its neighbour. */
 .cal-ev-grip { position: absolute; left: 0; right: 0; bottom: 0; height: 6px;
   cursor: ns-resize; border-radius: 0 0 5px 5px; }
-.cal-ev-grip:hover { background: rgba(255, 255, 255, 0.28); }
+.cal-ev-grip:hover { background: var(--cal-grip); }
 
 /* The live preview: what you're drawing, or where the call you're holding will land. */
 .cal-draft { position: absolute; left: 2px; right: 2px; z-index: 4; pointer-events: none;
   display: flex; flex-direction: column; gap: 1px; justify-content: center;
   padding: 2px 6px; border-radius: 5px; overflow: hidden;
-  background: rgba(37, 99, 235, 0.38); border: 1px solid #60a5fa; border-left: 3px solid #60a5fa;
-  color: #eff6ff; font-size: 0.72rem; line-height: 1.2;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45); }
+  background: var(--cal-draft-bg); border: 1px solid var(--cal-accent); border-left: 3px solid var(--cal-accent);
+  color: var(--cal-draft-fg); font-size: 0.72rem; line-height: 1.2;
+  box-shadow: var(--cal-draft-shadow); }
 .cal-draft-t { font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .cal-draft-d { opacity: 0.8; font-size: 0.66rem; white-space: nowrap; }
 
 /* ── calendar: double-click an event → detail popup (edit / delete) ─────────── */
 .cal-modal-bg { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center;
-  background: rgba(2, 6, 14, 0.66); backdrop-filter: blur(2px); padding: 20px; }
+  background: var(--cal-backdrop); backdrop-filter: blur(2px); padding: 20px; }
 .cal-modal { width: min(560px, 100%); max-height: 88vh; display: flex; flex-direction: column;
-  background: #0f1420; border: 1px solid #263349; border-radius: 14px; overflow: hidden;
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.6); }
+  background: var(--cal-modal); border: 1px solid var(--cal-modal-bd); border-radius: 14px; overflow: hidden;
+  box-shadow: var(--cal-shadow); }
 
-.cal-modal-h { display: flex; align-items: center; gap: 10px; padding: 13px 16px; border-bottom: 1px solid #1e293b; }
-.cal-modal-h h3 { margin: 0; font-size: 1rem; color: #f1f5f9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cal-modal-h { display: flex; align-items: center; gap: 10px; padding: 13px 16px; border-bottom: 1px solid var(--cal-border); }
+.cal-modal-h h3 { margin: 0; font-size: 1rem; color: var(--cal-text-max); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cal-modal-x { margin-left: auto; padding: 2px 9px !important; font-size: 0.95rem; line-height: 1.3; }
 
 .cal-modal-b { padding: 14px 16px; overflow-y: auto;
   display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
 
 .cal-fld { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.cal-fld-l { font-size: 0.7rem; text-transform: uppercase; letter-spacing: .05em; color: #64748b; }
+.cal-fld-l { font-size: 0.7rem; text-transform: uppercase; letter-spacing: .05em; color: var(--cal-label); }
 .cal-fld input, .cal-fld select { width: 100%; font-size: 0.85rem; padding: 6px 8px; }
 /* Read-only for THIS user (a caller may not move a call) — shown, not hidden: knowing the value and
    knowing you can't change it are different facts, and hiding the field only communicates the second. */
 .cal-fld--ro input, .cal-fld--ro select { opacity: 0.55; cursor: not-allowed; }
-.cal-fld--ro .cal-fld-l::after { content: ' · read-only'; color: #475569; text-transform: none; letter-spacing: 0; }
+.cal-fld--ro .cal-fld-l::after { content: ' · read-only'; color: var(--cal-ro); text-transform: none; letter-spacing: 0; }
 
-.cal-modal-f { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-top: 1px solid #1e293b; background: #0c111b; }
-.cal-del { background: #7f1d1d; border: 1px solid #b91c1c; color: #fecaca; font-weight: 600;
+.cal-modal-f { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--cal-border); background: var(--cal-modal-ft); }
+.cal-del { background: var(--cal-del-bg); border: 1px solid var(--cal-del-bd); color: var(--cal-del-fg); font-weight: 600;
   border-radius: 8px; padding: 7px 14px; cursor: pointer; font-size: 0.83rem; }
-.cal-del:hover { background: #991b1b; }
+.cal-del:hover { background: var(--cal-del-hover); }
 
 @media (max-width: 560px) {
   .cal-modal-b { grid-template-columns: 1fr; }
@@ -1125,7 +1415,7 @@ body.cal-dragging .cal-ev { cursor: grabbing; }
 }
 .cal-meeting-l {
   display: block; padding: 1px 6px; font-size: 0.65rem; font-weight: 600;
-  color: #cbd5e1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  color: var(--cal-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
 /* ── the rail as a tree: Everyone → individuals → teams (members nested) ────── */
@@ -1135,15 +1425,15 @@ body.cal-dragging .cal-ev { cursor: grabbing; }
 .cal-fold {
   flex: 0 0 auto; width: 16px; padding: 0; margin: 0;
   background: transparent; border: 0; box-shadow: none;
-  color: #64748b; font-size: 0.7rem; line-height: 1; cursor: pointer;
+  color: var(--cal-label); font-size: 0.7rem; line-height: 1; cursor: pointer;
 }
-.cal-fold:hover { color: #cbd5e1; background: transparent; box-shadow: none; }
+.cal-fold:hover { color: var(--cal-text); background: transparent; box-shadow: none; }
 .cal-team-hd .cal-person { flex: 1; min-width: 0; }
 .cal-person--team .cal-person-n { font-weight: 600; }
 /* A member sits under its team — indented past the caret so the hierarchy is readable at a glance. */
 .cal-person--nested { padding-left: 30px; }
 .cal-person-tz {
-  flex: 0 0 auto; font-size: 0.66rem; color: #64748b;
+  flex: 0 0 auto; font-size: 0.66rem; color: var(--cal-label);
   font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 

@@ -51,8 +51,8 @@ function ReminderCard({ on, onToggle, icon, title, when, to, preview, note }: {
   return (
     <div style={{
       display: 'flex', alignItems: 'flex-start', gap: 12, padding: '13px 14px', borderRadius: 10,
-      border: `1px solid ${on ? 'rgba(255,255,255,0.10)' : 'transparent'}`,
-      background: on ? 'rgba(255,255,255,0.03)' : 'transparent',
+      border: `1px solid ${on ? 'rgba(var(--ink),0.10)' : 'transparent'}`,
+      background: on ? 'rgba(var(--ink),0.03)' : 'transparent',
       opacity: on ? 1 : 0.5, transition: 'opacity .12s ease, background .12s ease',
     }}>
       {/* the flex-basis values are explicit: the checkbox and icon must never grow, and the body

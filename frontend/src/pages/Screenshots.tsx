@@ -187,7 +187,7 @@ export default function Screenshots() {
         }}>
           {/* Main viewer */}
           <div style={{
-            position: 'relative', background: '#0b1120', height: '62vh', minHeight: 360,
+            position: 'relative', background: 'var(--stage-bg)', height: '62vh', minHeight: 360,
             display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'auto',
           }}>
             {/* Prev / Next */}

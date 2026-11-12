@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Navigate, Route, Routes, useLocation, useNavigate, Link } from 'react-router-dom';
 import { hasRole, loadCurrentUser, logout, useAuth, Role, User } from './lib/auth';
 import NotifCenter from './lib/NotifCenter';
+import ThemeToggle from './lib/ThemeToggle';
 import { initPushSound, syncPushIfGranted } from './lib/push';
 import { ToastProvider } from './lib/toast';
 import Login from './pages/Login';
@@ -82,6 +83,7 @@ function TopNav() {
         ))}
       </div>
       <div className="spacer" />
+      <ThemeToggle />
       <NotifCenter />
       <div className="user-info">
         <div><Link to="/account" style={{ color: 'inherit', textDecoration: 'none' }}>{user.full_name || user.username}</Link></div>

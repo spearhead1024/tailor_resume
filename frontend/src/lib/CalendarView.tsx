@@ -109,16 +109,19 @@ type Drag =
 
 /* A stable colour per caller, so the same person is the same colour every week. Google gives each
    calendar a colour; here the caller IS the calendar. */
+/* bg/fg are theme tokens (--cal-ev-<hue>-bg/-fg in styles.css: deep fill + pale text in dark, pale
+   fill + deep text in light); the border/swatch hue reads on both, so it stays literal. */
+const evColour = (hue: string, bd: string) => ({ bg: `var(--cal-ev-${hue}-bg)`, bd, fg: `var(--cal-ev-${hue}-fg)` });
 const PALETTE = [
-  { bg: '#1e3a5f', bd: '#3b82f6', fg: '#bfdbfe' },
-  { bg: '#14532d', bd: '#22c55e', fg: '#bbf7d0' },
-  { bg: '#4c1d95', bd: '#a855f7', fg: '#e9d5ff' },
-  { bg: '#7c2d12', bd: '#f97316', fg: '#fed7aa' },
-  { bg: '#164e63', bd: '#06b6d4', fg: '#a5f3fc' },
-  { bg: '#701a3f', bd: '#ec4899', fg: '#fbcfe8' },
-  { bg: '#713f12', bd: '#eab308', fg: '#fef08a' },
+  evColour('blue', '#3b82f6'),
+  evColour('green', '#22c55e'),
+  evColour('purple', '#a855f7'),
+  evColour('orange', '#f97316'),
+  evColour('cyan', '#06b6d4'),
+  evColour('pink', '#ec4899'),
+  evColour('yellow', '#eab308'),
 ];
-const UNASSIGNED = { bg: '#2a2f3d', bd: '#6b7280', fg: '#d1d5db' };
+const UNASSIGNED = evColour('none', '#6b7280');
 
 function colourFor(name: string) {
   if (!name) return UNASSIGNED;
