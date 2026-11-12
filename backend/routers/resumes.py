@@ -356,6 +356,7 @@ def search_applied_resumes(
             rows.append(row)
 
     rows.sort(key=lambda x: x.get("applied_at") or x.get("created_at") or "", reverse=True)
+    active = storage.active_account_names()
     total = len(rows)
     start = (page - 1) * page_size
     page_rows = rows[start:start + page_size]
@@ -369,7 +370,10 @@ def search_applied_resumes(
             ({"id": pid, "name": name} for pid, name in facet_profiles.items()),
             key=lambda p: p["name"].lower(),
         ),
-        "bidders": sorted(facet_bidders, key=str.lower),
+        # Only accounts that still exist (here or on VPS1, see storage.active_account_names): a
+        # deleted bidder's applications stay in the results, but not as a dropdown choice.
+        "bidders": sorted((b for b in facet_bidders if active is None or b.lower() in active
+                           or b.lower() == bl), key=str.lower),
     }
 
 
