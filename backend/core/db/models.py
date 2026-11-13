@@ -293,8 +293,11 @@ class CvQueueRow(Base):
     work back in the queue. user_id is the bidder whose ChatGPT account does the writing (the
     conversation lives there, so only their extension can delete it).
 
-    stage: queued → writing → ready | failed;  closing → (conversation deleted) → row removed
-    work:  '' | write | answer | delete   (what the current lease is doing)"""
+    stage: queued → writing → ready | failed;  closing = the job is done while ChatGPT was still
+           working on it (whatever it reports is thrown away, its conversation deleted)
+    work:  '' | write | answer   (what the current lease is doing)
+    A conversation no longer needed moves to GptChatRow (deleted from the ChatGPT account).
+    delete_tries / retry_delete_at: unused since gpt_chats_to_delete (kept: SQLite columns stay)."""
     __tablename__ = 'cv_queue'
 
     profile_id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -319,3 +322,25 @@ class CvQueueRow(Base):
     retry_delete_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+
+
+class GptChatRow(Base):
+    """A ChatGPT conversation the extension created that is no longer needed: the owner's
+    extension deletes it from their ChatGPT account (a hidden frame calls ChatGPT's own
+    "Delete chat"), then the row goes. Every conversation is recorded the moment it exists
+    (the extension reports its URL as soon as ChatGPT opens it), so a failed CV, a retry, a
+    closed browser or a Disconnect never leaves one behind in the account.
+
+    device: the browser that created it (its ChatGPT account) — that browser deletes it; any
+    browser of the user may after a day. tries / retry_at: failed deletes wait longer each time."""
+    __tablename__ = 'gpt_chats_to_delete'
+
+    conversation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True, default='')
+    device: Mapped[str] = mapped_column(String(64), default='')
+    label: Mapped[str] = mapped_column(String(255), default='')     # company — job title
+    tries: Mapped[int] = mapped_column(Integer, default=0)
+    retry_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    lease_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    lease_device: Mapped[str] = mapped_column(String(64), default='')
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
