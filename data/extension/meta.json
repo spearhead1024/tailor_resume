@@ -1,6 +1,6 @@
 {
-  "version": "0.9.3",
+  "version": "1.3.0",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "v0.9.3 \u2014 Reliability fixes. Autofill: never puts profile data into the wrong question (labels are read from the field's own container; phone/state/city/zip/salary/years rules are stricter; referrer/emergency contact fields are skipped), prefers answers you taught it over the profile's, and doesn't reuse a US answer for a UK question. Panel: a CV generated for one job can't end up on another if you switch jobs mid-request; switching profile clears the previous profile's CV; a wrong password shows the right message; an expired session returns to the sign-in screen.",
-  "built_at": "2026-10-23T03:16:11Z"
+  "changelog": "v1.3.0 \u2014 The ChatGPT queue now lives on the server: CVs being prepared, questions to answer and conversations to delete are kept in the TailorResume database. The server builds each CV the moment ChatGPT finishes, so closing the browser or the extension never loses finished work, and unfinished work continues after the browser is opened again. Applied / Reported / Skipped jobs are closed by the server itself.",
+  "built_at": "2026-11-13T07:16:34Z"
 }
