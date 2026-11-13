@@ -13,6 +13,7 @@ import json
 import re
 import threading
 import uuid
+from urllib.parse import urlsplit
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import cast
@@ -550,8 +551,18 @@ def _bid_public_profile(p: dict) -> dict:
     }
 
 
+def _is_linkedin(link: str) -> bool:
+    """A posting hosted on LinkedIn (Easy Apply happens there). The extension's Bid tab leaves
+    them out (skip_linkedin=1) — they get their own flow; the web Bid tab still lists them."""
+    try:
+        host = (urlsplit(str(link or "").strip()).hostname or "").lower()
+    except ValueError:
+        return False
+    return host == "linkedin.com" or host.endswith(".linkedin.com")
+
+
 @router.get("/bid/profiles")
-def bid_profiles(user: dict = Depends(get_current_user)):
+def bid_profiles(user: dict = Depends(get_current_user), skip_linkedin: bool = Query(False)):
     """Accessible profiles for the Bid tab — full copyable fields + to-bid count."""
     if not has_role(user, "admin", "bidder"):
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -565,6 +576,8 @@ def bid_profiles(user: dict = Depends(get_current_user)):
     # all ~3.8k generated resumes per profile — together this took the Bid tab load
     # from ~20s to well under a second.
     jobs = _biddable_jobs()
+    if skip_linkedin:
+        jobs = [j for j in jobs if not _is_linkedin(j.get("link"))]
     out = [
         {
             **_bid_public_profile(p),
@@ -578,12 +591,14 @@ def bid_profiles(user: dict = Depends(get_current_user)):
 
 
 @router.get("/bid")
-def bid_queue(profile_id: str, user: dict = Depends(get_current_user)):
-    """The ordered Bid queue (jobs to bid) for one profile."""
+def bid_queue(profile_id: str, user: dict = Depends(get_current_user), skip_linkedin: bool = Query(False)):
+    """The ordered Bid queue (jobs to bid) for one profile. skip_linkedin=1: without LinkedIn postings."""
     if not has_role(user, "admin", "bidder"):
         raise HTTPException(status_code=403, detail="Forbidden")
     _check_profile_access(user, profile_id)
     items = _eligible_bid_items(_get_profile(profile_id))
+    if skip_linkedin:
+        items = [it for it in items if not _is_linkedin(it.get("link"))]
     infos = storage.company_info_for_names([it["company"] for it in items])
     for it in items:
         it["company_info"] = infos.get(it["company"])

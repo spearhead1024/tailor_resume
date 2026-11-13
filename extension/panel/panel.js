@@ -75,6 +75,10 @@ async function api(path, opts) {
   }
 }
 
+// LinkedIn-hosted postings (Easy Apply) are left out of the panel's Bid queue — they get a
+// flow of their own. The web Bid tab still lists them.
+const BID_QUERY = 'skip_linkedin=1';
+
 // Bid audit trail — the same actions the web Bid tab records.
 function track(action, job = currentJob()) {
   if (!job || !S.profileId) return;
@@ -368,7 +372,7 @@ function showLogin(note) {
 async function loadProfiles() {
   $('#main').innerHTML = '<div class="empty"><span class="spinner"></span></div>';
   let data;
-  try { data = await api('/api/resumes/bid/profiles'); } catch (e) {
+  try { data = await api(`/api/resumes/bid/profiles?${BID_QUERY}`); } catch (e) {
     if (e.status === 401) return;        // api() already showed the sign-in screen — don't cover it
     renderMain();
     if (e.status === 403) setError('The side panel is for bidders and admins.'); else showError(e);
@@ -388,7 +392,7 @@ async function refresh() {
   S.refreshing = true; patchRefresh();
   try {
     const pid = S.profileId;
-    const data = await api('/api/resumes/bid/profiles');
+    const data = await api(`/api/resumes/bid/profiles?${BID_QUERY}`);
     S.profiles = (data.profiles || []).filter((p) => p.status !== 'inactive');
     if (S.profileId !== pid) return;     // the bidder switched profile meanwhile — that load wins
     if (!S.profiles.some((p) => p.id === S.profileId)) {
@@ -426,7 +430,7 @@ async function loadQueue({ open = false } = {}) {
   S.queueLoading = true; patchJob();
   let queue = [];
   try {
-    queue = pid ? await api(`/api/resumes/bid?profile_id=${encodeURIComponent(pid)}`) : [];
+    queue = pid ? await api(`/api/resumes/bid?profile_id=${encodeURIComponent(pid)}&${BID_QUERY}`) : [];
   } catch (e) { if (S.profileId === pid) showError(e); }
   // A late answer for a profile that is no longer selected must not replace the current queue.
   if (S.profileId !== pid) return;
