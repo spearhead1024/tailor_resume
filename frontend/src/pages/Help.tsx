@@ -55,7 +55,7 @@ function ExtensionGuide() {
     queryKey: ['extension', 'version'],
     queryFn: () => api.get<ExtMeta>('/api/extension/version'),
   });
-  const [tab, setTab] = useUrlState<'quick' | 'auto'>('install', 'quick');
+  const [tab, setTab] = useUrlState<'win' | 'quick' | 'auto'>('install', navigator.platform.toLowerCase().includes('win') ? 'win' : 'quick');
 
   if (isLoading) return <div><span className="spinner" /> Loading…</div>;
 
@@ -98,14 +98,24 @@ function ExtensionGuide() {
       </div>
 
       <div className="card" style={{ background: 'var(--panel-2)', fontSize: '0.85rem', marginBottom: '0.75rem' }}>
-        👉 <strong>Pick ONE install method below — not both.</strong> They install the same extension two different ways:
+        👉 <strong>Pick ONE install method below.</strong>
         <ul style={{ margin: '6px 0 0', lineHeight: 1.6 }}>
-          <li><strong>Auto-update setup</strong> — Chrome installs it for you and keeps it updated. You do <em>not</em> download the zip or “Load unpacked.”</li>
-          <li><strong>Manual install</strong> — you download the zip and load it yourself. Simple, but it never auto-updates.</li>
+          <li><strong>Automatic updates (Windows)</strong> — recommended. A one-time setup; after that every new version installs by itself.</li>
+          <li><strong>Manual install</strong> — download the zip and load it yourself. It never updates by itself.</li>
+          <li><strong>Managed PCs (policy)</strong> — only for company-managed Chrome (domain-joined / Chrome Enterprise).</li>
         </ul>
       </div>
 
-      <div style={{ display: 'flex', gap: 4, marginBottom: '1rem', borderBottom: '1px solid var(--border)' }}>
+      <div style={{ display: 'flex', gap: 4, marginBottom: '1rem', borderBottom: '1px solid var(--border)', flexWrap: 'wrap' }}>
+        <button onClick={() => setTab('win')}
+          style={{
+            background: 'transparent', border: 'none', borderRadius: 0,
+            borderBottom: `2px solid ${tab === 'win' ? 'var(--accent, #2563eb)' : 'transparent'}`,
+            color: tab === 'win' ? 'var(--text)' : 'var(--muted)',
+            fontWeight: tab === 'win' ? 700 : 400, padding: '8px 14px',
+          }}>
+          ⭐ Automatic updates (Windows)
+        </button>
         <button onClick={() => setTab('quick')}
           style={{
             background: 'transparent', border: 'none', borderRadius: 0,
@@ -122,7 +132,7 @@ function ExtensionGuide() {
             color: tab === 'auto' ? 'var(--text)' : 'var(--muted)',
             fontWeight: tab === 'auto' ? 700 : 400, padding: '8px 14px',
           }}>
-          🔄 Auto-update setup
+          🏢 Managed PCs (policy)
         </button>
       </div>
 
@@ -156,6 +166,7 @@ function ExtensionGuide() {
         </div>
       )}
 
+      {tab === 'win' && <WindowsAutoUpdate />}
       {tab === 'auto' && <AutoUpdateGuide extId={extId} />}
     </div>
   );
@@ -314,6 +325,42 @@ function GuideVideo() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// A normal (not company-managed) Windows PC: Chrome never auto-updates a self-hosted
+// extension there, so a one-time installer keeps a "Load unpacked" folder current
+// (backend routers/extension.py → a scheduled task) and the extension restarts itself
+// into each new version (extension/lib/self-update.js).
+function WindowsAutoUpdate() {
+  const installer = `${BASE}/api/extension/install-windows.cmd`;
+  const folder = '%LOCALAPPDATA%\\TailorResume\\extension';
+  return (
+    <div className="card" style={{ marginBottom: '1rem' }}>
+      <h2 style={{ marginTop: 0 }}>Automatic updates — Windows (one-time setup, ~2 min)</h2>
+      <p className="muted" style={{ fontSize: '0.85rem' }}>
+        After this, new versions install by themselves: the extension folder is checked every 30 minutes and the
+        extension restarts into the new version (if its side panel is open, it shows a <strong>Restart now</strong> button instead).
+        No admin rights needed.
+      </p>
+      <a href={installer} download style={{ display: 'inline-block', marginBottom: 12 }}>
+        <button>⬇ Download the setup file</button>
+      </a>
+      <ol style={{ lineHeight: 1.8, fontSize: '0.9rem' }}>
+        <li><strong>Double-click</strong> <code>TailorResume-auto-update-setup.cmd</code>. If Windows shows
+          “Windows protected your PC”, click <strong>More info → Run anyway</strong>.</li>
+        <li>It downloads the extension, sets up the update check, and opens the extension folder:
+          <code style={{ display: 'block', margin: '4px 0' }}>{folder}</code></li>
+        <li>In Chrome open <code>chrome://extensions</code> and <strong>Remove</strong> any old “TailorResume Assistant”.</li>
+        <li>Turn <strong>Developer mode</strong> ON (top-right) → <strong>Load unpacked</strong> → choose that folder
+          (paste the path above into the folder picker's address bar).</li>
+        <li>Pin the TailorResume icon, click it, and sign in. That's it — you never have to download it again.</li>
+      </ol>
+      <div className="card" style={{ background: 'var(--panel-2)', fontSize: '0.82rem' }}>
+        To stop automatic updates: Windows <strong>Task Scheduler</strong> → delete “TailorResume extension updater”.
+        The update log is in <code>%LOCALAPPDATA%\TailorResume\updater.log</code>.
+      </div>
     </div>
   );
 }
