@@ -282,3 +282,40 @@ class AutofillLabelRow(Base):
     label_key: Mapped[str] = mapped_column(String(300), primary_key=True)
     field: Mapped[str] = mapped_column(String(64), default='')
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class CvQueueRow(Base):
+    """One CV being written by ChatGPT for one (profile, job) — the extension's work queue.
+
+    Kept on the server so nothing is lost when a browser or the extension closes: the
+    extension leases a row (lease_until), runs it in a hidden ChatGPT frame and reports back;
+    the server builds the CV the moment ChatGPT's JSON arrives. A lease that runs out puts the
+    work back in the queue. user_id is the bidder whose ChatGPT account does the writing (the
+    conversation lives there, so only their extension can delete it).
+
+    stage: queued → writing → ready | failed;  closing → (conversation deleted) → row removed
+    work:  '' | write | answer | delete   (what the current lease is doing)"""
+    __tablename__ = 'cv_queue'
+
+    profile_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True, default='')
+    username: Mapped[str] = mapped_column(String(255), default='')
+    company: Mapped[str] = mapped_column(String(255), default='')
+    job_title: Mapped[str] = mapped_column(String(255), default='')
+    stage: Mapped[str] = mapped_column(String(16), index=True, default='queued')
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    want: Mapped[list] = mapped_column(JSON, default=list)          # questions waiting for an answer
+    context: Mapped[str] = mapped_column(String(20000), default='')  # job + CV text, for a CV built by hand
+    conversation: Mapped[str] = mapped_column(String(500), default='')
+    resume_id: Mapped[str] = mapped_column(String(64), default='')
+    ats_score: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str] = mapped_column(String(1000), default='')
+    work: Mapped[str] = mapped_column(String(16), default='')
+    lease_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    lease_device: Mapped[str] = mapped_column(String(64), default='')
+    delete_tries: Mapped[int] = mapped_column(Integer, default=0)
+    retry_delete_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)

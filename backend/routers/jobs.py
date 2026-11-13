@@ -12,6 +12,7 @@ from auth import get_current_user, require_role, storage
 # Both admins and job_adders can manage jobs.
 require_jobs_access = require_role("admin", "job_adder")
 from schemas import JobUpsertRequest
+from core.job_questions import clean_questions
 
 try:
     from zoneinfo import ZoneInfo
@@ -314,6 +315,7 @@ def check_duplicate(body: dict, user: dict = Depends(require_jobs_access)):
 @router.post("")
 def create_job(body: JobUpsertRequest, user: dict = Depends(require_jobs_access)):
     payload = _clean_job_fields({k: v for k, v in dict(body.payload).items() if k not in _SERVER_OWNED})
+    payload["application_questions"] = clean_questions(str(payload.get("note") or "").splitlines())
     _check_duplicate(payload)
     _check_company_week(payload)
     # Reject blacklisted jobs up-front so the toast shows the real reason
@@ -347,6 +349,10 @@ def create_job(body: JobUpsertRequest, user: dict = Depends(require_jobs_access)
 def update_job(job_id: str, body: JobUpsertRequest, user: dict = Depends(require_jobs_access)):
     _job_for_write(job_id, user)
     patch = _clean_job_fields({k: v for k, v in dict(body.payload).items() if k not in _SERVER_OWNED}, partial=True)
+    # The web form's "Application questions" box is `note`: on a VPS2 job it IS the shared
+    # question list. (A synced job's note is VPS1's reviewer note — left alone.)
+    if "note" in patch and (storage.get_job_by_id(job_id) or {}).get("source") != "sync":
+        patch["application_questions"] = clean_questions(str(patch.get("note") or "").splitlines())
     # When the edit touches a duplicate-relevant field, check against the
     # rest of the table (but allow the row to keep its own values).
     if any(k in patch for k in ("link", "company", "job_title")):
@@ -412,6 +418,9 @@ def report_job(job_id: str, body: dict, user: dict = Depends(get_current_user)):
         "reported_at": _utcnow(),
         "source": "user",
     })
+    # Reported: the job leaves every Bid queue — its ChatGPT conversations are deleted.
+    from core import cv_queue
+    cv_queue.close(storage.db_path, job_ids=[job_id])
     return {"ok": True}
 
 

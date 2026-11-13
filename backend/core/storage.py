@@ -988,6 +988,8 @@ def _normalize_job(item: dict) -> dict:
         'link': str(item.get('link', '')).strip(),
         'region': _normalize_market_region(item.get('region', item.get('market_region', ''))),
         'note': str(item.get('note', '')).strip(),
+        # Shared application questions (core/job_questions.py).
+        'application_questions': [str(q).strip() for q in (item.get('application_questions') or []) if str(q).strip()][:15],
         'status': str(item.get('status', 'pending') or 'pending').strip(),
         'source': str(item.get('source', 'manual') or 'manual').strip(),
         'scrape_status': str(item.get('scrape_status', 'done' if item.get('description') else 'queued') or 'queued').strip(),

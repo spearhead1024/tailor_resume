@@ -26,6 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from routers import auth as auth_router
 from routers import devices as devices_router
 from routers import jobs as jobs_router
+from routers import cv_queue as cv_queue_router
 from routers import metrics as metrics_router
 from routers import profiles as profiles_router
 from routers import resumes as resumes_router
@@ -102,6 +103,7 @@ app.include_router(push_router.router)
 app.include_router(teams_router.router)
 app.include_router(live_router.router)   # /api/interviews/live (WebSocket)
 app.include_router(notifications_router.router)
+app.include_router(cv_queue_router.router)   # /api/gpt — the extension's ChatGPT queue
 
 
 @app.get("/api/health")

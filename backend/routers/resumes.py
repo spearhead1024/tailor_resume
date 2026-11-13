@@ -22,6 +22,8 @@ from fastapi.responses import Response
 
 from auth import get_current_user, has_role, require_role, storage
 from core import vps1_adapt, vps1_client
+from core import cv_queue
+from core.job_questions import MAX_LEN, MAX_QUESTIONS, clean_questions, job_questions, questions_patch
 from core.ats_score import analyze_ats_score
 from core.docx_resume_export import build_docx_style_pdf_bundle
 from core.storage import normalize_job_url, tech_stacks_match
@@ -41,9 +43,12 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 BID_ACTIVITY_LOG = LOG_DIR / "bid_activity.jsonl"     # every event, one JSON per line
 BID_SUSPICIOUS_LOG = LOG_DIR / "bid_suspicious.log"   # human-readable cheat flags
 
-_BID_ACTIONS = {"copy_prompt", "generate", "download", "open_link", "mark_applied", "report", "skip", "autofill"}
+_BID_ACTIONS = {"copy_prompt", "generate", "auto_generate", "download", "open_link", "mark_applied", "report", "skip", "autofill"}
 # Steps a bidder is expected to have done before marking a job applied.
 _BID_REQUIRED_BEFORE_APPLY = ["copy_prompt", "generate", "download", "open_link"]
+# The extension's ChatGPT connection wrote the CV itself (prompt → ChatGPT → build): that
+# covers the copy-prompt and generate steps.
+_BID_STEP_COVERS = {"auto_generate": ("copy_prompt", "generate")}
 
 _bid_log_lock = threading.Lock()
 # In-memory per (user_id, profile_id, job_id) -> {action: timestamp}; used only
@@ -602,17 +607,61 @@ def bid_skip(body: dict, user: dict = Depends(get_current_user)):
     reason = str((body or {}).get("reason") or "").strip()
     storage.skip_bid_job(profile_id, job_id, user_id=user.get("id", ""), username=user.get("username", ""),
                          reason=reason)
+    cv_queue.close(storage.db_path, profile_id=profile_id, job_id=job_id)   # its ChatGPT conversation is deleted
     return {"ok": True}
 
 
-@router.get("/bid-job/{job_id}")
-def bid_job_detail(job_id: str, user: dict = Depends(get_current_user)):
-    """Public detail (incl. full description) of an approved job, for the Bid tab."""
+# ── Application questions: one shared list per job (core/job_questions.py) ──────
+_QUESTIONS_MAX = MAX_QUESTIONS
+_QUESTION_MAX_LEN = MAX_LEN
+
+
+def _available_job(job_id: str, user: dict) -> dict:
     if not has_role(user, "admin", "bidder"):
         raise HTTPException(status_code=403, detail="Forbidden")
     job = storage.get_job_by_id(job_id)
     if not job or job.get("status") != "approved" or job.get("flagged") or job.get("admin_applied"):
         raise HTTPException(status_code=404, detail="Job not available")
+    return job
+
+
+@router.put("/bid-job/{job_id}/questions")
+def set_job_questions(job_id: str, body: dict, user: dict = Depends(get_current_user)):
+    """Replace the job's shared application questions (one per line). Every bidder sees them."""
+    job = _available_job(job_id, user)
+    raw = (body or {}).get("questions")
+    lines = raw.splitlines() if isinstance(raw, str) else (raw if isinstance(raw, list) else [])
+    questions = clean_questions(lines)
+    storage.update_job(job_id, questions_patch(job, questions))
+    return {"questions": questions}
+
+
+@router.get("/{resume_id}/answers")
+def get_resume_answers(resume_id: str, user: dict = Depends(get_current_user)):
+    """This CV's answers to the job's application questions."""
+    record = _own_resume(resume_id, user)
+    return {"answers": record.get("application_answers") or []}
+
+
+@router.put("/{resume_id}/answers")
+def set_resume_answers(resume_id: str, body: dict, user: dict = Depends(get_current_user)):
+    """Store this CV's answers ([{question, answer}]) — written in the ChatGPT thread that wrote the CV."""
+    _own_resume(resume_id, user)
+    answers = []
+    for a in ((body or {}).get("answers") or [])[:_QUESTIONS_MAX * 2]:
+        if not isinstance(a, dict):
+            continue
+        q, ans = str(a.get("question") or "").strip()[:_QUESTION_MAX_LEN], str(a.get("answer") or "").strip()[:3000]
+        if q and ans:
+            answers.append({"question": q, "answer": ans})
+    storage.update_generated_resume(resume_id, {"application_answers": answers})
+    return {"answers": answers}
+
+
+@router.get("/bid-job/{job_id}")
+def bid_job_detail(job_id: str, user: dict = Depends(get_current_user)):
+    """Public detail (incl. full description) of an approved job, for the Bid tab."""
+    job = _available_job(job_id, user)
     return {
         "id": job.get("id", ""),
         "company": job.get("company", ""),
@@ -621,6 +670,7 @@ def bid_job_detail(job_id: str, user: dict = Depends(get_current_user)):
         "link": job.get("link", ""),
         "description": job.get("description", ""),
         "company_info": storage.company_info_for_names([job.get("company", "")]).get(job.get("company", "")),
+        "questions": job_questions(job),
     }
 
 
@@ -656,8 +706,12 @@ def bid_track(body: dict, user: dict = Depends(get_current_user)):
     steps[action] = ts
 
     if action == "mark_applied":
-        done = [s for s in _BID_REQUIRED_BEFORE_APPLY if s in steps]
-        missing = [s for s in _BID_REQUIRED_BEFORE_APPLY if s not in steps]
+        have = set(steps)
+        for step, covered in _BID_STEP_COVERS.items():
+            if step in have:
+                have.update(covered)
+        done = [s for s in _BID_REQUIRED_BEFORE_APPLY if s in have]
+        missing = [s for s in _BID_REQUIRED_BEFORE_APPLY if s not in have]
         summary = {"ts": ts, "username": uname, "company": company, "job_title": title,
                    "action": "apply_summary", "steps_done": done,
                    "missing": missing, "suspicious": bool(missing)}
@@ -1154,13 +1208,29 @@ def generate_from_json(
 
     raw = str(body.get("json_text") or "")
     data = _coerce_chatgpt_json(raw)
+    job_id = str(body.get("job_id") or data.get("job_id") or "").strip()
+    profile_id = str(body.get("profile_id") or data.get("profile_id") or "").strip()
+    record = build_cv(user, profile_id, job_id, data, source="chatgpt_json")
+    background_tasks.add_task(_render_pdf_to_cache, record["saved_resume_id"])
+    return {
+        "ok": True,
+        "saved_resume_id": record["saved_resume_id"],
+        "job_company": record["job_company"],
+        "job_title": record["job_title"],
+        "ats_score": record["ats_score"],
+        "ats": record["ats"],
+    }
+
+
+def build_cv(user: dict, profile_id: str, job_id: str, data: dict, *, source: str) -> dict:
+    """ChatGPT's resume JSON (VPS1's 7-key shape) → a saved resume record (the PDF is rendered
+    by the caller, in the background). Shared by the paste flow above and the extension's
+    ChatGPT queue (routers/cv_queue.py). Raises HTTPException(400) when the JSON or the
+    (profile, job) pair is not acceptable."""
     resume_blob = _coerce_pasted_resume(data)
     missing = _missing_required_resume_fields(resume_blob)
     if missing:
         raise HTTPException(status_code=400, detail=f"Pasted JSON is missing required fields: {', '.join(missing)}")
-
-    job_id = str(body.get("job_id") or data.get("job_id") or "").strip()
-    profile_id = str(body.get("profile_id") or data.get("profile_id") or "").strip()
 
     job = storage.get_job_by_id(job_id) if job_id else None
     if not job:
@@ -1225,21 +1295,12 @@ def generate_from_json(
         "created_at": _utcnow_iso(),
         "created_by_user_id": user.get("id", ""),
         "created_by_username": user.get("username", ""),
-        "source": "chatgpt_json",
+        "source": source,
         "ats_score": int(ats.get("overall_score", 0) or 0),
         "ats": ats,
     }
     storage.save_generated_resume(record)
-    background_tasks.add_task(_render_pdf_to_cache, saved_resume_id)
-
-    return {
-        "ok": True,
-        "saved_resume_id": saved_resume_id,
-        "job_company": job.get("company", ""),
-        "job_title": job.get("job_title", ""),
-        "ats_score": record["ats_score"],
-        "ats": ats,
-    }
+    return record
 
 
 # ---------------------------------------------------------------------------
@@ -1279,6 +1340,8 @@ def mark_applied(resume_id: str, user: dict = Depends(get_current_user)):
         "applied_by_user_id": user.get("id", ""),
         "applied_by_username": user.get("username", ""),
     })
+    # Applied: this CV's ChatGPT conversation is deleted (by the bidder's extension).
+    cv_queue.close(storage.db_path, profile_id=record.get("profile_id", ""), job_id=record.get("job_id", ""))
     return {"ok": True}
 
 
