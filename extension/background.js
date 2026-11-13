@@ -1,6 +1,13 @@
-// Service worker. The extension is just the docked Bid side panel now — the
-// panel (panel/panel.js) talks to the API itself via lib/api.js — so all the
-// worker does is make the toolbar button open that panel.
+// Service worker (module). The extension is the docked side panel (Bid / Add job tabs) —
+// the panel (panel/panel.js) talks to the API itself via lib/api.js. The worker makes the
+// toolbar button open that panel, relays the Autofill shortcut, runs the ChatGPT connection
+// (gpt/runner.js — ChatGPT in hidden frames, even while the panel is closed) and restarts a
+// "Load unpacked" install into a newer version its updater put on disk (lib/self-update.js).
+import { installGptRunner, gptBusy } from './gpt/runner.js';
+import { installSelfUpdate } from './lib/self-update.js';
+
+installGptRunner();
+installSelfUpdate(gptBusy);   // a "Load unpacked" install restarts into a newer version on disk
 
 // Set at top level so it applies on every service-worker start, not just install.
 chrome.sidePanel?.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});

@@ -94,7 +94,8 @@ textarea.json { min-height: 96px; font-family: ui-monospace, SFMono-Regular, Men
 .pill.pending     { background: rgba(59,130,246,.14);  color: #93c5fd; }
 
 /* Application details — icon buttons */
-.copy-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px 4px; }
+/* 13 fields: two rows of 7 + 6 (contact & address, then links & background) */
+.copy-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px 4px; }
 .copy-cell { display: grid; justify-items: center; gap: 3px; min-width: 0; }
 .copy-btn { width: 34px; height: 34px; padding: 0; border-radius: 9px; background: var(--panel-2); color: var(--text-soft); border: 1px solid var(--border-soft); box-shadow: none; }
 .copy-btn:hover:not(:disabled) { background: var(--accent-glow); border-color: var(--accent); color: var(--accent); box-shadow: none; }
@@ -172,7 +173,7 @@ select.profile-select { font-weight: 600; font-size: 13px; padding: 8px 10px; ba
   .card-head .card-title { flex: 1 1 100%; }
   .card-head .pair { flex: 1 1 100%; }
   .pair button { width: auto; }
-  .copy-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .copy-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
   .build-row { grid-template-columns: minmax(0, 1fr) 32px; }
   .build-row [data-action="copyPrompt"] { grid-column: 1 / -1; }
   .actions-3 { grid-template-columns: 1fr 1fr; }
@@ -246,3 +247,64 @@ kbd { font-family: inherit; font-size: 10.5px; padding: 0 5px; border: 1px solid
 /* CV preview at the bottom; full width when the panel is two columns */
 #previewCard { grid-column: 1 / -1; }
 .pdf-frame { width: 100%; height: 72vh; min-height: 420px; border: 1px solid var(--border-soft); border-radius: 8px; background: #fff; }
+
+/* ── Tabs by role (Bid / Add job) + who's signed in ─────────────────────────── */
+.topbar {
+  position: sticky; top: 0; z-index: 30; display: flex; align-items: center; gap: 6px;
+  padding: 6px 10px; background: var(--bg); border-bottom: 1px solid var(--border);
+}
+.modes { display: flex; gap: 2px; padding: 2px; background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: 9px; }
+.modes .mode {
+  height: 24px; padding: 0 12px; background: transparent; color: var(--muted); box-shadow: none; border-radius: 7px; font-weight: 600;
+}
+.modes .mode:hover:not(:disabled) { background: var(--panel-3); color: var(--text); box-shadow: none; }
+.modes .mode[aria-selected="true"] { background: var(--accent); color: #fff; }
+.mode-one { font-weight: 600; font-size: 13px; }
+.topbar .who { flex: 1 1 auto; min-width: 0; text-align: right; color: var(--muted); font-size: 12px; }
+.topbar .icon { flex: 0 0 var(--btn-h); }
+
+/* ── Add job tab ────────────────────────────────────────────────────────────── */
+#adAlerts:not([hidden]) { display: grid; gap: 6px; }
+#addView .card-title { white-space: nowrap; flex: 0 0 auto; }
+@media (min-width: 640px) { #adAlerts { grid-column: 1 / -1; } }
+.fld { display: grid; gap: 4px; min-width: 0; }
+.fld-l { display: flex; align-items: baseline; gap: 6px; font-size: 12px; font-weight: 500; color: var(--muted); }
+.fld-l .src { font-weight: 400; font-size: 11px; color: var(--success); }
+.fld-l .count { margin-left: auto; font-weight: 400; font-size: 11px; }
+.fld-2 { display: grid; grid-template-columns: minmax(0, 1fr) 92px; gap: 6px; }
+textarea.desc { min-height: 150px; font-size: 12px; }
+.alert.dup ul, .alert.url-dup ul { margin: 4px 0 0; padding-left: 16px; }
+.url-line { font-size: 12px; display: flex; align-items: center; gap: 6px; }
+.url-line.ok { color: var(--success); }
+.url-line .spinner { width: 11px; height: 11px; }
+#adSubmit svg { order: 2; }
+
+/* ── ChatGPT connection (Bid tab) ───────────────────────────────────────────── */
+.gpt-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 12px; border-radius: 8px; padding: 6px 8px; background: var(--panel-2); }
+.gpt-line .txt { flex: 1 1 160px; min-width: 0; display: flex; align-items: center; gap: 6px; }
+.gpt-line .spinner { width: 11px; height: 11px; }
+.gpt-line.muted { color: var(--text-soft); }
+.gpt-line.warn { background: var(--warning-bg); color: var(--warning); }
+.gpt-line.ok { background: var(--success-bg); color: var(--success); }
+.gpt-line.error { background: var(--danger-bg); color: var(--danger); }
+.gpt-meta { flex: 1 0 100%; font-size: 11px; color: var(--muted); }
+.gpt-meta a { color: var(--muted); text-decoration: underline; }
+.alert.warn { background: var(--warning-bg); color: var(--warning); }
+button.dl-btn { width: 100%; height: 34px; font-size: 13px; font-weight: 600; background: var(--success); }
+button.dl-btn:hover:not(:disabled) { background: #059669; box-shadow: 0 2px 8px rgba(16,185,129,.3); }
+.dl-hint { margin-top: -4px; }
+.build-row.two { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+#buildCard > a.small, #buildCard a[data-action="manual"] { justify-self: start; color: var(--muted); text-decoration: underline; }
+
+/* ── Application questions (Bid tab) ───────────────────────────────────────── */
+.qa-list { display: grid; gap: 8px; }
+.qa-row { display: grid; gap: 4px; padding: 8px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--border); }
+.qa-row .q { font-size: 12.5px; }
+.qa-row .a { white-space: pre-wrap; font-size: 12.5px; line-height: 1.45; }
+.qa-row .spinner { width: 11px; height: 11px; vertical-align: -2px; }
+.row.space { justify-content: space-between; align-items: flex-start; }
+@container (max-width: 300px) { .build-row.two { grid-template-columns: minmax(0, 1fr); } }
+
+/* ── A newer version is installed (Load unpacked + the Windows updater) ──────── */
+.update-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 10px 0; padding: 7px 10px;
+  border-radius: 10px; background: var(--success-bg); color: var(--success); font-size: 12.5px; font-weight: 500; }

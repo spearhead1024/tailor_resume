@@ -1,8 +1,14 @@
-/* TailorResume side panel — the Bid tab's flow docked beside the job page.
+/* TailorResume side panel. Tabs by role: "Bid" (bidders) and "Add job" (job_adders,
+ * panel/adder.js); admins get both.
+ * Bid — the Bid tab's flow docked beside the job page.
+ * With ChatGPT connected (gpt/runner.js), the CV of the job on screen and the next ones is
+ * written and built in the background, so opening a job shows its CV ready to download;
+ * the job's application questions (shared by all bidders) are answered in the same
+ * ChatGPT conversation. Without it, the manual flow below still works.
  * Pick a profile (remembered) and a job. Jobs open in the panel's own "job tab"
  * (a new tab the first time — never over Gmail or whatever you were on), and
  * opening a queued job in a tab yourself selects it here.
- * Copy the ChatGPT prompt → paste the JSON → Generate CV (auto-downloads) →
+ * By hand: copy the ChatGPT prompt → paste the JSON → Generate CV (saved to Downloads) →
  * Mark as Applied / Report / Skip, which moves on to the next job.
  * Autofill fills the application form (and attaches the CV) from the profile
  * plus answers learned per profile via Remember answers.
@@ -10,6 +16,9 @@
 
 import { request, getConfig, setSession, clearSession } from '../lib/api.js';
 import { requestSiteAccess, hasSiteAccess, autofillTab, collectAnswers } from './autofill-runner.js';
+import { createAdder } from './adder.js';
+import { gpt, gptSnapshot, onGptChange, requestChatAccess, threadKey } from '../gpt/client.js';
+import { UPDATE_KEY, diskVersion } from '../lib/self-update.js';
 
 // ---------- tiny utils ----------
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -35,6 +44,7 @@ const I = {
   zip: svg('<line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/>'),
   address: svg('<path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/>'),
   linkedin: svg('<rect x="3" y="3" width="18" height="18" rx="3"/><path d="M8 10.5V16"/><path d="M8 7.5h.01"/><path d="M12 16v-5.5M12 13a2.5 2.5 0 0 1 5 0v3"/>'),
+  github: svg('<path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.9a3.4 3.4 0 0 0-.9-2.6c3-.3 6.2-1.5 6.2-6.7a5.2 5.2 0 0 0-1.4-3.6 4.8 4.8 0 0 0-.1-3.6s-1.2-.3-3.8 1.4a13 13 0 0 0-7 0C6.4 1.3 5.2 1.6 5.2 1.6a4.8 4.8 0 0 0-.1 3.6A5.2 5.2 0 0 0 3.7 8.8c0 5.2 3.2 6.4 6.2 6.7a3.4 3.4 0 0 0-.9 2.6V22"/>'),
   portfolio: svg('<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>'),
   company: svg('<rect x="5" y="3" width="14" height="18" rx="1"/><path d="M9 7h1M14 7h1M9 11h1M14 11h1M9 15h1M14 15h1"/><path d="M10 21v-3h4v3"/>'),
   school: svg('<path d="M2 9l10-5 10 5-10 5z"/><path d="M6 11v5c2 2 10 2 12 0v-5"/><path d="M22 9v6"/>'),
@@ -43,11 +53,20 @@ const I = {
   refresh: svg('<polyline points="23 4 23 10 17 10"/><path d="M20.5 15a9 9 0 1 1-2.1-9.4L23 10"/>'),
   wand: svg('<path d="M15 4V2M15 10V8M11 6h2M17 6h2"/><path d="M3 21l11-11"/><path d="M12.5 8.5l3 3"/>'),
   sparkle: svg('<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/>'),
+  copy: svg('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'),
+  logout: svg('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>'),
 };
 
 // ---------- state ----------
 const S = {
   screen: 'loading', user: null,
+  mode: '',            // the tab on screen: '' | bid | add
+  bidStarted: false,   // the Bid view loads on its first show (it opens a job tab when it loads)
+  gptSnap: null,       // the ChatGPT connection's state + threads, mirrored from chrome.storage
+  questions: [],       // the job's application questions (shared by every bidder)
+  answers: [],         // this CV's answers to them
+  qaBusy: false, qaDraft: null,  // qaDraft: unsaved questions typed in the box (null = none)
+  manual: false,       // show the copy-prompt / paste-JSON flow while ChatGPT is connected
   profiles: [], profileId: '',
   queue: [], queueLoading: false,
   combo: { open: false, q: '', active: 0 },
@@ -131,7 +150,8 @@ function copyFields(p) {
     ['Name', v(p?.name), I.name], ['Email', v(p?.email), I.email], ['Phone', v(p?.phone), I.phone],
     ['Street', street, I.street], ['City', city, I.city], ['State', state, I.state],
     ['ZIP', zip, I.zip], ['Address', v(full), I.address], ['LinkedIn', v(p?.linkedin), I.linkedin],
-    ['Portfolio', v(p?.portfolio || p?.github), I.portfolio], ['Company', v(latest), I.company], ['University', v(universityOf(p)), I.school],
+    ['GitHub', v(p?.github), I.github], ['Portfolio', v(p?.portfolio), I.portfolio],
+    ['Company', v(latest), I.company], ['University', v(universityOf(p)), I.school],
   ];
 }
 
@@ -262,7 +282,14 @@ function cvBlob(id) {
   }
   return pdfCache.promise;
 }
-const cvFilename = () => `${((selectedProfile()?.name || 'Resume').trim() || 'Resume').replace(/[\\/:*?"<>|]+/g, '')} resume.pdf`;
+// "<Profile name> resume.pdf" — the same name the web app's Bid tab saves, so either place
+// replaces the file the other saved. Made safe for every OS (Windows forbids \/:*?"<>| and
+// a trailing dot or space; Chrome rejects control characters and a leading dot).
+const cvFilename = () => {
+  const name = String(selectedProfile()?.name || '').replace(/[\\/:*?"<>|\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ')
+    .trim().replace(/^[.\s]+|[.\s]+$/g, '').slice(0, 120);
+  return `${name || 'Resume'} resume.pdf`;
+};
 
 async function cvPayload() {
   if (!S.resumeId) return null;
@@ -358,11 +385,12 @@ async function login(identifier, password) {
     await setSession({ token: res.token, user: res.user });
     S.user = res.user;
   } catch (e) { S.screen = 'login'; throw e; }
-  S.screen = 'main'; renderMain(); loadShortcut(); await loadProfiles();
+  await startMain();
 }
 
 function showLogin(note) {
-  Object.assign(S, { screen: 'login', profiles: [], queue: [], jobId: '', job: null, resumeId: '', ats: null });
+  Object.assign(S, { screen: 'login', mode: '', bidStarted: false, profiles: [], queue: [], jobId: '', job: null, resumeId: '', ats: null });
+  adder = null;
   clearSession();
   renderLogin();
   if (note) setError(note);
@@ -458,9 +486,14 @@ async function selectJob(id, { open = true } = {}) {
   patchJob(); patchBuild();
   if (!item) return;
   if (open) showJob(item);
+  S.questions = []; S.answers = []; S.qaDraft = null; S.manual = false;
+  const card = $('#qaCard'); if (card) card.innerHTML = '';   // a new job: a fresh questions box
+  patchQA();
+  gptPrepare();
+  if (S.resumeId) loadAnswers();
   try {
     const detail = await api(`/api/resumes/bid-job/${encodeURIComponent(id)}`);
-    if (S.jobId === id) { S.job = detail; patchJob(); }
+    if (S.jobId === id) { S.job = detail; S.questions = detail.questions || []; patchJob(); patchQA(); }
   } catch { /* the queue row already has everything the panel shows */ }
 }
 
@@ -494,22 +527,55 @@ async function generate() {
     if (S.jobId === jobId && S.profileId === profileId) Object.assign(S, { resumeId: rid, ats: fresh.ats, atsScore: fresh.ats_score });
     track('generate', job);
   } finally { S.busy = ''; patchBuild(); }
-  if (rid && S.jobId === jobId && S.resumeId === rid) await download();   // auto-download, like VPS1
+  if (rid && S.jobId === jobId && S.resumeId === rid) await download();   // straight to Downloads, replacing
 }
 
+// Save the CV straight into Downloads, REPLACING a file of the same name — the bidder always
+// has the current CV under one name, never "… (1).pdf". (The Download CV button, and right
+// after Generate CV.)
 async function download() {
   const job = currentJob();
   if (!S.resumeId || !job) return;
   S.busy = 'dl'; patchBuild();
+  const filename = cvFilename();
   try {
     const blob = await cvBlob(S.resumeId);
     const url = URL.createObjectURL(blob);
-    // Cancelling the Save As dialog rejects ("Download canceled") — a choice, not an error.
-    const id = await chrome.downloads.download({ url, filename: cvFilename(), saveAs: true })
-      .catch((e) => { if (/cancel/i.test(e?.message || '')) return undefined; throw e; });
+    const outcome = await saveFile({ url, filename, saveAs: false, conflictAction: 'overwrite' });
     setTimeout(() => URL.revokeObjectURL(url), 120_000);
-    if (id !== undefined) track('download', job);
+    if (outcome === 'complete') { track('download', job); toast(`Saved ${filename} to Downloads`); }
+    else if (outcome === 'locked') setError(`Could not replace ${filename}: that file is open in another program (a PDF viewer?). Close it, then click ⬇ to save again.`);
+    else if (outcome === 'failed') setError(`Could not save ${filename}. Click ⬇ to try again.`);
+    // 'cancelled' (Save As closed) is a choice, not an error.
   } finally { S.busy = ''; patchBuild(); }
+}
+// chrome.downloads.download, resolved with how it ENDED: 'complete' | 'locked' (the file to
+// replace is in use) | 'cancelled' | 'failed'. The download id comes back before the file is
+// written, so the outcome is read from downloads.onChanged.
+function saveFile(opts) {
+  return new Promise((resolve) => {
+    let id = null, settled = false;
+    const done = (v) => { if (settled) return; settled = true; chrome.downloads.onChanged.removeListener(onChanged); clearTimeout(timer); resolve(v); };
+    function onChanged(d) {
+      if (id === null || d.id !== id) return;
+      if (d.state?.current === 'complete') done('complete');
+      else if (d.state?.current === 'interrupted') {
+        const err = String(d.error?.current || '');
+        done(err === 'USER_CANCELED' ? 'cancelled' : /^FILE_(ACCESS_DENIED|BLOCKED|FAILED|NO_SPACE|TOO_LARGE|TRANSIENT_ERROR)$/.test(err) ? 'locked' : 'failed');
+      }
+    }
+    // A Save As dialog can stay open for long; a silent save is done in seconds.
+    const timer = setTimeout(() => done('complete'), opts.saveAs ? 10 * 60_000 : 30_000);
+    chrome.downloads.onChanged.addListener(onChanged);
+    chrome.downloads.download(opts).then((downloadId) => {
+      id = downloadId;
+      // It may have finished before the listener could see it.
+      chrome.downloads.search({ id }).then(([it]) => {
+        if (it?.state === 'complete') done('complete');
+        else if (it?.state === 'interrupted') onChanged({ id, state: { current: 'interrupted' }, error: { current: it.error } });
+      }).catch(() => {});
+    }, (e) => done(/cancel/i.test(e?.message || '') ? 'cancelled' : 'failed'));
+  });
 }
 
 async function finish(kind, run, note) {
@@ -517,6 +583,8 @@ async function finish(kind, run, note) {
   S.busy = kind; patchBuild();
   try {
     await run(job);
+    // Done with this job: the server closes its queue row (its ChatGPT conversation gets deleted).
+    if (gptOn()) gpt('sync').catch(() => {});
     setMessage(note(job));
     await loadQueue({ open: true });
   } finally { S.busy = ''; S.confirm = ''; patchBuild(); }
@@ -575,9 +643,275 @@ function renderLogin() {
   patchAlerts();
 }
 
+// ---------- ChatGPT connection (gpt/runner.js) ----------
+const gptOn = () => !!S.gptSnap?.state.enabled;
+const currentThread = () => (S.gptSnap && S.profileId && S.jobId ? S.gptSnap.threads[threadKey(S.profileId, S.jobId)] || null : null);
+
+// The job on screen and the next ones without a CV (5 in all) are written ahead.
+function gptPrepare() {
+  if (!gptOn() || !S.profileId || !S.jobId) return;
+  const i = Math.max(0, S.queue.findIndex((j) => j.id === S.jobId));
+  const jobs = S.queue.slice(i, i + 20).map((j) => ({ id: j.id, company: j.company, job_title: j.job_title }));
+  // The server keeps the queue (3 ahead, skipping jobs with a CV); the worker is told to look.
+  if (jobs.length) api('/api/gpt/prepare', { method: 'POST', body: { profile_id: S.profileId, jobs } }).then(() => gpt('sync')).catch(() => {});
+}
+async function connectGpt() {
+  const ok = await requestChatAccess();   // first await of the click — Chrome's prompt needs it
+  if (!ok) { setError('Connecting needs access to chatgpt.com. Click Connect ChatGPT again and choose Allow.'); return; }
+  await gpt('connect');
+  S.gptSnap = await gptSnapshot();
+  toast('Checking your ChatGPT account — a paid plan is required');
+  gptPrepare(); patchBuild();
+}
+// A CV the background built: adopt it (for the job on screen and the ones queued after it).
+function adoptBuiltCvs() {
+  if (!S.gptSnap || !S.profileId) return;
+  let current = false;
+  for (const t of Object.values(S.gptSnap.threads)) {
+    if (t.profileId !== S.profileId || !t.resumeId) continue;
+    const item = S.queue.find((j) => j.id === t.jobId);
+    if (item && !item.resume_id) Object.assign(item, { resume_id: t.resumeId, ats: t.ats || null, ats_score: t.atsScore || 0 });
+    if (t.jobId === S.jobId && !S.resumeId && !S.busy) {
+      Object.assign(S, { resumeId: t.resumeId, ats: t.ats || null, atsScore: t.atsScore || 0 });
+      current = true;
+    }
+  }
+  if (current) { patchBuild(); loadAnswers(); }
+}
+let lastWant = '';
+onGptChange(async () => {
+  S.gptSnap = await gptSnapshot();
+  adoptBuiltCvs();
+  patchGptLine();
+  // Answers landed (the thread's pending questions shrank): read them again.
+  const t = currentThread(), want = JSON.stringify(t?.want || []);
+  if (want !== lastWant && S.resumeId) { lastWant = want; loadAnswers(); }
+  else { lastWant = want; patchQA(); }   // status lines (e.g. waiting for a paid account) follow the connection
+});
+
+// ChatGPT's own plan ids → names. Only paid plans are ever accepted (gpt/driver.js).
+const PLAN_NAMES = { plus: 'Plus', pro: 'Pro', team: 'Team', business: 'Business', enterprise: 'Enterprise', edu: 'Edu', go: 'Go' };
+const planLabel = (p) => PLAN_NAMES[p] || (p === 'paid' ? 'paid plan' : p.replace(/_/g, ' '));
+
+function patchGptLine() {
+  const el = $('#gptLine'); if (!el) return;
+  const st = S.gptSnap?.state || {}, t = currentThread();
+  let cls = 'muted', text = '', btn = '';
+  if (!st.enabled) {
+    text = 'ChatGPT is not connected — the CV is written by hand below. (A paid ChatGPT plan is required.)';
+    btn = '<button class="sm" data-action="gptConnect">Connect ChatGPT</button>';
+  } else if (st.status === 'checking') {
+    text = '<span class="spinner"></span> Checking your ChatGPT account (a paid plan is required)…';
+  } else if (st.status === 'needs_login' || st.status === 'needs_plan') {
+    cls = st.status === 'needs_plan' ? 'error' : 'warn';
+    text = st.notice || 'Sign in to chatgpt.com in this browser with a paid account, then press Continue.';
+    btn = '<button class="secondary sm" data-action="gptSignIn">Open ChatGPT</button><button class="sm" data-action="gptContinue">Continue</button>';
+  } else if (S.resumeId) {
+    cls = 'ok'; text = t?.resumeId === S.resumeId ? 'CV written by ChatGPT and built.' : 'CV built.';
+  } else if (!t) {
+    text = 'Queuing this job for ChatGPT…';
+  } else if (t.stage === 'failed') {
+    cls = 'error'; text = `ChatGPT could not write it — ${t.error || 'unknown error'}`;
+    btn = '<button class="secondary sm" data-action="gptRetry">Retry</button>';
+  } else if (t.stage === 'writing') text = `<span class="spinner"></span> ChatGPT is writing this CV${t.attempts > 1 ? ` (try ${t.attempts})` : ''}…`;
+  else if (st.status === 'limited') { cls = 'warn'; text = st.notice; }
+  else {
+    const ahead = Object.values(S.gptSnap.threads).filter((x) => x.work && x.key !== t.key).length;
+    text = `Waiting for a free ChatGPT tab${ahead ? ` (${ahead} working)` : ''}…`;
+  }
+  const mine = Object.values(S.gptSnap?.threads || {}).filter((x) => x.profileId === S.profileId && x.stage !== 'closing');
+  const ready = mine.filter((x) => x.stage === 'ready').length;
+  const plan = st.plan && st.status !== 'needs_plan' ? `ChatGPT ${esc(planLabel(st.plan))} · ` : '';
+  const meta = st.enabled ? `<span class="gpt-meta">${plan}${ready}/${mine.length} ready · <a href="#" data-action="gptDisconnect" title="Stop writing CVs with ChatGPT">Disconnect</a></span>` : '';
+  el.className = `gpt-line ${cls}`;
+  el.innerHTML = `<span class="txt">${text.startsWith('<span') ? text : esc(text)}</span>${btn}${meta}`;
+}
+
+// ---------- application questions (shared per job) + this CV's answers ----------
+async function loadAnswers() {
+  const rid = S.resumeId;
+  if (!rid) { S.answers = []; patchQA(); return; }
+  try { const r = await api(`/api/resumes/${encodeURIComponent(rid)}/answers`); if (S.resumeId === rid) S.answers = r.answers || []; }
+  catch { /* keeps what it had */ }
+  patchQA();
+}
+function answerFor(q) { return S.answers.find((a) => a.question.toLowerCase() === q.toLowerCase())?.answer || ''; }
+// A new chat needs the job (and the CV, if it was pasted) when no ChatGPT conversation wrote it.
+function answerContext() {
+  const j = currentJob(), p = selectedProfile();
+  const pasted = ($('#jsonInput')?.value || '').trim();
+  return [`JOB: ${j?.job_title} at ${j?.company}`, S.job?.description ? `JOB DESCRIPTION:\n${String(S.job.description).slice(0, 6000)}` : '',
+    `CANDIDATE: ${p?.name || ''}`, pasted ? `CANDIDATE RESUME (JSON):\n${pasted.slice(0, 9000)}` : ''].filter(Boolean).join('\n\n');
+}
+async function askAnswers() {
+  const missing = S.questions.filter((q) => !answerFor(q));
+  if (!missing.length || !gptOn()) return;
+  const j = currentJob();
+  await api('/api/gpt/want', { method: 'POST', body: { profile_id: S.profileId, job_id: S.jobId, resume_id: S.resumeId, questions: missing,
+    company: j?.company || '', job_title: j?.job_title || '', context: answerContext() } }).then(() => gpt('sync')).catch(() => {});
+}
+async function saveQuestions() {
+  const jobId = S.jobId; if (!jobId) return;
+  const text = $('#qaInput')?.value || '';
+  S.qaBusy = true; patchQA();
+  try {
+    const r = await api(`/api/resumes/bid-job/${encodeURIComponent(jobId)}/questions`, { method: 'PUT', body: { questions: text } });
+    if (S.jobId !== jobId) return;
+    S.questions = r.questions || []; S.qaDraft = null;
+    const box = $('#qaInput'); if (box) box.blur();   // show the saved (cleaned) list
+    toast(S.questions.length ? 'Questions saved for every bidder' : 'Questions cleared');
+    await askAnswers();
+  } finally { S.qaBusy = false; patchQA(); }
+}
+// The textarea is built once per card and never redrawn under the user: what they type is a
+// draft (S.qaDraft) until saved or the job changes; only the answers below update live.
+function patchQA() {
+  const el = $('#qaCard'); if (!el) return;
+  el.hidden = !currentJob();
+  if (el.hidden) return;
+  if (!$('#qaInput', el)) {
+    el.innerHTML = `
+      <div class="card-head"><span class="card-title">Application questions</span><span id="qaCopyAll"></span></div>
+      <textarea id="qaInput" rows="3" placeholder="One question per line — e.g.&#10;Briefly explain your recent project&#10;Why are you interested in this role?"></textarea>
+      <div class="row"><button class="grow" id="qaSave" data-action="saveQuestions"></button></div>
+      <div class="muted small">Shared with every bidder on this job. Answered in the ChatGPT conversation that wrote this CV — 2–3 sentences each.</div>
+      <div id="qaErr"></div>
+      <div class="qa-list" id="qaList"></div>`;
+    $('#qaInput', el).addEventListener('input', (e) => { S.qaDraft = e.target.value; });
+  }
+  const box = $('#qaInput', el);
+  if (S.qaDraft == null && document.activeElement !== box) {
+    box.value = S.questions.join('\n');
+    box.rows = Math.min(6, Math.max(3, S.questions.length + 1));
+  }
+  const save = $('#qaSave', el);
+  save.disabled = S.qaBusy;
+  save.innerHTML = S.qaBusy ? '<span class="spinner"></span> Saving…' : 'Save questions &amp; answer';
+  $('#qaCopyAll', el).innerHTML = S.answers.length ? `<button class="secondary sm" data-action="copyAllAnswers">${I.copy} Copy all</button>` : '';
+  const t = currentThread(), pending = new Set((t?.want || []).map((q) => q.toLowerCase()));
+  $('#qaErr', el).innerHTML = t?.error && /^Answers/.test(t.error) ? `<div class="alert error"><span>${esc(t.error)}</span></div>` : '';
+  const writing = t && ['queued', 'writing', 'building'].includes(t.stage);
+  $('#qaList', el).innerHTML = S.questions.map((q, i) => {
+    const a = answerFor(q);
+    const busy = writing || pending.has(q.toLowerCase());
+    const blocked = ['needs_plan', 'needs_login', 'checking'].includes(S.gptSnap?.state.status);
+    const state = a ? '' : !gptOn() ? 'Connect ChatGPT to answer it.'
+      : blocked ? 'Answered once a paid ChatGPT account is confirmed.'
+      : busy ? '<span class="spinner"></span> ChatGPT is answering…'
+      : S.resumeId ? 'Not answered yet — press Save questions &amp; answer.' : 'Answered once the CV is written.';
+    return `<div class="qa-row">
+      <div class="row space"><strong class="q">${esc(q)}</strong>${a ? `<button class="sm" data-action="copyAnswer" data-i="${i}">${I.copy} Copy</button>` : ''}</div>
+      ${a ? `<div class="a">${esc(a)}</div>` : `<div class="muted small">${state}</div>`}
+    </div>`;
+  }).join('');
+}
+
+// ---------- a newer version is on disk (the updater put it there) ----------
+async function patchUpdateBar() {
+  const el = $('#updateBar'); if (!el) return;
+  const running = chrome.runtime.getManifest().version;
+  const disk = await diskVersion();
+  el.hidden = !disk || disk === running;
+  if (!el.hidden) el.innerHTML = `<span>Version ${esc(disk)} is installed — restart to use it.</span><button class="sm" data-action="restartExt">Restart now</button>`;
+}
+chrome.storage.onChanged.addListener((ch, area) => { if (area === 'local' && UPDATE_KEY in ch) patchUpdateBar(); });
+
+// ---------- tabs by role ----------
+// Bid: bidders and admins (the Bid API's own rule). Add job: job_adders and admins
+// (the Jobs API's rule). Someone with both gets both tabs; the last one used is kept.
+const MODE_KEY = 'panelMode';
+const hasRole = (u, ...roles) => !!u && (roles.includes('admin') && u.is_admin || roles.some((r) => (u.roles || []).includes(r)));
+const MODES = [
+  { id: 'bid', label: 'Bid', allowed: (u) => hasRole(u, 'admin', 'bidder') },
+  { id: 'add', label: 'Add job', allowed: (u) => hasRole(u, 'admin', 'job_adder') },
+];
+const availableModes = () => MODES.filter((m) => m.allowed(S.user)).map((m) => m.id);
+
+let adder = null;
+const getAdder = () => adder || (adder = createAdder({
+  api, toast, requestSiteAccess,
+  webBase: async () => (await getConfig()).apiBase,
+}));
+
+// Signed in: re-read who this is (roles can change after sign-in), then show the tabs.
+async function startMain() {
+  S.screen = 'main';
+  S.gptSnap = await gptSnapshot();
+  try {
+    const me = await request('/api/auth/me');
+    if (me?.id) { S.user = me; await chrome.storage.local.set({ user: me }); }
+  } catch (e) {
+    if (e?.status === 401) { showLogin('Session expired — please sign in again.'); return; }
+    // offline / server down: the stored user decides the tabs
+  }
+  const modes = availableModes();
+  if (!modes.length) { renderNoAccess(); return; }
+  renderFrame(modes);
+  patchUpdateBar();
+  const { [MODE_KEY]: saved } = await chrome.storage.local.get(MODE_KEY).catch(() => ({}));
+  // The Autofill shortcut was pressed on a job page: that is Bid's job.
+  const { [AUTOFILL_REQ]: req } = await chrome.storage.session.get(AUTOFILL_REQ).catch(() => ({}));
+  const mode = req && modes.includes('bid') ? 'bid' : (modes.includes(saved) ? saved : modes[0]);
+  await setMode(mode);
+  if (mode === 'bid' && await takeAutofillRequest()) autofill({ fromShortcut: true }).catch(showError);
+}
+
+function renderFrame(modes) {
+  const u = S.user || {};
+  const tabs = modes.length > 1
+    ? `<nav class="modes" role="tablist">${modes.map((id) => {
+      const m = MODES.find((x) => x.id === id);
+      return `<button role="tab" class="mode" data-action="mode" data-mode="${id}" aria-selected="false">${esc(m.label)}</button>`;
+    }).join('')}</nav>`
+    : `<span class="mode-one">${esc(MODES.find((x) => x.id === modes[0]).label)}</span>`;
+  $('#app').innerHTML = `
+    <header class="topbar">
+      ${tabs}
+      <span class="who ellipsis" title="${esc(u.full_name || u.username || '')} · TailorResume Assistant v${esc(chrome.runtime.getManifest().version)}">${esc(u.username || '')}</span>
+      <button class="icon secondary" data-action="logout" title="Sign out">${I.logout}</button>
+    </header>
+    <div class="update-bar" id="updateBar" hidden></div>
+    <div id="bidView" role="tabpanel" hidden></div>
+    <div id="addView" role="tabpanel" hidden></div>`;
+  $('#app').onclick = onClick;
+  // Reason chips are spans (not buttons, so they keep their small pill size): Enter / Space click them.
+  $('#app').onkeydown = (e) => {
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.matches?.('.chip')) { e.preventDefault(); e.target.click(); }
+  };
+}
+
+async function setMode(mode) {
+  if (!availableModes().includes(mode)) return;
+  S.mode = mode;
+  chrome.storage.local.set({ [MODE_KEY]: mode }).catch(() => {});
+  document.querySelectorAll('.modes .mode').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.mode === mode)));
+  $('#bidView').hidden = mode !== 'bid';
+  $('#addView').hidden = mode !== 'add';
+  if (mode !== 'add') adder?.hide();   // its tab-URL checks run only while it is on screen
+  if (mode === 'bid' && !S.bidStarted) {
+    S.bidStarted = true;
+    renderMain(); loadShortcut();
+    await loadProfiles();
+  } else if (mode === 'add') {
+    await getAdder().show($('#addView'));
+  }
+}
+
+function renderNoAccess() {
+  S.screen = 'noaccess';
+  const u = S.user || {};
+  $('#app').innerHTML = `
+    <div class="login">
+      <div class="hero"><img src="../icons/icon128.png" alt=""><strong>TailorResume</strong></div>
+      <div class="alert error"><span>This panel is for bidders and job adders. <b>${esc(u.username || 'Your account')}</b> has neither role — ask an admin.</span></div>
+      <button class="secondary" data-action="logout">Sign out</button>
+    </div>`;
+  $('#app').onclick = onClick;
+}
+
 function renderMain() {
   previewKey = '';   // fresh #previewCard — let patchPreview draw it again
-  $('#app').innerHTML = `
+  $('#bidView').innerHTML = `
     <main class="main" id="main">
       <div id="alerts"></div>
       <!-- Two columns when the panel is dragged wide (see panel.css); stacked otherwise. -->
@@ -597,17 +931,13 @@ function renderMain() {
           <div id="jobLine"></div>
         </section>
         <section class="card" id="buildCard"></section>
+        <section class="card" id="qaCard" hidden></section>
       </div>
       <section class="card" id="previewCard" hidden></section>
     </main>`;
-  $('#app').onclick = onClick;
-  // Reason chips are spans (not buttons, so they keep their small pill size): Enter / Space click them.
-  $('#app').onkeydown = (e) => {
-    if ((e.key === 'Enter' || e.key === ' ') && e.target.matches?.('.chip')) { e.preventDefault(); e.target.click(); }
-  };
   $('#profileSelect').addEventListener('change', (e) => { setError(''); setMessage(''); selectProfile(e.target.value); });
   wireCombo();
-  patchAlerts(); patchProfile(); patchJob(); patchBuild(); patchCopy();
+  patchAlerts(); patchProfile(); patchJob(); patchBuild(); patchCopy(); patchQA();
 }
 
 // The job box shows the current job ("Company — Title") until you click into it;
@@ -736,17 +1066,25 @@ function patchBuild() {
   const reasons = {};
   for (const id of ['reportReason', 'skipReason']) { const t = $('#' + id); if (t?.value) reasons[id] = t.value; }
   const b = S.busy, spin = '<span class="spinner"></span>';
+  // The copy-prompt / paste-JSON flow: always without ChatGPT; with it, on request or when it failed.
+  const manual = !gptOn() || S.manual || currentThread()?.stage === 'failed';
   const score = S.atsScore;
   const tone = score >= 90 ? 'good' : score >= 75 ? 'mid' : 'low';
   el.innerHTML = `
-    <div class="card-head"><span class="card-title">Build resume</span>
+    <div class="card-head"><span class="card-title">Resume</span>
       ${S.resumeId && score ? `<button class="ats-badge ${tone}" data-action="toggleAts" title="${S.ats ? 'How this score is calculated' : 'ATS score'}">ATS ${score}${S.ats ? (S.atsOpen ? ' ▴' : ' ▾') : ''}</button>` : ''}</div>
-    <div class="build-row">
-      <button class="grow" data-action="copyPrompt" ${b ? 'disabled' : ''}>${b === 'prompt' ? spin : I.sparkle} Copy GPT Prompt</button>
-      <button class="grow" data-action="generate" ${b ? 'disabled' : ''}>${b === 'gen' ? spin : 'Generate CV'}</button>
-      <button class="icon secondary" data-action="download" ${S.resumeId && !b ? '' : 'disabled'} title="${S.resumeId ? 'Download the CV (PDF)' : 'Generate the CV first'}">${b === 'dl' ? spin : I.download}</button>
-    </div>
-    <textarea id="jsonInput" class="json" spellcheck="false" placeholder="Paste the JSON ChatGPT returned…"></textarea>
+    <div id="gptLine"></div>
+    ${S.resumeId ? `
+      <button class="dl-btn" data-action="download" ${b ? 'disabled' : ''} title="Saves it straight to Downloads, replacing the previous file of the same name">${b === 'dl' ? spin : I.download} Download CV</button>
+      <div class="muted small dl-hint">Saves “${esc(cvFilename())}” to Downloads — replaces the old one.</div>` : ''}
+    ${manual ? `
+      <div class="build-row two">
+        <button class="grow" data-action="copyPrompt" ${b ? 'disabled' : ''}>${b === 'prompt' ? spin : I.sparkle} Copy GPT Prompt</button>
+        <button class="grow" data-action="generate" ${b ? 'disabled' : ''}>${b === 'gen' ? spin : (S.resumeId ? 'Generate again' : 'Generate CV')}</button>
+      </div>
+      <textarea id="jsonInput" class="json" spellcheck="false" placeholder="Paste the JSON ChatGPT returned…"></textarea>
+      ${gptOn() ? '<a href="#" class="small" data-action="manual">Hide the manual flow</a>' : ''}`
+    : '<a href="#" class="small" data-action="manual">Write it by hand instead (copy prompt / paste JSON)</a>'}
     ${S.atsOpen ? atsBreakdown() : ''}
     <div class="actions-3">
       <button data-action="confirmApply" ${S.resumeId && !b ? '' : 'disabled'} title="${S.resumeId ? 'Mark applied and go to the next job' : 'Generate the CV first'}">${b === 'apply' ? spin : 'Mark as Applied'}</button>
@@ -770,7 +1108,8 @@ function patchBuild() {
         <textarea id="skipReason" rows="2" placeholder="Pick a reason above or type one…"></textarea>
         <div class="row"><button class="warn grow" data-action="skipSubmit" ${b ? 'disabled' : ''}>${b === 'skip' ? spin : 'Skip job'}</button><button class="secondary grow" data-action="cancelConfirm">Cancel</button></div>
       </div>` : ''}`;
-  $('#jsonInput').value = prev;
+  if ($('#jsonInput')) $('#jsonInput').value = prev;
+  patchGptLine();
   for (const [id, v] of Object.entries(reasons)) { const t = $('#' + id); if (t) t.value = v; }
   if (S.confirm === 'report' && !b && !reasons.reportReason) $('#reportReason')?.focus();
   if (S.confirm === 'skip' && !b && !reasons.skipReason) $('#skipReason')?.focus();
@@ -828,8 +1167,11 @@ async function takeAutofillRequest() {
   return Date.now() - req.at < 15000;
 }
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg?.type === 'autofill' && S.screen === 'main') {
-    takeAutofillRequest().then((ok) => { if (ok && !S.fill.busy) autofill({ fromShortcut: true }).catch(showError); });
+  if (msg?.type === 'autofill' && S.screen === 'main' && availableModes().includes('bid')) {
+    (async () => {
+      if (S.mode !== 'bid') await setMode('bid');   // Autofill belongs to the Bid tab
+      if (await takeAutofillRequest() && !S.fill.busy) await autofill({ fromShortcut: true });
+    })().catch(showError);
   }
 });
 
@@ -878,6 +1220,18 @@ async function onClick(e) {
   const a = t.dataset.action;
   try {
     switch (a) {
+      case 'mode': if (t.dataset.mode !== S.mode) await setMode(t.dataset.mode); break;
+      case 'gptConnect': await connectGpt(); break;
+      case 'gptContinue': await gpt('continue'); break;
+      case 'restartExt': chrome.runtime.reload(); break;
+      case 'gptSignIn': await chrome.tabs.create({ url: 'https://chatgpt.com/auth/login' }); break;   // the user's own tab, to sign in
+      case 'gptDisconnect': e.preventDefault(); await gpt('disconnect'); toast('ChatGPT disconnected'); break;
+      case 'gptRetry': await api('/api/gpt/retry', { method: 'POST', body: { profile_id: S.profileId, job_id: S.jobId } }); await gpt('sync'); break;
+      case 'manual': e.preventDefault(); S.manual = !S.manual; patchBuild(); break;
+      case 'saveQuestions': await saveQuestions(); break;
+      case 'copyAnswer': { const q = S.questions[Number(t.dataset.i)]; if (q) await copyText(answerFor(q), 'Answer'); break; }
+      case 'copyAllAnswers': await copyText(S.questions.filter(answerFor).map((q) => `${q}\n${answerFor(q)}`).join('\n\n'), 'Answers'); break;
+      case 'logout': showLogin(); break;
       case 'openJob': e.preventDefault(); await showJob(currentJob()); break;
       case 'copyPrompt': await copyPrompt(); break;
       case 'generate': await generate(); break;
@@ -915,7 +1269,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local' || !('token' in changes)) return;
   const authed = !!changes.token.newValue;
   if (authed && S.screen === 'login') boot();
-  else if (!authed && S.screen === 'main') showLogin();
+  else if (!authed && (S.screen === 'main' || S.screen === 'noaccess')) showLogin();
 });
 
 // ---------- boot ----------
@@ -925,10 +1279,6 @@ async function boot() {
   const cfg = await getConfig();
   S.user = cfg.user;
   if (!cfg.token) { S.screen = 'login'; renderLogin(); return; }
-  S.screen = 'main';
-  renderMain();
-  loadShortcut();
-  await loadProfiles();
-  if (await takeAutofillRequest()) autofill({ fromShortcut: true }).catch(showError);
+  await startMain();
 }
 boot();
