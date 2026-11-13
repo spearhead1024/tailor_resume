@@ -6,6 +6,10 @@ import { userDateTime } from '../lib/etTime';
 import { useAuth } from '../lib/auth';
 import { useUrlState, useOnChange } from '../lib/urlState';
 
+// The From/To filter's day: from 5pm GMT+9 to 5pm GMT+9 the next day. ("Etc/GMT-9" IS GMT+9 —
+// the Etc zones' sign is inverted.)
+const APPLIED_DAY = { tz: 'Etc/GMT-9', startHour: 17 };
+
 type Row = {
   saved_resume_id: string;
   job_id: string;
@@ -62,12 +66,12 @@ export default function Applied() {
     if (bidder) sp.set('bidder', bidder);
     if (dateFrom) sp.set('date_from', dateFrom);
     if (dateTo) sp.set('date_to', dateTo);
-    // The From/To days mean days in the viewer's zone — the same zone the Applied times are shown in.
-    if (dateFrom || dateTo) sp.set('tz', tz || Intl.DateTimeFormat().resolvedOptions().timeZone);
+    // A From/To day is a work day: 5pm GMT+9 to 5pm GMT+9 the next day (the 12th = 12th 5pm … 13th 4:59pm).
+    if (dateFrom || dateTo) { sp.set('tz', APPLIED_DAY.tz); sp.set('day_start', String(APPLIED_DAY.startHour)); }
     sp.set('page', String(page));
     sp.set('page_size', String(pageSize));
     return sp.toString();
-  }, [debounced, profileId, bidder, dateFrom, dateTo, page, pageSize, tz]);
+  }, [debounced, profileId, bidder, dateFrom, dateTo, page, pageSize]);
 
   const { data, isFetching } = useQuery({
     queryKey: ['applied', 'search', params],
@@ -149,9 +153,9 @@ export default function Applied() {
           <option value="">All bidders</option>
           {(data?.bidders || []).map((b) => <option key={b} value={b}>{b}</option>)}
         </select>
-        <label style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>Applied</label>
-        <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} style={{ maxWidth: 150 }} title="From (ET)" />
-        <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} style={{ maxWidth: 150 }} title="To (ET)" />
+        <label style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>Applied <span title="A day runs from 5pm GMT+9 to 5pm GMT+9 the next day">(day from 5pm GMT+9)</span></label>
+        <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} style={{ maxWidth: 150 }} title="From — the day starts at 5pm GMT+9 (the 12th = 12th 5pm to 13th 5pm)" />
+        <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} style={{ maxWidth: 150 }} title="To — the day starts at 5pm GMT+9 (the 12th = 12th 5pm to 13th 5pm)" />
         {hasFilters && <button className="secondary" onClick={clearFilters} style={{ fontSize: '0.82rem' }}>Clear</button>}
       </div>
 
@@ -230,7 +234,7 @@ function RowView({ row, open, onToggle, onPdf, onSchedule, tz }: {
         <td style={{ whiteSpace: 'nowrap' }}>
           {/* PDF works for both: a VPS_1 resume streams through the backend, falling back to VPS_1's
               public link if it can't be fetched. Schedule adds a row to the Interviews board. */}
-          <button className="secondary" onClick={(e) => { e.stopPropagation(); onPdf(); }}>📄 PDF</button>
+          <button className="secondary" onClick={(e) => { e.stopPropagation(); onPdf(); }}>📄 Resume</button>
           <button className="secondary" style={{ marginLeft: 4 }} disabled={scheduling}
             onClick={async (e) => { e.stopPropagation(); setScheduling(true); try { await onSchedule(); } finally { setScheduling(false); } }}
             title="Add this resume + job description as a row on the Interviews board">{scheduling ? '…' : '📅 Schedule'}</button>

@@ -225,9 +225,9 @@ def list_resumes(user: dict = Depends(get_current_user)):
     return [r for r in items if r.get("profile_id") in allowed]
 
 
-def _et_day(iso_ts: str, tz=None) -> str:
+def _et_day(iso_ts: str, tz=None, start_hour: int = 0) -> str:
     """Calendar date (YYYY-MM-DD) of a UTC ISO timestamp in `tz` (default US Eastern), '' if
-    unparseable."""
+    unparseable. start_hour: the hour a day starts at (17 → 12th 5pm … 13th 4:59pm is the 12th)."""
     raw = str(iso_ts or "").strip()
     if not raw:
         return ""
@@ -237,7 +237,7 @@ def _et_day(iso_ts: str, tz=None) -> str:
         return raw[:10]
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
-    return ts.astimezone(tz or _ET).date().isoformat()
+    return (ts.astimezone(tz or _ET) - timedelta(hours=start_hour)).date().isoformat()
 
 
 @router.get("/search")
@@ -247,7 +247,8 @@ def search_applied_resumes(
     bidder: str = Query(""),
     date_from: str = Query(""),   # ET date YYYY-MM-DD (applied_at)
     date_to: str = Query(""),
-    tz: str = Query(""),          # IANA zone the dates are in (the viewer's — Applied shows times in it)
+    tz: str = Query(""),          # IANA zone the dates are in (Applied: Etc/GMT-9, i.e. GMT+9)
+    day_start: int = Query(0, ge=0, le=23),   # the hour a day starts at in `tz` (Applied: 17 = 5pm)
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=200),
     user: dict = Depends(get_current_user),
@@ -296,7 +297,7 @@ def search_applied_resumes(
             continue
         if bl and who.lower() != bl:
             continue
-        applied_day = _et_day(r.get("applied_at") or r.get("created_at"), day_tz)
+        applied_day = _et_day(r.get("applied_at") or r.get("created_at"), day_tz, day_start)
         if date_from and applied_day and applied_day < date_from:
             continue
         if date_to and applied_day and applied_day > date_to:
@@ -348,7 +349,7 @@ def search_applied_resumes(
                 continue
             if bl and who.lower() != bl:
                 continue
-            applied_day = _et_day(row.get("applied_at") or row.get("created_at"), day_tz)
+            applied_day = _et_day(row.get("applied_at") or row.get("created_at"), day_tz, day_start)
             if date_from and applied_day and applied_day < date_from:
                 continue
             if date_to and applied_day and applied_day > date_to:
