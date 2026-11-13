@@ -12,7 +12,33 @@ const BLANK_JOB = { company: '', job_title: '', description: '', link: '', regio
 // The add-job form starts on the region last used, so adding a batch of EU jobs
 // doesn't mean re-picking EU every time (a personal default → localStorage, not URL).
 const LAST_REGION_KEY = 'jobs.lastRegion';
-const lastRegion = () => { try { return localStorage.getItem(LAST_REGION_KEY) || 'US'; } catch { return 'US'; } };
+// The markets jobs and profiles are matched on (the server rejects anything else).
+const JOB_REGIONS: [string, string][] = [['US', 'US'], ['EU', 'EU'], ['LATAM', 'LATAM'], ['ANY', 'Any']];
+const normRegion = (r: string) => { const v = String(r || '').toUpperCase(); const x = v === 'GLOBAL' ? 'ANY' : v; return JOB_REGIONS.some(([k]) => k === x) ? x : 'US'; };
+const RegionOptions = () => <>{JOB_REGIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</>;
+const lastRegion = () => { try { return normRegion(localStorage.getItem(LAST_REGION_KEY) || 'US'); } catch { return 'US'; } };
+// The server's submit rules (routers/jobs.py _clean_job_fields), checked as the form is filled
+// so Save is only offered for a job the server will accept.
+const MIN_DESCRIPTION = 100;
+function jobProblems(j: { company: string; job_title: string; link: string; description: string }): string[] {
+  const out: string[] = [];
+  const missing = ([['company', 'company'], ['job_title', 'job title'], ['link', 'job link'], ['description', 'description']] as const)
+    .filter(([k]) => !String(j[k] || '').trim()).map(([, l]) => l);
+  if (missing.length) out.push(`Still needed: ${missing.join(', ')}`);
+  const link = String(j.link || '').trim();
+  if (link) {
+    let good = false;
+    try { const u = new URL(link); good = /^https?:$/.test(u.protocol) && u.hostname.includes('.') && !/\s/.test(link); } catch { /* not a URL */ }
+    if (!good) out.push('The link must be a full web address (https://…)');
+  }
+  for (const [k, l] of [['company', 'company'], ['job_title', 'job title']] as const) {
+    if (/^(https?:\/\/|www\.)/i.test(String(j[k] || '').trim())) out.push(`The ${l} looks like a link`);
+  }
+  const desc = String(j.description || '').trim();
+  if (desc && desc.length < MIN_DESCRIPTION) out.push(`The description is too short (${desc.length}/${MIN_DESCRIPTION} characters)`);
+  return out;
+}
+const REQ = <span style={{ color: 'var(--danger, #dc2626)' }} title="Required"> *</span>;
 const rememberRegion = (r: string) => { try { localStorage.setItem(LAST_REGION_KEY, r); } catch { /* storage blocked */ } };
 const blankJob = () => ({ ...BLANK_JOB, region: lastRegion() });
 
@@ -128,11 +154,13 @@ export default function Jobs() {
   const [showForm, setShowForm] = useState(false);
   const [newJob, setNewJob] = useState(blankJob);
   const newDup = useDuplicateCheck(showForm ? newJob : BLANK_JOB);
+  const newProblems = jobProblems(newJob);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState<any>({});
   const editDup = useDuplicateCheck(
     editingId ? { company: editDraft.company || '', job_title: editDraft.job_title || '', link: editDraft.link || '', region: editDraft.region || '' } : BLANK_JOB,
     editingId || '');
+  const editProblems = editingId ? jobProblems({ company: editDraft.company || '', job_title: editDraft.job_title || '', link: editDraft.link || '', description: editDraft.description || '' }) : [];
 
   // Debounce the free-text search so we don't refetch on every keystroke.
   useEffect(() => {
@@ -313,13 +341,13 @@ export default function Jobs() {
       const full = await api.get<any>(`/api/jobs/${job.id}`);
       setEditDraft({
         company: full.company || '', job_title: full.job_title || '',
-        link: full.link || '', region: full.region || 'US',
+        link: full.link || '', region: normRegion(full.region),
         description: full.description || '', note: full.note || '',
       });
     } catch {
       setEditDraft({
         company: job.company || '', job_title: job.job_title || '',
-        link: job.link || '', region: job.region || 'US', description: '', note: '',
+        link: job.link || '', region: normRegion(job.region), description: '', note: '',
       });
     }
   }
@@ -371,8 +399,7 @@ export default function Jobs() {
         </select>
         <select value={regionFilter} onChange={(e) => setRegionFilter(e.target.value)} style={{ ...FILTER, width: 100 }} title="Region">
           <option value="">All regions</option>
-          <option value="US">US</option><option value="EU">EU</option>
-          <option value="ASIA">ASIA</option><option value="GLOBAL">GLOBAL</option>
+          <RegionOptions />
         </select>
         {isAdmin && <label htmlFor="jobs-added-by" style={FILTER_LABEL}>Added by</label>}
         {isAdmin && (
@@ -442,34 +469,35 @@ export default function Jobs() {
         <div className="card" style={{ marginBottom: '1rem' }}>
           <h2 style={{ marginTop: 0 }}>Add job</h2>
           <div className="row">
-            <div className="field"><label>Company</label><input value={newJob.company} onChange={(e) => setNewJob({ ...newJob, company: e.target.value })} /></div>
-            <div className="field"><label>Job title</label><input value={newJob.job_title} onChange={(e) => setNewJob({ ...newJob, job_title: e.target.value })} /></div>
+            <div className="field"><label>Company{REQ}</label><input value={newJob.company} onChange={(e) => setNewJob({ ...newJob, company: e.target.value })} /></div>
+            <div className="field"><label>Job title{REQ}</label><input value={newJob.job_title} onChange={(e) => setNewJob({ ...newJob, job_title: e.target.value })} /></div>
           </div>
           <div className="row">
-            <div className="field"><label>Link</label><input value={newJob.link} onChange={(e) => setNewJob({ ...newJob, link: e.target.value })} /></div>
+            <div className="field"><label>Link{REQ}</label><input value={newJob.link} placeholder="https://…" onChange={(e) => setNewJob({ ...newJob, link: e.target.value })} /></div>
             <div className="field"><label>Region</label>
               <select value={newJob.region} onChange={(e) => { rememberRegion(e.target.value); setNewJob({ ...newJob, region: e.target.value }); }}>
-                <option value="US">US</option><option value="EU">EU</option><option value="ASIA">ASIA</option><option value="GLOBAL">GLOBAL</option>
+                <RegionOptions />
               </select>
             </div>
           </div>
           <DuplicateNotice checking={newDup.checking} conflicts={newDup.conflicts} />
-          <div className="field"><label>Description</label><textarea rows={8} value={newJob.description} onChange={(e) => setNewJob({ ...newJob, description: e.target.value })} /></div>
+          <div className="field"><label>Description{REQ}</label><textarea rows={8} value={newJob.description} placeholder="The full job posting" onChange={(e) => setNewJob({ ...newJob, description: e.target.value })} /></div>
           <div className="field">
             <label>Application questions (one per line)</label>
             <textarea rows={4} value={newJob.note} onChange={(e) => setNewJob({ ...newJob, note: e.target.value })}
               placeholder={'Why are you a strong fit for this role?\nTell us about your most relevant experience.\nWhy do you want to work here?'} />
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <button onClick={() => handleCreate(false)} disabled={!newJob.company || !newJob.job_title || createMutation.isPending || newDup.conflicts.length > 0}>
+            <button onClick={() => handleCreate(false)} disabled={newProblems.length > 0 || createMutation.isPending || newDup.conflicts.length > 0}
+              title={newProblems.join(' · ') || undefined}>
               {createMutation.isPending ? <span className="spinner" /> : 'Save'}
             </button>
             <button className="secondary" onClick={() => handleCreate(true)}
-              disabled={!newJob.company || !newJob.job_title || createMutation.isPending || newDup.conflicts.length > 0}
-              title="Save this job and keep the form open for the next one">
+              disabled={newProblems.length > 0 || createMutation.isPending || newDup.conflicts.length > 0}
+              title={newProblems.join(' · ') || 'Save this job and keep the form open for the next one'}>
               {createMutation.isPending ? <span className="spinner" /> : 'Save & Add Another'}
             </button>
-            {!isAdmin && <span className="muted" style={{ fontSize: '0.85rem' }}>Will be submitted for admin approval.</span>}
+            {newProblems.length > 0 && <span className="muted" style={{ fontSize: '0.85rem' }}>{newProblems.join(' · ')}</span>}
           </div>
         </div>
       )}
@@ -631,28 +659,30 @@ export default function Jobs() {
                       <tr>
                         <td colSpan={isAdmin ? 8 : 5} style={{ padding: '1rem', background: 'var(--panel-2)' }}>
                           <div className="row">
-                            <div className="field"><label>Company</label><input value={editDraft.company} onChange={(e) => setEditDraft({ ...editDraft, company: e.target.value })} /></div>
-                            <div className="field"><label>Job title</label><input value={editDraft.job_title} onChange={(e) => setEditDraft({ ...editDraft, job_title: e.target.value })} /></div>
+                            <div className="field"><label>Company{REQ}</label><input value={editDraft.company} onChange={(e) => setEditDraft({ ...editDraft, company: e.target.value })} /></div>
+                            <div className="field"><label>Job title{REQ}</label><input value={editDraft.job_title} onChange={(e) => setEditDraft({ ...editDraft, job_title: e.target.value })} /></div>
                           </div>
                           <div className="row">
-                            <div className="field"><label>Link</label><input value={editDraft.link} onChange={(e) => setEditDraft({ ...editDraft, link: e.target.value })} /></div>
+                            <div className="field"><label>Link{REQ}</label><input value={editDraft.link} onChange={(e) => setEditDraft({ ...editDraft, link: e.target.value })} /></div>
                             <div className="field"><label>Region</label>
                               <select value={editDraft.region} onChange={(e) => setEditDraft({ ...editDraft, region: e.target.value })}>
-                                <option value="US">US</option><option value="EU">EU</option><option value="ASIA">ASIA</option><option value="GLOBAL">GLOBAL</option>
+                                <RegionOptions />
                               </select>
                             </div>
                           </div>
                           <DuplicateNotice checking={editDup.checking} conflicts={editDup.conflicts} />
-                          <div className="field"><label>Description</label><textarea rows={6} value={editDraft.description} onChange={(e) => setEditDraft({ ...editDraft, description: e.target.value })} /></div>
+                          <div className="field"><label>Description{REQ}</label><textarea rows={6} value={editDraft.description} onChange={(e) => setEditDraft({ ...editDraft, description: e.target.value })} /></div>
                           <div className="field">
                             <label>Application questions (one per line)</label>
                             <textarea rows={4} value={editDraft.note} onChange={(e) => setEditDraft({ ...editDraft, note: e.target.value })} />
                           </div>
                           <div style={{ display: 'flex', gap: 8 }}>
-                            <button onClick={() => updateMutation.mutate({ id: job.id, payload: editDraft })} disabled={updateMutation.isPending || editDup.conflicts.length > 0}>
+                            <button onClick={() => updateMutation.mutate({ id: job.id, payload: editDraft })} disabled={editProblems.length > 0 || updateMutation.isPending || editDup.conflicts.length > 0}
+                              title={editProblems.join(' · ') || undefined}>
                               {updateMutation.isPending ? <span className="spinner" /> : 'Save changes'}
                             </button>
                             <button className="secondary" onClick={() => setEditingId(null)}>Cancel</button>
+                            {editProblems.length > 0 && <span className="muted" style={{ fontSize: '0.85rem', alignSelf: 'center' }}>{editProblems.join(' · ')}</span>}
                             <div style={{ flex: 1 }} />
                             <button className="danger" onClick={() => { if (confirm('Delete this job?')) deleteMutation.mutate(job.id); }}>Delete</button>
                           </div>

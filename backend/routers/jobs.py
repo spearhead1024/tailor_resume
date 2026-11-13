@@ -1,7 +1,9 @@
 """Jobs CRUD."""
 from __future__ import annotations
 
+import re
 import threading
+from urllib.parse import urlsplit
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
@@ -40,6 +42,63 @@ def _et_date_to_utc(date_str: str, *, end: bool = False) -> datetime | None:
 
 # Guards against overlapping manual + scheduled sync runs.
 _sync_lock = threading.Lock()
+
+
+# ── Stricter job submit ──────────────────────────────────────────────────────
+# A manually added job is only useful when it is complete: duplicate detection keys on
+# company + title and the link, bidders open the link, and the resume flow needs the full
+# description. Every client (web Jobs tab, browser extension) gets the same rules here.
+_JOB_REQUIRED = {"company": "company", "job_title": "job title", "link": "job link", "description": "job description"}
+_JOB_REGIONS = {"US", "EU", "LATAM", "ANY"}                         # what profiles are matched on
+_JOB_REGION_ALIASES = {"GLOBAL": "ANY", "ANYWHERE": "ANY", "WORLDWIDE": "ANY", "ALL": "ANY", "REMOTE": "ANY"}
+_JOB_MIN_DESCRIPTION = 100                                          # a pasted link or one line is not a posting
+_JOB_MAX_LEN = {"company": 200, "job_title": 200, "link": 2000, "description": 60_000, "note": 5_000}
+
+
+def _valid_job_link(link: str) -> bool:
+    try:
+        parts = urlsplit(link)
+    except ValueError:
+        return False
+    host = parts.hostname or ""
+    return parts.scheme in ("http", "https") and "." in host and not any(c.isspace() for c in link)
+
+
+def _clean_job_fields(payload: dict, *, partial: bool = False) -> dict:
+    """Trim the job's text fields and enforce the submit rules; raise ONE 422 naming every
+    problem (so a form can show them all at once). partial=True (an edit) checks only the
+    fields the edit sends — changing a job's status alone never trips over its other fields."""
+    out = dict(payload)
+    problems: list[str] = []
+    present = lambda key: not partial or key in out  # noqa: E731
+    for key in ("company", "job_title", "link", "description", "note"):
+        if key in out:
+            out[key] = str(out.get(key) or "").strip()
+    missing = [label for key, label in _JOB_REQUIRED.items() if present(key) and not out.get(key)]
+    if missing:
+        problems.append(f"Missing: {', '.join(missing)}. Company, job title, job link and job description are all required.")
+    link = out.get("link", "")
+    if link and not _valid_job_link(link):
+        problems.append("The job link must be a full web address starting with http:// or https:// (e.g. https://boards.greenhouse.io/acme/jobs/123).")
+    for key, label in (("company", "company"), ("job_title", "job title")):
+        if re.match(r"(?i)^(https?://|www\.)", out.get(key, "")):
+            problems.append(f"The {label} looks like a link — enter the {label} itself.")
+    desc = out.get("description", "")
+    if desc and len(desc) < _JOB_MIN_DESCRIPTION:
+        problems.append(f"The job description is too short ({len(desc)} characters) — paste the full posting (at least {_JOB_MIN_DESCRIPTION} characters).")
+    for key, limit in _JOB_MAX_LEN.items():
+        if len(out.get(key, "") or "") > limit:
+            problems.append(f"The {_JOB_REQUIRED.get(key, key)} is too long (at most {limit:,} characters).")
+    if present("region"):
+        region = str(out.get("region") or "").strip().upper()
+        region = _JOB_REGION_ALIASES.get(region, region)
+        if region not in _JOB_REGIONS:
+            problems.append("Pick the region: US, EU, LATAM or Any.")
+        else:
+            out["region"] = region
+    if problems:
+        raise HTTPException(status_code=422, detail=" ".join(problems))
+    return out
 
 
 def _check_duplicate(payload: dict, exclude_job_id: str = "") -> None:
@@ -254,7 +313,7 @@ def check_duplicate(body: dict, user: dict = Depends(require_jobs_access)):
 
 @router.post("")
 def create_job(body: JobUpsertRequest, user: dict = Depends(require_jobs_access)):
-    payload = {k: v for k, v in dict(body.payload).items() if k not in _SERVER_OWNED}
+    payload = _clean_job_fields({k: v for k, v in dict(body.payload).items() if k not in _SERVER_OWNED})
     _check_duplicate(payload)
     _check_company_week(payload)
     # Reject blacklisted jobs up-front so the toast shows the real reason
@@ -287,7 +346,7 @@ def create_job(body: JobUpsertRequest, user: dict = Depends(require_jobs_access)
 @router.patch("/{job_id}")
 def update_job(job_id: str, body: JobUpsertRequest, user: dict = Depends(require_jobs_access)):
     _job_for_write(job_id, user)
-    patch = {k: v for k, v in dict(body.payload).items() if k not in _SERVER_OWNED}
+    patch = _clean_job_fields({k: v for k, v in dict(body.payload).items() if k not in _SERVER_OWNED}, partial=True)
     # When the edit touches a duplicate-relevant field, check against the
     # rest of the table (but allow the row to keep its own values).
     if any(k in patch for k in ("link", "company", "job_title")):
