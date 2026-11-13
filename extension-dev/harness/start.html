@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>New tab</title>
+<style>
+  body { font: 14px/1.5 -apple-system, 'Segoe UI', Roboto, sans-serif; color: #1f2937; max-width: 760px; margin: 32px auto; padding: 0 20px; }
+  h1 { font-size: 20px; margin: 0 0 4px; } h2 { font-size: 15px; margin: 22px 0 6px; }
+  .muted { color: #6b7280; } code, kbd { background: #f3f4f6; border-radius: 4px; padding: 1px 5px; font-size: 12.5px; }
+  ul { padding-left: 20px; } li { margin: 4px 0; } a { color: #2563eb; }
+</style></head>
+<body>
+  <h1>Extension dev harness</h1>
+  <p class="muted">The side panel on the right is the real extension code from <code>extension/</code>, running in a normal page. Edit a file, then click <b>↻ Reload panel</b> (or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd>) — no packing, no reinstall.</p>
+  <h2>Sample pages</h2>
+  <ul>
+    <li><a href="https://boards.greenhouse.io/northwindlabs/jobs/4012345">Greenhouse posting</a> <span class="muted">— JSON-LD JobPosting (most boards embed this)</span></li>
+    <li><a href="https://jobs.lever.co/contoso/7c1e5a2b-3d4f-4e6a-9b8c-1d2e3f4a5b6c">Lever posting</a> <span class="muted">— no structured data, read from the page layout</span></li>
+    <li><a href="https://www.linkedin.com/jobs/view/4123456789">LinkedIn job view</a></li>
+    <li><a href="https://careers.fabrikam.example/jobs/platform-engineer">Company careers page</a> <span class="muted">— generic fallback (h1, meta tags, main content)</span></li>
+    <li><a href="https://boards.greenhouse.io/northwindlabs/jobs/4012345/apply">Application form</a> <span class="muted">— for Bid → Autofill</span></li>
+  </ul>
+  <h2>Real pages</h2>
+  <p>Paste any job URL in the address bar. The server fetches it and shows it here with its scripts removed, so <b>Fetch Job Details</b> reads what the site sends. Boards that render with JavaScript only, or block server fetches (LinkedIn, Indeed), show less here than in a real browser. Check those in the real extension.</p>
+  <h2>Good to know</h2>
+  <ul>
+    <li><b>ChatGPT</b>: in the Bid tab press <b>Connect ChatGPT</b>. The job on screen and the next 4 get their CV written in the background, so opening a job shows its CV with a <b>Download CV</b> button. Add questions under <b>Application questions</b> (one per line) to get 2 to 3 sentence answers. ChatGPT tabs here are a <i>stand-in</i> that returns a SAMPLE CV and sample answers. With Dry run on, the CV is a sample PDF and nothing is saved. Real ChatGPT only works in the real extension.</li>
+    <li><b>Add &amp; Next</b> closes the job's tab and moves to the next tab (or an empty one). Open several postings in tabs, then work through them.</li>
+    <li><b>Dry run</b> (on by default): Add &amp; Next, Generate, Mark as Applied and other writes are answered by the harness and never saved. Sign-in, reads and the duplicate check use the real API.</li>
+    <li>Sign in with your normal account. Roles decide the tabs: <i>bidder</i> sees Bid, <i>job_adder</i> sees Add job, and admins see both.</li>
+    <li><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> is the Autofill shortcut, as in Chrome.</li>
+    <li>Drag the bar between the page and the panel to try narrow and wide panels.</li>
+    <li><b>Requests</b> shows every API call the panel makes.</li>
+    <li>Not covered here: the debugger-based typing into React dropdowns, the Save As dialog, and Chrome's permission prompts. Those still need the real extension.</li>
+  </ul>
+</body></html>

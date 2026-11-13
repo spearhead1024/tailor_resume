@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ChatGPT (harness stand-in)</title>
+<!-- A stand-in for chatgpt.com in the dev harness: the markup the GPT helper's driver
+     (extension/gpt/driver.js) works with — #prompt-textarea (ProseMirror-style
+     contenteditable), send / stop buttons, user + assistant turns — and a streamed reply.
+     It returns a SAMPLE resume JSON for a resume prompt and a canned answer for an
+     application question. Modes for tests: localStorage['fakegpt.mode'] =
+     ok | login | anon (logged out, chatting allowed) | limit | garbage | nodelete;  localStorage['fakegpt.delay'] = ms of streaming. -->
+<style>
+  body { margin: 0; font: 15px/1.55 -apple-system, 'Segoe UI', Roboto, sans-serif; color: #0d0d0d; background: #fff; display: flex; flex-direction: column; height: 100vh; }
+  header { padding: 10px 16px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; font-weight: 600; }
+  header small { font-weight: 400; color: #8e8e8e; }
+  main { flex: 1; overflow: auto; padding: 16px; }
+  .turns { max-width: 760px; margin: 0 auto; display: grid; gap: 14px; }
+  [data-message-author-role="user"] { justify-self: end; background: #f4f4f4; border-radius: 18px; padding: 8px 14px; max-width: 80%; white-space: pre-wrap; max-height: 140px; overflow: hidden; }
+  [data-message-author-role="assistant"] .markdown { white-space: pre-wrap; }
+  pre { background: #0d0d0d; color: #e8e8e8; padding: 10px; border-radius: 8px; overflow: auto; font-size: 12px; }
+  form { max-width: 760px; width: calc(100% - 32px); margin: 0 auto 16px; display: flex; gap: 8px; align-items: flex-end; border: 1px solid #ddd; border-radius: 24px; padding: 8px 8px 8px 16px; }
+  #prompt-textarea { flex: 1; min-height: 24px; max-height: 120px; overflow: auto; outline: none; white-space: pre-wrap; }
+  #prompt-textarea:empty::before { content: 'Message ChatGPT'; color: #999; }
+  form button { width: 34px; height: 34px; border-radius: 50%; border: 0; background: #0d0d0d; color: #fff; cursor: pointer; }
+  form button:disabled { background: #d7d7d7; cursor: default; }
+  .center { max-width: 420px; margin: 80px auto; text-align: center; }
+  .limit { background: #fff4e5; border: 1px solid #f0c27b; border-radius: 10px; padding: 12px; margin: 0 auto 10px; max-width: 760px; }
+</style>
+</head>
+<body>
+<header><span>ChatGPT <small>— harness stand-in (not the real site)</small></span><small id="where"></small></header>
+<main><div class="turns" id="turns"></div></main>
+<form id="composer-form" onsubmit="return false">
+  <div id="prompt-textarea" class="ProseMirror" contenteditable="true" role="textbox"></div>
+  <button type="button" data-testid="send-button" aria-label="Send prompt" id="send" disabled>↑</button>
+</form>
+<script>
+(() => {
+  const qs = new URLSearchParams(location.search);
+  // In the dev harness the real URL comes in ?u=; served as https://chatgpt.com itself (the
+  // real-Chrome tests) it is this page's own address.
+  let url = qs.get('u') || (location.hostname === 'chatgpt.com' ? location.href : 'https://chatgpt.com/');
+  const mode = window.__FAKEGPT_MODE || localStorage.getItem('fakegpt.mode') || 'ok';
+  const delay = Number(window.__FAKEGPT_DELAY || localStorage.getItem('fakegpt.delay')) || 2500;
+  const $ = (s) => document.querySelector(s);
+  const turnsEl = $('#turns'), box = $('#prompt-textarea'), form = $('#composer-form');
+  const convId = () => (url.match(/\/c\/([\w-]+)/) || [])[1] || '';
+  const key = () => `fakegpt:${convId()}`;
+  const load = () => { try { return JSON.parse(localStorage.getItem(key()) || '[]'); } catch { return []; } };
+  const save = (turns) => localStorage.setItem(key(), JSON.stringify(turns));
+  $('#where').textContent = convId() ? `conversation ${convId()}` : 'new chat';
+
+  if (mode === 'login') {
+    form.remove();
+    document.querySelector('main').innerHTML = '<div class="center"><h2>Welcome back</h2><p>Log in to continue.</p><button data-testid="login-button">Log in</button></div>';
+    return;
+  }
+  if (mode === 'anon') {   // chatgpt.com logged out: you can chat, with a "Log in" button on top
+    document.querySelector('header').insertAdjacentHTML('beforeend', '<button data-testid="login-button">Log in</button>');
+  }
+  if (mode === 'limit') {
+    box.setAttribute('contenteditable', 'false');
+    form.insertAdjacentHTML('beforebegin', '<div class="limit" role="dialog">You\'ve reached our usage limit. Try again later.</div>');
+  }
+
+  function addTurn(role, text, html) {
+    const el = document.createElement('div');
+    el.setAttribute('data-message-author-role', role);
+    if (role === 'assistant') { el.innerHTML = '<div class="markdown"></div>'; if (html) el.firstChild.innerHTML = html; else el.firstChild.textContent = text; }
+    else el.textContent = text;
+    turnsEl.appendChild(el);
+    el.scrollIntoView({ block: 'end' });
+    return el;
+  }
+  for (const t of load()) addTurn(t.role, t.text, t.html);
+
+  const sample = () => ({
+    headline: 'Senior Software Engineer (SAMPLE from the harness stand-in — not real ChatGPT output)',
+    summary: 'Senior software engineer with 9 years of experience building production web platforms. SAMPLE text produced by the dev harness so the Auto flow can be tested end to end.',
+    technical_skills: ['Python', 'TypeScript', 'React', 'PostgreSQL', 'AWS'],
+    skill_groups: [{ category: 'Backend', items: ['Python', 'FastAPI', 'PostgreSQL'] }, { category: 'Frontend', items: ['React', 'TypeScript'] }],
+    fit_keywords: ['distributed systems', 'APIs', 'cloud'],
+    work_history: [
+      { company_index: 0, company_name: 'Sample Corp', role_title: 'Senior Software Engineer', role_headline: '', duration: '2021 – Present', location: 'Remote', bullets: ['SAMPLE bullet one.', 'SAMPLE bullet two.'] },
+      { company_index: 1, company_name: 'Example Inc', role_title: 'Software Engineer', role_headline: '', duration: '2016 – 2021', location: 'Remote', bullets: ['SAMPLE bullet three.'] },
+    ],
+    education_history: [{ institution: 'Sample University', degree: 'B.Sc.', field: 'Computer Science', graduation_date: '2016' }],
+  });
+  // ChatGPT's own web API, as the driver uses it to delete finished conversations.
+  const realFetch = window.fetch.bind(window);
+  window.fetch = async (input, init = {}) => {
+    const u = String(typeof input === 'string' ? input : input.url);
+    const m = u.match(/^https:\/\/(?:chatgpt\.com|chat\.openai\.com)(\/.*)$/);
+    if (!m) return realFetch(input, init);
+    const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { 'Content-Type': 'application/json' } });
+    if (m[1] === '/api/auth/session') return json(mode === 'login' ? {} : { accessToken: 'fake-token', user: { name: 'Stand-in' } });
+    const del = m[1].match(/^\/backend-api\/conversation\/([\w-]+)$/);
+    if (del && (init.method || '').toUpperCase() === 'PATCH' && mode === 'nodelete') return json({ detail: 'refused' }, 500);
+    if (del && (init.method || '').toUpperCase() === 'PATCH') {
+      const list = JSON.parse(localStorage.getItem('fakegpt:deleted') || '[]'); list.push(del[1]);
+      localStorage.setItem('fakegpt:deleted', JSON.stringify(list));
+      localStorage.removeItem(`fakegpt:${del[1]}`);
+      return json({ success: true });
+    }
+    return json({ detail: 'not in the stand-in' }, 404);
+  };
+
+  const SAMPLE_ANSWERS = [
+    'Last quarter I rebuilt our order sync service in Python on AWS, which cut failed syncs from about 3% to under 0.2%. I also moved the nightly batch to an event queue, so stores now see stock changes within a minute.',
+    'The role sits right where I have spent the last few years, building backend services that other teams depend on. I like that the team owns its systems end to end, and the logistics problems look genuinely interesting.',
+    'I usually start by writing down how the current system fails, then fix the cheapest thing that removes most of the pain. On my last team that habit saved us from a rewrite twice.',
+  ];
+  function replyFor(prompt) {
+    if (mode === 'garbage') return { text: 'Sorry — here is a summary instead of JSON.' };
+    // Application questions → a JSON array, one answer per question.
+    const arr = prompt.match(/JSON array of (\d+) string/);
+    if (arr) {
+      const n = Number(arr[1]);
+      const answers = Array.from({ length: n }, (_, i) => `${SAMPLE_ANSWERS[i % SAMPLE_ANSWERS.length]} (SAMPLE answer ${i + 1} from the harness stand-in.)`);
+      const json = JSON.stringify(answers, null, 2);
+      return { text: json, html: `<pre><code>${json.replace(/</g, '&lt;')}</code></pre>` };
+    }
+    const q = prompt.match(/QUESTION:\s*([\s\S]+)$/);
+    if (q) {
+      const inThread = load().some((t) => t.role === 'assistant' && /work_history/.test(t.text));
+      return { text: `I'm excited about this role because it matches what I have done for years${inThread ? ' (answered in the same thread as the resume)' : ''}. ` +
+        `(SAMPLE answer from the harness stand-in to: "${q[1].trim().slice(0, 80)}")` };
+    }
+    const json = JSON.stringify(sample(), null, 2);
+    return { text: `Here is the resume JSON:\n${json}`, html: `<p>Here is the resume JSON:</p><pre><code>${json.replace(/</g, '&lt;')}</code></pre>` };
+  }
+
+  const sendBtn = () => document.querySelector('[data-testid="send-button"]');
+  function syncSend() { const b = sendBtn(); if (b) b.disabled = !box.innerText.trim() || box.getAttribute('contenteditable') === 'false'; }
+  box.addEventListener('input', syncSend);
+  box.addEventListener('paste', (e) => { e.preventDefault(); const t = e.clipboardData?.getData('text/plain') || ''; document.execCommand('insertText', false, t) || (box.textContent += t); syncSend(); });
+  box.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+  form.addEventListener('click', (e) => { if (e.target.closest('[data-testid="send-button"]')) send(); });
+
+  function send() {
+    const text = box.innerText.trim(); if (!text || box.getAttribute('contenteditable') === 'false') return;
+    box.textContent = ''; syncSend();
+    if (!convId()) {   // the real app moves to /c/<id> with history.pushState
+      url = `https://chatgpt.com/c/${Math.random().toString(36).slice(2, 10)}`;
+      $('#where').textContent = `conversation ${convId()}`;
+      let told = false;
+      try { if (parent.__harness) { parent.__harness.pushUrl(window, url); told = true; } } catch { /* cross-origin parent */ }
+      if (!told) history.pushState(null, '', new URL(url).pathname);   // as the real app does
+    }
+    const turns = load(); turns.push({ role: 'user', text }); addTurn('user', text);
+    const reply = replyFor(text);
+    const el = addTurn('assistant', '');
+    const md = el.firstChild;
+    // Streaming: the send button becomes a stop button until the reply is complete.
+    const stop = document.createElement('button');
+    stop.type = 'button'; stop.setAttribute('data-testid', 'stop-button'); stop.setAttribute('aria-label', 'Stop streaming'); stop.textContent = '■';
+    sendBtn().replaceWith(stop);
+    const steps = 8; let i = 0;
+    const tick = setInterval(() => {
+      i++;
+      md.textContent = reply.text.slice(0, Math.ceil(reply.text.length * i / steps));
+      if (i >= steps) {
+        clearInterval(tick);
+        if (reply.html) md.innerHTML = reply.html;
+        const send = document.createElement('button');
+        send.type = 'button'; send.id = 'send'; send.setAttribute('data-testid', 'send-button'); send.setAttribute('aria-label', 'Send prompt'); send.textContent = '↑';
+        stop.replaceWith(send); syncSend();
+        turns.push({ role: 'assistant', text: reply.text, html: reply.html || '' }); save(turns);
+      }
+    }, delay / steps);
+  }
+})();
+</script>
+</body>
+</html>

@@ -46,3 +46,8 @@ data/scheduler.lock
 **/__pycache__/
 # job-sync's cross-process lock (runtime)
 data/job_sync.lock
+
+# test builds of the extension
+extension-dev/dist/
+# local rollback copies of published extension builds
+data/extension/previous/

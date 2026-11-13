@@ -37,6 +37,21 @@ cd frontend
 npm run dev   # http://localhost:5173
 ```
 
+### Browser extension (`extension/`)
+
+One side panel with tabs chosen by role: **Bid** (bidder), **Add job** (job_adder),
+and both for admins. To try changes without packing or installing it:
+
+```bash
+python3 extension-dev/serve.py   # http://127.0.0.1:8600 — in VS Code: Ports → 8600 → Simple Browser
+```
+
+The harness runs the real `extension/` files beside a mini browser that has sample
+job pages, and it can also load real job URLs. Edit a file, then click **↻ Reload panel**.
+**Dry run** is on by default: API writes are answered by the harness and never saved.
+Publish a new version with `python ops/build_extension.py --changelog "…"` after
+bumping `version` in `extension/manifest.json`.
+
 ## Production deploy
 
 ```bash
