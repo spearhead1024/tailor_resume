@@ -722,7 +722,11 @@ function patchGptLine() {
   const mine = Object.values(S.gptSnap?.threads || {}).filter((x) => x.profileId === S.profileId && x.stage !== 'closing');
   const ready = mine.filter((x) => x.stage === 'ready').length;
   const plan = st.plan && st.status !== 'needs_plan' ? `ChatGPT ${esc(planLabel(st.plan))} · ` : '';
-  const meta = st.enabled ? `<span class="gpt-meta">${plan}${ready}/${mine.length} ready · <a href="#" data-action="gptDisconnect" title="Stop writing CVs with ChatGPT">Disconnect</a></span>` : '';
+  // Chats this extension opened that are no longer needed are deleted from the ChatGPT account.
+  const del = st.toDelete ? `${st.toDelete} ChatGPT chat${st.toDelete === 1 ? '' : 's'} to delete` : '';
+  const meta = st.enabled
+    ? `<span class="gpt-meta">${plan}${ready}/${mine.length} ready${del ? ` · ${del}` : ''} · <a href="#" data-action="gptDisconnect" title="Stop writing CVs with ChatGPT and delete its chats">Disconnect</a></span>`
+    : (del ? `<span class="gpt-meta">Deleting: ${del}</span>` : '');
   el.className = `gpt-line ${cls}`;
   el.innerHTML = `<span class="txt">${text.startsWith('<span') ? text : esc(text)}</span>${btn}${meta}`;
 }
@@ -1225,7 +1229,7 @@ async function onClick(e) {
       case 'gptContinue': await gpt('continue'); break;
       case 'restartExt': chrome.runtime.reload(); break;
       case 'gptSignIn': await chrome.tabs.create({ url: 'https://chatgpt.com/auth/login' }); break;   // the user's own tab, to sign in
-      case 'gptDisconnect': e.preventDefault(); await gpt('disconnect'); toast('ChatGPT disconnected'); break;
+      case 'gptDisconnect': e.preventDefault(); await gpt('disconnect'); toast('ChatGPT disconnected — deleting its chats'); break;
       case 'gptRetry': await api('/api/gpt/retry', { method: 'POST', body: { profile_id: S.profileId, job_id: S.jobId } }); await gpt('sync'); break;
       case 'manual': e.preventDefault(); S.manual = !S.manual; patchBuild(); break;
       case 'saveQuestions': await saveQuestions(); break;

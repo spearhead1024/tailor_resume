@@ -9,16 +9,24 @@
  *   run       one hidden chatgpt.com frame per task in the offscreen document (no tab, no window;
  *             gpt/offscreen.*), a session declarativeNetRequest rule lets chatgpt.com load there,
  *             gpt/driver.js does the work inside and reports back
- *   report    result (→ the server builds the CV) / answers / fail / release / deleted
+ *   report    started (a conversation ChatGPT just opened) / result (→ the server builds the CV) /
+ *             answers / fail / release / deleted
  *   mirror    the bidder's queue rows into chrome.storage (gptThreads), so the panel redraws
+ *
+ * ChatGPT conversations are deleted, not just left: the server records every conversation the
+ * moment it opens and hands this worker batches of chats to delete (the job applied / skipped,
+ * a failed or re-written CV, a closed browser, Disconnect, 2 hours idle). Deleting goes on while
+ * disconnected too — then that is the only thing it does.
  *
  * Paid ChatGPT only. Connecting (and Continue) first checks the account in a hidden frame
  * (status 'checking'); the Free plan — or a plan that can't be confirmed — stops all work
  * (status 'needs_plan'). The driver checks again before every CV / answers.
  * status: off | checking | ok | needs_login | needs_plan | limited
  *
- * Local state (chrome.storage.local): gptState (connection), gptFrames (this browser's frames
- * and their leased tasks), gptDevice (this browser's id), gptThreads (the mirror). */
+ * Local state (chrome.storage.local): gptState (connection; toDelete = chats waiting to be
+ * deleted), gptFrames (this browser's frames, their leased tasks and the conversation each one
+ * opened), gptDevice (this browser's id), gptThreads (the mirror), gptLegacyChats (chats an
+ * older version left, until the server has them). */
 
 import { request } from '../lib/api.js';
 import { GPT_KEYS as K, CHAT_ORIGINS, CHAT_URL, PARALLEL } from './client.js';
@@ -36,7 +44,7 @@ const FRAMES = 'gptFrames';
 
 const now = () => Date.now();
 const read = async (key, fallback) => (await chrome.storage.local.get(key))[key] ?? fallback;
-const state = async () => ({ enabled: false, status: 'off', notice: '', cooldownUntil: 0, plan: '', checkFrame: '', checkStartedAt: 0, ...(await read(K.state, {})) });
+const state = async () => ({ enabled: false, status: 'off', notice: '', cooldownUntil: 0, plan: '', checkFrame: '', checkStartedAt: 0, toDelete: 0, ...(await read(K.state, {})) });
 const setState = async (patch) => chrome.storage.local.set({ [K.state]: { ...(await state()), ...patch } });
 const hasChatAccess = () => chrome.permissions.contains({ origins: CHAT_ORIGINS }).catch(() => false);
 const api = (path, body) => request(path, body === undefined ? undefined : { method: 'POST', body });
@@ -130,10 +138,12 @@ const toThread = (r) => ({
 });
 export async function syncMirror() {
   try {
-    const { threads = [] } = await request('/api/gpt/threads');
+    const { threads = [], to_delete: toDelete = 0 } = await request('/api/gpt/threads');
     await chrome.storage.local.set({ [K.threads]: Object.fromEntries(threads.map((r) => [r.key, toThread(r)])) });
+    await noteToDelete(toDelete);
   } catch (e) { if (e?.status === 401) await chrome.storage.local.set({ [K.threads]: {} }); }
 }
+async function noteToDelete(n) { if (typeof n === 'number' && (await state()).toDelete !== n) await setState({ toDelete: n }); }
 
 // ---------- the loop ----------
 let ticking = false, again = false;
@@ -162,27 +172,50 @@ async function tickOnce() {
       if (age > (WORK_LIMIT_MS[f.lease.work] || WORK_LIMIT_MS.write) || silent > SILENT_LIMIT_MS) { stuck.push({ id, f, why: silent > SILENT_LIMIT_MS ? 'ChatGPT stopped responding.' : 'ChatGPT took too long.' }); delete all[id]; }
     }
   });
-  if (gone.length) await api('/api/gpt/release', { keys: gone.flatMap(keysOf) }).catch(() => {});
-  for (const s of stuck) { await closeFrame(s.id); await reportFailure(s.f.lease, s.why); }
+  if (gone.length) await release(gone);
+  for (const s of stuck) { await closeFrame(s.id); await reportFailure(s.f, s.why); }
+  await flushLegacyChats();
 
-  if (!st.enabled) { if (live.size) await stopAllWork(); await syncMirror(); return; }
-  if (st.status === 'needs_login' || st.status === 'needs_plan') return;
-  if (st.cooldownUntil && now() < st.cooldownUntil) return;
-  if (!(await hasChatAccess())) { await setState({ enabled: false, status: 'off', notice: 'ChatGPT access was removed — connect again.' }); return; }
-  // The account check comes first: nothing is written until a paid plan is confirmed.
-  if (st.status === 'checking' || (st.cooldownUntil && !st.plan)) { await runCheck(st, live); return; }
-  if (st.cooldownUntil || st.status !== 'ok') await setState({ cooldownUntil: 0, status: 'ok', notice: '' });
+  // Disconnected: no CVs, no answers — only the chats left behind are deleted.
+  const deletesOnly = !st.enabled;
+  if (deletesOnly) {
+    if (live.size) await stopAllWork((f) => f.lease.work === 'delete');
+    if (st.status === 'checking' || st.checkFrame) await setState({ status: 'off', checkFrame: '' });
+    if (!(await hasChatAccess()) || (st.cooldownUntil && now() < st.cooldownUntil)) { await syncMirror(); return; }
+  } else {
+    if (st.status === 'needs_login' || st.status === 'needs_plan') return;
+    if (st.cooldownUntil && now() < st.cooldownUntil) return;
+    if (!(await hasChatAccess())) { await setState({ enabled: false, status: 'off', notice: 'ChatGPT access was removed — connect again.' }); return; }
+    // The account check comes first: nothing is written until a paid plan is confirmed.
+    if (st.status === 'checking' || (st.cooldownUntil && !st.plan)) { await runCheck(st, live); return; }
+    if (st.cooldownUntil || st.status !== 'ok') await setState({ cooldownUntil: 0, status: 'ok', notice: '' });
+  }
 
   // 2) Lease work for the free frames.
   const mine = Object.values(await read(FRAMES, {}));
   const slots = Math.max(0, PARALLEL - mine.length);
   let tasks = [];
   // `active`: what this browser is really working on — the server hands back any other lease of it.
-  try { ({ tasks = [] } = await api('/api/gpt/claim', { device: await deviceId(), slots, active: mine.flatMap(keysOf) })); } catch (e) { await noteError('claim', e); }
-  for (const lease of tasks) await startWork(lease).catch(async (e) => { await noteError('start', e); await api('/api/gpt/release', { keys: keysOf({ lease }) }).catch(() => {}); });
+  try {
+    const r = await api('/api/gpt/claim', { device: await deviceId(), slots, active: mine.flatMap(keysOf), only_deletes: deletesOnly });
+    tasks = r.tasks || [];
+    await noteToDelete(r.to_delete);
+  } catch (e) { await noteError('claim', e); }
+  for (const lease of tasks) await startWork(lease).catch(async (e) => { await noteError('start', e); await release([{ lease }]); });
   await syncMirror();
 }
 const keysOf = (f) => (f.lease?.keys || (f.lease?.key ? [f.lease.key] : f.keys || (f.key ? [f.key] : [])));
+// Work handed back to the server; the conversations its frames had opened are deleted.
+async function release(list) {
+  if (!list.length) return;
+  await api('/api/gpt/release', { keys: list.flatMap(keysOf), chats: list.map((f) => f.conversation).filter(Boolean), device: await deviceId() }).catch(() => {});
+}
+// Chats an older version (1.1 / 1.2: the queue in the extension) opened and left: the server deletes them.
+async function flushLegacyChats() {
+  const chats = await read('gptLegacyChats', []);
+  if (!chats.length) return;
+  try { await api('/api/gpt/trash', { chats, device: await deviceId() }); await chrome.storage.local.remove('gptLegacyChats'); } catch { /* next tick */ }
+}
 
 // ---------- the account check (paid plans only) ----------
 async function runCheck(st, live) {
@@ -228,11 +261,29 @@ async function taskFor(frame) {
   await frames(async (all) => { if (all[frame]) all[frame].aliveAt = now(); });
   return { id: frame, ...f.task };
 }
-async function alive(frame) { await frames(async (all) => { if (all[frame]) all[frame].aliveAt = now(); }); }
+// A heartbeat; `conversation`: the chat ChatGPT opened for this work — recorded on the server at
+// once, so it is deleted even if this frame never finishes.
+async function alive(frame, conversation) {
+  const fresh = await frames(async (all) => {
+    const f = all[frame]; if (!f) return null;
+    f.aliveAt = now();
+    if (!conversation || conversation === f.conversation || f.lease.work === 'delete') return null;
+    f.conversation = conversation;
+    return f;
+  });
+  if (!fresh) return;
+  const { lease } = fresh;
+  const r = await api('/api/gpt/started', { profile_id: lease.profile_id, job_id: lease.job_id, conversation, device: await deviceId() }).catch(() => null);
+  if (r && r.state !== 'ok') {   // the job was applied / skipped meanwhile: stop — the server deletes the chat
+    const gone = await frames(async (all) => { const x = all[frame]; delete all[frame]; return x; });
+    if (gone) { await closeFrame(frame); await release([gone]); await syncMirror(); }
+  }
+}
 
-async function reportFailure(lease, error) {
-  if (lease.work === 'delete') await api('/api/gpt/deleted', { keys: lease.keys, done: [], failed: lease.ids }).catch(() => {});
-  else await api('/api/gpt/fail', { profile_id: lease.profile_id, job_id: lease.job_id, work: lease.work, error }).catch(() => {});
+async function reportFailure(f, error) {
+  const { lease } = f;
+  if (lease.work === 'delete') await api('/api/gpt/deleted', { done: [], failed: lease.ids }).catch(() => {});
+  else await api('/api/gpt/fail', { profile_id: lease.profile_id, job_id: lease.job_id, work: lease.work, error, conversation: f.conversation || '', device: await deviceId() }).catch(() => {});
 }
 
 async function finish(frame, res) {
@@ -241,37 +292,44 @@ async function finish(frame, res) {
   await closeFrame(frame);
   if (!f) return;   // stale: stopped meanwhile
   const { lease } = f;
+  f.conversation = res?.conversation || f.conversation || '';
+  const device = await deviceId();
   const kind = res?.ok ? '' : (res?.kind || 'error');
   if (res?.ok && res.plan) await setState({ plan: res.plan });
-  if (kind === 'needs_login' || kind === 'free_plan' || kind === 'plan_unknown') {
+  if (lease.work === 'delete' && kind === 'needs_login' && !(await state()).enabled) {
+    // Disconnected and ChatGPT signed out: try the deletes again later.
+    await release([f]);
+    await setState({ cooldownUntil: now() + 15 * 60_000 });
+  } else if (kind === 'needs_login' || kind === 'free_plan' || kind === 'plan_unknown') {
     // Signed out, or the account is (now) Free: hand everything back and stop until it is fixed.
-    await api('/api/gpt/release', { keys: keysOf(f) }).catch(() => {});
+    await release([f]);
     await stopAllWork();
     await setState({ status: kind === 'needs_login' ? 'needs_login' : 'needs_plan', plan: res?.plan || '', notice: PLAN_NOTICE[kind] });
   } else if (kind === 'rate_limited') {
-    await api('/api/gpt/release', { keys: keysOf(f) }).catch(() => {});
+    await release([f]);
     await setState({ status: 'limited', cooldownUntil: now() + 120_000, notice: 'ChatGPT reported a usage limit — waiting 2 minutes, then it carries on by itself.' });
   } else if (kind) {
-    await reportFailure(lease, res?.error || kind);
+    await reportFailure(f, res?.error || kind);
   } else if (lease.work === 'write') {
     const answers = (res.answers || []).map(cleanAnswer);
-    await api('/api/gpt/result', { profile_id: lease.profile_id, job_id: lease.job_id, resume_json: res.resume_json, conversation: res.conversation || '',
-      questions: answers.length ? lease.questions : [], answers }).catch((e) => noteError('result', e));
+    await api('/api/gpt/result', { profile_id: lease.profile_id, job_id: lease.job_id, resume_json: res.resume_json, conversation: f.conversation,
+      questions: answers.length ? lease.questions : [], answers, device }).catch((e) => noteError('result', e));
   } else if (lease.work === 'answer') {
     await api('/api/gpt/answers', { profile_id: lease.profile_id, job_id: lease.job_id, questions: lease.questions,
-      answers: (res.answers || []).map(cleanAnswer), conversation: res.conversation || '' }).catch((e) => noteError('answers', e));
+      answers: (res.answers || []).map(cleanAnswer), conversation: f.conversation, device }).catch((e) => noteError('answers', e));
   } else if (lease.work === 'delete') {
-    await api('/api/gpt/deleted', { keys: lease.keys, done: res.done || [], failed: res.failed || [] }).catch(() => {});
+    await api('/api/gpt/deleted', { done: res.done || [], failed: res.failed || [] }).catch(() => {});
   }
   await syncMirror();
   tick().catch(() => {});
 }
 
-// Every frame of this browser is closed and its work handed back to the server queue.
-async function stopAllWork() {
-  const all = await frames(async (a) => { const list = Object.entries(a); for (const [id] of list) delete a[id]; return list; });
+// The frames of this browser are closed (all, or those keep() does not keep) and their work
+// handed back to the server queue.
+async function stopAllWork(keep = () => false) {
+  const all = await frames(async (a) => { const list = Object.entries(a).filter(([, f]) => !keep(f)); for (const [id] of list) delete a[id]; return list; });
   for (const [id] of all) await closeFrame(id);
-  if (all.length) await api('/api/gpt/release', { keys: all.flatMap(([, f]) => keysOf(f)) }).catch(() => {});
+  await release(all.map(([, f]) => f));
 }
 
 // ---------- requests from the panel ----------
@@ -281,10 +339,14 @@ async function handle(msg) {
       await ensureDriver();   // access was just granted (the panel asked for it from the click)
       await setState({ enabled: true, status: 'checking', notice: '', cooldownUntil: 0, plan: '', checkFrame: '' }); tick(); return { ok: true };
     case 'disconnect': {
-      // Work in progress goes back to the server queue; built CVs stay.
+      // Work in progress goes back to the server queue; built CVs and their answers stay. Every
+      // ChatGPT chat the queue still keeps is deleted now (a question asked later gets a new chat).
       await stopAllWork();
       const c = (await state()).checkFrame; if (c) await closeFrame(c);
-      await setState({ enabled: false, status: 'off', notice: '', checkFrame: '' }); return { ok: true };
+      await setState({ enabled: false, status: 'off', notice: '', checkFrame: '', cooldownUntil: 0 });
+      const r = await api('/api/gpt/cleanup', { device: await deviceId() }).catch(() => null);
+      if (r) await noteToDelete(r.to_delete);
+      tick(); return { ok: true };
     }
     case 'continue': await setState({ status: 'checking', notice: '', checkFrame: '' }); tick(); return { ok: true };   // check the account again
     case 'sync': await syncMirror(); tick(); return { ok: true };   // the panel changed the queue on the server
@@ -293,10 +355,14 @@ async function handle(msg) {
 }
 
 // Earlier versions kept the queue in the extension (1.1 in tabs, 1.2 in frames): close what they
-// left open and drop it — the server queue is the record now.
+// left open, hand their conversations to the server to delete, and drop the rest — the server
+// queue is the record now. (Their threads have a numeric createdAt; the server mirror does not.)
 async function migrateLocalQueue() {
-  const old = await read(K.threads, {});
-  for (const t of Object.values(old)) if (t.tabId != null) await chrome.tabs.remove(t.tabId).catch(() => {});
+  const old = Object.values(await read(K.threads, {})).filter((t) => typeof t?.createdAt === 'number');
+  if (!old.length) return;
+  for (const t of old) if (t.tabId != null) await chrome.tabs.remove(t.tabId).catch(() => {});
+  const chats = old.map((t) => t.conversation).filter((c) => /\/c\//.test(c || ''));
+  if (chats.length) await chrome.storage.local.set({ gptLegacyChats: [...(await read('gptLegacyChats', [])), ...chats] });
   await chrome.storage.local.remove([K.threads]);
 }
 
@@ -309,7 +375,7 @@ export function installGptRunner() {
   chrome.alarms.onAlarm.addListener((a) => { if (a.name === 'gpt-tick') tick().catch(() => {}); });
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg?.type === 'gpt_ready' && msg.frame) { taskFor(msg.frame).then((task) => sendResponse({ task }), () => sendResponse({ task: null })); return true; }
-    if (msg?.type === 'gpt_alive' && msg.frame) { alive(msg.frame).catch(() => {}); return; }
+    if (msg?.type === 'gpt_alive' && msg.frame) { alive(msg.frame, msg.conversation || '').catch((e) => noteError('alive', e)); return; }
     if (msg?.type === 'gpt_done' && msg.frame) { finish(msg.frame, msg.result).then(() => sendResponse({ ok: true }), () => sendResponse({ ok: false })); return true; }
     if (msg?.type === 'gpt') {
       handle(msg).then(sendResponse, (e) => sendResponse({ ok: false, error: String(e?.message || e) }));

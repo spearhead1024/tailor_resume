@@ -141,7 +141,8 @@
     const text = box.innerText.trim(); if (!text || box.getAttribute('contenteditable') === 'false') return;
     box.textContent = ''; syncSend();
     if (!convId()) {   // the real app moves to /c/<id> with history.pushState
-      url = `https://chatgpt.com/c/${Math.random().toString(36).slice(2, 10)}`;
+      url = `https://chatgpt.com/c/${crypto.randomUUID()}`;   // the real ids are UUIDs
+      realFetch(`/__tr_created/${convId()}`).catch(() => {});   // tests only: lets the mock server count every chat opened
       $('#where').textContent = `conversation ${convId()}`;
       let told = false;
       try { if (parent.__harness) { parent.__harness.pushUrl(window, url); told = true; } } catch { /* cross-origin parent */ }

@@ -5,7 +5,9 @@
  * A frame is named "trgpt-<work id>". On load the driver asks the service worker for that
  * frame's task (gpt_ready → task), does it, and reports back (gpt_done) — a fresh message,
  * so a service worker suspended meanwhile wakes up for it. While working it sends a
- * heartbeat (gpt_alive), which also keeps the service worker running.
+ * heartbeat (gpt_alive), which also keeps the service worker running. The conversation is
+ * reported the moment ChatGPT opens it (gpt_alive with its URL), so the server can delete it
+ * even if this frame never finishes; every result of write / answers carries it too.
  *
  * task.kind
  *   write    paste task.prompt → resume JSON; then, in the SAME conversation, task.answersPrompt
@@ -288,15 +290,21 @@
     return { ok: true, done, failed };
   }
 
+  const openConversation = () => (/\/c\/[\w-]{8,}/.test(location.pathname) ? location.href.split('#')[0] : '');
+  async function work(task) {
+    if (task.kind === 'delete') return deleteConversations(task);
+    // Everything else writes with ChatGPT: a paid plan only.
+    const paid = await requirePaidPlan();
+    if (!paid.ok || task.kind === 'check') return paid;
+    if (task.kind === 'answers') return { ...(await answers(task)), plan: paid.plan };
+    return { ...(await write(task)), plan: paid.plan };
+  }
   async function run(task) {
-    try {
-      if (task.kind === 'delete') return await deleteConversations(task);
-      // Everything else writes with ChatGPT: a paid plan only.
-      const paid = await requirePaidPlan();
-      if (!paid.ok || task.kind === 'check') return paid;
-      if (task.kind === 'answers') return { ...(await answers(task)), plan: paid.plan };
-      return { ...(await write(task)), plan: paid.plan };
-    } catch (e) { return { ok: false, kind: 'error', error: String(e?.message || e) }; }
+    let res;
+    try { res = await work(task); } catch (e) { res = { ok: false, kind: 'error', error: String(e?.message || e) }; }
+    // Failed or not, the conversation this frame opened is named — so it is deleted, never left behind.
+    if (task.kind === 'write' || task.kind === 'answers') res.conversation = res.conversation || openConversation();
+    return res;
   }
 
   // Ask for this frame's task, do it, report. (Pull — a hidden frame has no tab id to send to.)
@@ -307,9 +315,13 @@
       if (!task) await sleep(1500);
     }
     if (!task) return;
-    const alive = setInterval(() => chrome.runtime.sendMessage({ type: 'gpt_alive', frame: FRAME }).catch(() => {}), 20_000);
+    const beat = (conversation = openConversation()) => chrome.runtime.sendMessage({ type: 'gpt_alive', frame: FRAME, conversation }).catch(() => {});
+    const alive = setInterval(beat, 20_000);
+    // ChatGPT opens the conversation (/c/<id>) right after the prompt is sent: report it at once.
+    let told = '';
+    const watch = setInterval(() => { const c = openConversation(); if (c && c !== told) { told = c; beat(c); } }, 1000);
     const result = await run(task);
-    clearInterval(alive);
+    clearInterval(alive); clearInterval(watch);
     for (let i = 0; i < 3; i++) {
       const ok = await chrome.runtime.sendMessage({ type: 'gpt_done', frame: FRAME, result }).then(() => true).catch(() => false);
       if (ok) break;
