@@ -1,6 +1,6 @@
 {
-  "version": "1.3.0",
+  "version": "1.3.1",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "v1.3.0 \u2014 The ChatGPT queue now lives on the server: CVs being prepared, questions to answer and conversations to delete are kept in the TailorResume database. The server builds each CV the moment ChatGPT finishes, so closing the browser or the extension never loses finished work, and unfinished work continues after the browser is opened again. Applied / Reported / Skipped jobs are closed by the server itself.",
-  "built_at": "2026-11-13T07:16:34Z"
+  "changelog": "v1.3.1 \u2014 ChatGPT chats are deleted, not just closed: every chat the extension opens is recorded on the server the moment it opens and deleted from your ChatGPT account as soon as it is no longer needed \u2014 job applied / skipped / reported, a failed or re-written CV, a browser closed mid-write, 2 hours unused, or Disconnect (which deletes every chat it kept; the CVs and answers stay). Deleting carries on in the background after Disconnect. The panel shows how many chats are waiting to be deleted.",
+  "built_at": "2026-11-13T08:59:52Z"
 }
