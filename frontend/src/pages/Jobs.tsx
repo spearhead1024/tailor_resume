@@ -4,7 +4,7 @@ import { useUrlState, useOnChange } from '../lib/urlState';
 import { api } from '../api/client';
 import { useAuth, hasRole } from '../lib/auth';
 import { useToast } from '../lib/toast';
-import { etDateLong, etDateShort, etDateKey, todayETKey } from '../lib/etTime';
+import { etDateLong, etDateShort, etDateTime, etDateKey, todayETKey } from '../lib/etTime';
 import CompanyBadge from '../lib/CompanyBadge';
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
@@ -50,7 +50,6 @@ function formatJobError(err: any, fallback: string): string {
 }
 
 function formatDay(iso: string): string { return etDateLong(iso, 'Unknown date'); }
-function formatDate(iso: string): string { return etDateShort(iso, '—'); }
 
 // Status dropdown and Edit button share one size so the row's actions line up.
 const JOB_ACTION_CTRL: React.CSSProperties = {
@@ -589,7 +588,7 @@ export default function Jobs() {
                       <td style={{ maxWidth: 260, overflowWrap: 'anywhere' }}>{job.link ? <a href={job.link} target="_blank" rel="noreferrer">{job.job_title}</a> : job.job_title}</td>
                       <td>{job.region}</td>
                       <td><span className={`pill ${job.status}`}>{job.status}</span></td>
-                      <td style={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }}>{formatDate(job.submitted_at || job.approved_at)}</td>
+                      <td style={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }} title="US Eastern time">{etDateTime(job.submitted_at || job.approved_at)}</td>
                       {isAdmin && (
                         <td style={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }}>
                           {job.created_by_username || <span className="muted">—</span>}
