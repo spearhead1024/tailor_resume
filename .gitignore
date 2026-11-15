@@ -51,3 +51,6 @@ data/job_sync.lock
 extension-dev/dist/
 # local rollback copies of published extension builds
 data/extension/previous/
+
+# Windows fonts copied from a licensed PC (ops/install_fonts.sh) — never publish them
+Fonts/

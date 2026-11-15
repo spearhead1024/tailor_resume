@@ -64,6 +64,13 @@ pm2 start /var/@TailorResume/ecosystem.config.js
 
 nginx config: see `nginx.conf.example`.
 
+### Fonts for CV PDFs
+
+PDFs are made from each profile's uploaded DOCX by LibreOffice, which swaps any font it doesn't
+have (e.g. Segoe Print → DejaVu Sans). Templates use Windows fonts, so copy `C:\Windows\Fonts`
+from a licensed Windows PC into `Fonts/` on the server (kept out of git: the repo is public and
+Microsoft's licence forbids publishing them), then run `sudo ops/install_fonts.sh`.
+
 ## Migration notes
 
 - Copied `core/` modules unchanged from `/var/@Resume-Generator/core/`.
