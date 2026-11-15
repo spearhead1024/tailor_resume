@@ -8,7 +8,7 @@
    stop as soon as the notification is clicked or dismissed. */
 
 // Bump this to force every browser onto a new worker. The byte change is what the browser diffs.
-const SW_VERSION = '10-require-interaction';
+const SW_VERSION = '11-open-row';
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
@@ -99,13 +99,18 @@ self.addEventListener('notificationclick', (event) => {
   event.waitUntil((async () => {
     await tellPages({ type: 'notification-sound', action: 'stop' });
     const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-    for (const c of wins) {                     // already have the board open → focus it
-      if (c.url.includes(target) && 'focus' in c) return c.focus();
+    const t = new URL(target, self.location.origin);
+    // Already have the board open → focus it and let the page jump to the call. (Compare the path:
+    // the target carries ?row=<id>, so matching the whole URL never found an open board.)
+    const board = wins.find((c) => new URL(c.url).pathname === t.pathname && 'focus' in c);
+    if (board) {
+      const rowId = t.searchParams.get('row');
+      if (rowId) board.postMessage({ type: 'open-row', row_id: rowId });
+      return board.focus();
     }
-    for (const c of wins) {                      // any app window → navigate it to the board
-      if ('focus' in c) { try { await c.navigate(target); } catch (_) {} return c.focus(); }
-    }
-    if (self.clients.openWindow) return self.clients.openWindow(target);   // nothing open → open a tab
+    // Otherwise open a tab. Never navigate another app tab to the board: it may hold unsaved work
+    // (a pasted JSON on Bid, a half-filled form) that a navigation throws away.
+    if (self.clients.openWindow) return self.clients.openWindow(t.pathname + t.search);
   })());
 });
 

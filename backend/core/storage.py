@@ -27,6 +27,10 @@ from sqlalchemy.orm import Session
 from .db import session_scope
 from .db import migration as _migration
 from .db.models import (
+    AutofillAnswerRow,
+    AutofillLabelRow,
+    BidSkipRow,
+    CompanyRow,
     GeneratedResumeRow,
     InterviewColumnRow,
     InterviewRow,
@@ -51,6 +55,50 @@ _ALLOWED_REGIONS = {'ANY', 'US', 'EU', 'LATAM'}
 # manual-create check (routers/jobs.py) and the sync poller (core/job_sync.py)
 # both inherit this default.
 COMPANY_DEDUP_DAYS = 15
+
+# The Jobs tab's "Added by" name lives only in the job's JSON (synced jobs have a VPS1
+# adder but no local user id), so the filter reads it from there. ~7k rows: fast enough.
+_ADDED_BY_SQL = JobRow.data['created_by_username'].as_string()
+# ?added_by= value selecting jobs with no adder on record (never a real username).
+ADDED_BY_NONE = '__none__'
+
+
+def _job_filter_conditions(*, status: str = '', region: str = '', company: str = '', q: str = '',
+                           date_from: datetime | None = None, date_to: datetime | None = None,
+                           reported: bool = False, created_by: str = '', added_by: str = '') -> list:
+    """SQL WHERE conditions for the Jobs tab's filters — shared by the job list, its status
+    counts and the "Added by" counts, so every number on the tab means the same filtered set.
+    Dates are naive-UTC bounds: date_from inclusive, date_to exclusive."""
+    from sqlalchemy import func, or_
+
+    conds = []
+    if status:
+        conds.append(JobRow.status == status)
+    if reported:
+        # Reported jobs are flagged=True in the JSON data column.
+        conds.append(JobRow.data['flagged'].as_boolean() == True)  # noqa: E712
+    if created_by:
+        # Restrict to jobs this user uploaded (job_adder scoping).
+        conds.append(JobRow.created_by_user_id == created_by)
+    if added_by == ADDED_BY_NONE:
+        conds.append(func.coalesce(func.trim(_ADDED_BY_SQL), '') == '')
+    elif added_by.strip():
+        conds.append(func.lower(func.trim(_ADDED_BY_SQL)) == added_by.strip().lower())
+    if region and region.upper() not in ('', 'ALL', 'ANY'):
+        conds.append(JobRow.region == region.upper())
+    if company:
+        conds.append(func.lower(JobRow.company) == company.strip().lower())
+    if q:
+        like = f"%{q.strip().lower()}%"
+        conds.append(or_(
+            func.lower(JobRow.company).like(like),
+            func.lower(JobRow.job_title).like(like),
+        ))
+    if date_from is not None:
+        conds.append(JobRow.submitted_at >= date_from)
+    if date_to is not None:
+        conds.append(JobRow.submitted_at < date_to)
+    return conds
 
 _URL_TRACKING_PARAMS = frozenset({
     'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
@@ -132,6 +180,22 @@ def _hash_auth_token(token: str) -> str:
 
 def _job_compare_key(value: str) -> str:
     return ''.join(ch.lower() if ch.isalnum() else ' ' for ch in str(value or '')).strip()
+
+
+_COMPANY_SUFFIXES = {
+    'inc', 'incorporated', 'llc', 'l l c', 'ltd', 'limited', 'corp', 'corporation', 'co',
+    'company', 'plc', 'gmbh', 'ag', 'sa', 'srl', 'bv', 'pty', 'pvt', 'lp', 'llp', 'holdings',
+}
+
+
+def company_key_for(name: str) -> str:
+    """Identity key for company intelligence: lowercase alphanumerics, single-spaced,
+    with trailing legal suffixes removed ("Acme, Inc." -> "acme"). Coarser than the
+    jobs' company_key so name variants of one company share a single record."""
+    words = _job_compare_key(name).split()
+    while len(words) > 1 and words[-1] in _COMPANY_SUFFIXES:
+        words.pop()
+    return ' '.join(words)[:255]
 
 
 def _company_fold_key(value: str) -> str:
@@ -352,11 +416,11 @@ def _default_settings() -> dict:
         # and how long a generated resume stays in the Apply queue.
         'job_deadline_hours': 12,
         # Interview reminder push notifications. Hours are on the CALLER's clock. Only interviews whose
-        # Status is "Scheduled" ever notify; the creater/CBM heads-ups additionally require Approved:
-        # Confirmed. creator_enabled/cbm_enabled are whole-feature admin switches; WHEN each actually
-        # fires is each person's OWN lead-time list, set on their own Account page (see
-        # creator_lead_minutes_list/cbm_lead_minutes_list on the user record, below) — deliberately NOT
-        # part of this app-wide blob, so one person's preference can never silently become everyone's.
+        # Status is "Scheduled" ever notify. creator_enabled/cbm_enabled are whole-feature admin
+        # switches; WHEN each actually fires is each person's OWN lead-time list, set on their own
+        # Account page (see creator_lead_minutes_list/cbm_lead_minutes_list on the user record, below)
+        # — deliberately NOT part of this app-wide blob, so one person's preference can never
+        # silently become everyone's.
         'notifications': {
             'lead_enabled': True,
             'lead_minutes': 60,        # "Interview in 1 hour" — set 30 for half an hour, etc. App-wide;
@@ -511,20 +575,69 @@ def _normalize_uploaded_resume(item: Any) -> dict:
     }
 
 
+def _clamp_int(value, default: int, lo: int, hi: int) -> int:
+    try:
+        n = int(value)
+    except Exception:
+        return default
+    return max(lo, min(hi, n))
+
+
 def _normalize_generation_settings(raw) -> dict:
+    # tech_skills_target / bullets_per_company_default drive the ChatGPT prompt
+    # (VPS1 flow); summary_char_count / skills_count / bullet_counts are kept for
+    # backward compatibility with older profiles. bullets_per_company is a list of
+    # per-company overrides {company_name, bullets} matched by name in the prompt.
     if not isinstance(raw, dict):
-        return {'summary_char_count': 650, 'skills_count': 85, 'bullet_counts': []}
+        return {
+            'summary_char_count': 650, 'skills_count': 85, 'bullet_counts': [],
+            'tech_skills_target': 70, 'bullets_per_company_default': 5,
+            'bullets_per_company': [], 'candidate_background': '',
+        }
     bullet_counts = []
     for bc in raw.get('bullet_counts') or []:
         try:
             bullet_counts.append(int(bc))
         except Exception:
             pass
+    overrides = []
+    for ov in raw.get('bullets_per_company') or []:
+        if not isinstance(ov, dict):
+            continue
+        name = str(ov.get('company_name') or '').strip()
+        if name:
+            overrides.append({'company_name': name, 'bullets': _clamp_int(ov.get('bullets'), 5, 1, 20)})
     return {
         'summary_char_count': int(raw.get('summary_char_count') or 650),
         'skills_count': int(raw.get('skills_count') or 85),
         'bullet_counts': bullet_counts,
+        'tech_skills_target': _clamp_int(raw.get('tech_skills_target'), 70, 10, 200),
+        'bullets_per_company_default': _clamp_int(raw.get('bullets_per_company_default'), 5, 1, 20),
+        'bullets_per_company': overrides,
+        'candidate_background': str(raw.get('candidate_background') or '').strip(),
     }
+
+
+def _normalize_detected_work_history(raw, default_bullets: int = 5) -> list:
+    """Per-company anchors extracted from the profile's uploaded DOCX (VPS1 flow):
+    company_name + duration + a per-company bullet target. Editable on the Profiles page."""
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get('company_name') or '').strip()
+        if not name:
+            continue
+        out.append({
+            'company_name': name,
+            'role_title': str(item.get('role_title') or '').strip(),
+            'duration': str(item.get('duration') or '').strip(),
+            'location': str(item.get('location') or '').strip(),
+            'bullets': _clamp_int(item.get('bullets'), default_bullets, 1, 20),
+        })
+    return out[:8]
 
 
 _DOB_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
@@ -610,7 +723,7 @@ def _normalize_profile(item: dict) -> dict:
         'status': 'restricted' if str(item.get('status', 'active') or 'active').strip().lower() == 'restricted' else 'active',
         'created_by_user_id': str(item.get('created_by_user_id', '')).strip(),
         'created_by_username': str(item.get('created_by_username', '')).strip(),
-        'total_years_of_experience': int(item['total_years_of_experience']) if str(item.get('total_years_of_experience') or '').strip().isdigit() else 0,
+        'total_years_of_experience': _years(item.get('total_years_of_experience')),
         # Who they are on paper, and on what terms they can be hired. This dict is REBUILT from
         # scratch on every read and every write — a key that is not named here does not exist, no
         # matter what a client sends. That is why these four live here and not only in the router.
@@ -629,6 +742,10 @@ def _normalize_profile(item: dict) -> dict:
             for edu in item.get('education_history', []) or []
         ],
         'generation_settings': _normalize_generation_settings(item.get('generation_settings')),
+        'detected_work_history': _normalize_detected_work_history(
+            item.get('detected_work_history'),
+            _normalize_generation_settings(item.get('generation_settings')).get('bullets_per_company_default', 5),
+        ),
         'resume_template': str(item.get('resume_template') or 'spear-1').strip() or 'spear-1',
     }
 
@@ -645,7 +762,7 @@ def _normalize_template(item: dict, *, fallback_index: int = 0) -> dict:
 
 
 # 'manager' = team manager: runs one caller team (creates/approves that team's callers, and on the
-# interview board may re-assign a call within their team + set Approved/Status/Feedback).
+# interview board may re-assign a call within their team + set Status/Feedback).
 # 'call_board_manager' = oversees the whole call board: gets a creater-style heads-up before EVERY
 # scheduled call (see core/notify.py). Roles not listed here are silently stripped on save, so a new
 # role MUST be added here or the Users-page checkbox for it will never persist.
@@ -788,8 +905,6 @@ def _normalize_user(item: dict) -> dict:
         'is_admin': 'admin' in roles,
         'status': str(item.get('status', 'pending') or 'pending').strip(),
         'assigned_profile_ids': [str(v).strip() for v in item.get('assigned_profile_ids', []) if str(v).strip()],
-        # Bidder workflow: 1 = Resumes + Apply tabs, 2 = Bid tab. Default 2 (current Bid).
-        'bid_method': 1 if str(item.get('bid_method', 2)).strip() == '1' else 2,
         'created_at': str(item.get('created_at', '')),
         'approved_at': str(item.get('approved_at', '')),
         'approved_by_user_id': str(item.get('approved_by_user_id', '')).strip(),
@@ -873,11 +988,14 @@ def _normalize_job(item: dict) -> dict:
         'link': str(item.get('link', '')).strip(),
         'region': _normalize_market_region(item.get('region', item.get('market_region', ''))),
         'note': str(item.get('note', '')).strip(),
+        # Shared application questions (core/job_questions.py).
+        'application_questions': [str(q).strip() for q in (item.get('application_questions') or []) if str(q).strip()][:15],
         'status': str(item.get('status', 'pending') or 'pending').strip(),
         'source': str(item.get('source', 'manual') or 'manual').strip(),
         'scrape_status': str(item.get('scrape_status', 'done' if item.get('description') else 'queued') or 'queued').strip(),
         'scrape_error': str(item.get('scrape_error', '')).strip(),
         'created_by_user_id': str(item.get('created_by_user_id', '')).strip(),
+        'added_by_unknown': bool(item.get('added_by_unknown', False)),   # job_sync: VPS1 has no adder — stop asking
         'created_by_username': str(item.get('created_by_username', '')).strip(),
         'submitted_at': str(item.get('submitted_at', '')).strip(),
         'approved_at': str(item.get('approved_at', '')).strip(),
@@ -1011,6 +1129,7 @@ def _normalize_generated_resume(item: dict) -> dict:
         'applied_by_user_id': str(item.get('applied_by_user_id', '')).strip(),
         'applied_by_username': str(item.get('applied_by_username', '')).strip(),
         'ats_score': int(item.get('ats_score', 0) or 0),
+        'ats': item.get('ats') if isinstance(item.get('ats'), dict) else {},
         'download_filename': str(item.get('download_filename', '')).strip() or 'resume.pdf',
         'download_mode': str(item.get('download_mode', 'browser') or 'browser').strip(),
         'saved_pdf_path': str(item.get('saved_pdf_path', '')).strip(),
@@ -1114,6 +1233,47 @@ def _normalize_openai_call(entry: dict) -> dict:
 
 
 # ---------- Storage ----------
+
+
+def _ensure_company_row(session: Session, company_name: str, job_company_key: str) -> None:
+    """Create the company-intel row for this company if missing (status 'pending'),
+    and remember which jobs.company_key spellings belong to it."""
+    key = company_key_for(company_name)
+    if not key:
+        return
+    row = session.get(CompanyRow, key)
+    if row is None:
+        session.add(CompanyRow(key=key, name=str(company_name or '').strip()[:255], status='pending',
+                               data={'job_company_keys': [job_company_key] if job_company_key else []}))
+        session.flush()
+        return
+    keys = list((row.data or {}).get('job_company_keys') or [])
+    if job_company_key and job_company_key not in keys:
+        row.data = {**(row.data or {}), 'job_company_keys': keys + [job_company_key]}
+
+def _years(v: Any) -> int:
+    """Years of experience as a whole number. The Profiles input allows 7.5 / "12.0", which the old
+    isdigit() test silently turned into 0 (the prompt then fell back to 8, autofill typed "0")."""
+    try:
+        return max(0, int(round(float(str(v).strip()))))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _write_lock(session: Session) -> None:
+    """Take SQLite's write lock BEFORE reading, for a read-modify-write of a JSON row.
+
+    pysqlite only begins a transaction at the first write, so two writers (request threads, or the
+    API and a worker process) could both read the same row, each change a different key, and the
+    later commit silently erased the earlier one — two people editing different cells of the same
+    call lost one edit. BEGIN IMMEDIATE makes the second writer wait (busy timeout) for the first to
+    commit, so it reads the updated row. Must be the first statement in the session."""
+    session.execute(text("BEGIN IMMEDIATE"))
+
+
+def _blank(v) -> bool:
+    return v is None or v == "" or v == [] or v == {}
+
 
 class Storage:
     def __init__(self, data_dir: Path) -> None:
@@ -1297,6 +1457,24 @@ class Storage:
             rows = session.scalars(select(GeneratedResumeRow).order_by(GeneratedResumeRow.created_at_ts)).all()
             return [_normalize_generated_resume(dict(row.data or {})) for row in rows]
 
+    def get_generated_resumes_for_profile(self, profile_id: str) -> list[dict]:
+        """Only one profile's generated resumes, via the indexed profile_id column.
+
+        The Bid queue needs a single profile's resumes to work out which jobs are
+        already applied/generated. Deserializing ALL ~3.8k rows (get_generated_resumes,
+        ~1.8 s) just to keep ~50 was the main cost of the slow Bid tab. This filters
+        in SQL on the indexed column and normalizes only the matching rows."""
+        pid = str(profile_id or "")
+        if not pid:
+            return []
+        with session_scope(self.db_path) as session:
+            rows = session.scalars(
+                select(GeneratedResumeRow)
+                .where(GeneratedResumeRow.profile_id == pid)
+                .order_by(GeneratedResumeRow.created_at_ts)
+            ).all()
+            return [_normalize_generated_resume(dict(row.data or {})) for row in rows]
+
     # Fields the Applied list needs. They live inside the `data` JSON (no columns for them), so pull
     # them with json_extract and let SQLite do the extraction.
     _APPLIED_INDEX_SQL = text("""
@@ -1355,6 +1533,7 @@ class Storage:
         if not sid:
             return
         with session_scope(self.db_path) as session:
+            _write_lock(session)
             row = session.get(GeneratedResumeRow, sid)
             if row is None:
                 return
@@ -1445,6 +1624,7 @@ class Storage:
         if not tid:
             return
         with session_scope(self.db_path) as session:
+            _write_lock(session)    # rewrites user rows: a concurrent user edit must not be lost
             for row in session.query(UserRow).all():
                 data = dict(row.data or {})
                 if str(data.get('team_id', '')).strip() == tid:
@@ -1502,6 +1682,7 @@ class Storage:
         if not uid:
             return
         with session_scope(self.db_path) as session:
+            _write_lock(session)
             row = session.get(UserRow, uid)
             if row is None:
                 return
@@ -1695,6 +1876,7 @@ class Storage:
         if not jid:
             return
         with session_scope(self.db_path) as session:
+            _write_lock(session)
             row = session.get(JobRow, jid)
             if row is None:
                 return
@@ -1734,10 +1916,15 @@ class Storage:
         date_to: datetime | None = None,
         reported: bool = False,
         created_by: str = '',
+        added_by: str = '',
         page: int = 1,
         page_size: int = 20,
     ) -> dict:
         """Server-side filtered + paginated job listing.
+
+        `added_by` matches the "Added by" name shown on each job (created_by_username,
+        case-insensitive) — a local user for manual jobs, the VPS1 adder for synced ones.
+        ADDED_BY_NONE selects the jobs with no adder on record.
 
         Returns {jobs: [...light dicts...], total, page, page_size,
         counts: {status -> n}} where counts respect every filter EXCEPT
@@ -1747,30 +1934,10 @@ class Storage:
         from sqlalchemy import func, or_
 
         def _base_conditions(include_status: bool):
-            conds = []
-            if include_status and status:
-                conds.append(JobRow.status == status)
-            if reported:
-                # Reported jobs are flagged=True in the JSON data column.
-                conds.append(JobRow.data['flagged'].as_boolean() == True)  # noqa: E712
-            if created_by:
-                # Restrict to jobs this user uploaded (job_adder scoping).
-                conds.append(JobRow.created_by_user_id == created_by)
-            if region and region.upper() not in ('', 'ALL', 'ANY'):
-                conds.append(JobRow.region == region.upper())
-            if company:
-                conds.append(func.lower(JobRow.company) == company.strip().lower())
-            if q:
-                like = f"%{q.strip().lower()}%"
-                conds.append(or_(
-                    func.lower(JobRow.company).like(like),
-                    func.lower(JobRow.job_title).like(like),
-                ))
-            if date_from is not None:
-                conds.append(JobRow.submitted_at >= date_from)
-            if date_to is not None:
-                conds.append(JobRow.submitted_at < date_to)
-            return conds
+            return _job_filter_conditions(
+                status=status if include_status else '', region=region, company=company, q=q,
+                date_from=date_from, date_to=date_to, reported=reported,
+                created_by=created_by, added_by=added_by)
 
         page = max(1, int(page or 1))
         page_size = max(1, min(int(page_size or 20), 200))
@@ -1820,6 +1987,10 @@ class Storage:
                     'created_by_username': d.get('created_by_username', ''),
                 })
 
+        infos = self.company_info_for_names([j['company'] for j in jobs])
+        for j in jobs:
+            j['company_info'] = infos.get(j['company'])
+
         return {
             'jobs': jobs,
             'total': int(total),
@@ -1827,6 +1998,223 @@ class Storage:
             'page_size': page_size,
             'counts': counts,
         }
+
+    def active_account_names(self) -> set[str] | None:
+        """Lower-cased usernames + full names of every account that exists right now: this
+        server's users and VPS1's (the vps1_users mirror, re-read from VPS1 every hour by
+        core/vps1_sync.py — an account deleted on VPS1 drops out within the hour).
+
+        Filter lists built from history (who added a job, who applied) use this to leave out
+        deleted accounts. None when the VPS1 mirror is empty (never synced, or VPS1 not set up):
+        then nothing can be told apart, and callers must not filter at all."""
+        remote = self.get_vps1_users()
+        if not remote:
+            return None
+        names: set[str] = set()
+        for u in list(self.get_users()) + list(remote):
+            for k in ('username', 'full_name'):
+                v = str(u.get(k) or '').strip().lower()
+                if v:
+                    names.add(v)
+        return names
+
+    def job_adders(self, **filters) -> list[dict]:
+        """The Jobs tab's "Added by" options: everyone with a live account who added a job in the
+        set the OTHER filters select (period, status, region, search…; `filters` takes
+        _job_filter_conditions' arguments except added_by) — [{name, count}] sorted by name, plus
+        {name: '', count} for jobs with no adder on record. A count is exactly what picking that
+        option would list. Grouped case-insensitively (one person, one option); the spelling
+        shown is the most common one."""
+        from sqlalchemy import func
+
+        filters.pop('added_by', None)
+        key = func.lower(func.trim(func.coalesce(_ADDED_BY_SQL, '')))
+        stmt = select(key, func.trim(_ADDED_BY_SQL), func.count()).select_from(JobRow)
+        for c in _job_filter_conditions(**filters):
+            stmt = stmt.where(c)
+        with session_scope(self.db_path) as session:
+            rows = session.execute(stmt.group_by(key, func.trim(_ADDED_BY_SQL))).all()
+        by_key: dict[str, dict] = {}
+        for k, spelled, n in rows:
+            entry = by_key.setdefault(k or '', {'name': spelled or '', 'count': 0, '_best': 0})
+            entry['count'] += int(n)
+            if int(n) > entry['_best']:
+                entry['name'], entry['_best'] = spelled or '', int(n)
+        # Deleted accounts (here or on VPS1) are left out; their jobs keep the name they were
+        # added under, and "All" still shows them.
+        active = self.active_account_names()
+        out = [{'name': e['name'], 'count': e['count']} for k, e in by_key.items()
+               if active is None or not k or k in active]
+        return sorted(out, key=lambda e: (e['name'] == '', e['name'].lower()))
+
+    # ── Company intelligence (startup / size / age) ─────────────────────────
+    @staticmethod
+    def _company_public(row: CompanyRow) -> dict:
+        d = dict(row.data or {})
+        d.pop('job_company_keys', None)
+        return {**d, 'key': row.key, 'name': row.name, 'status': row.status,
+                'checked_at': row.checked_at.isoformat() + 'Z' if row.checked_at else ''}
+
+    def company_info_for_names(self, names: list[str]) -> dict[str, dict]:
+        """{company name -> public company info} for the given names (missing → absent)."""
+        by_key: dict[str, list[str]] = {}
+        for n in names or []:
+            k = company_key_for(n)
+            if k:
+                by_key.setdefault(k, []).append(n)
+        if not by_key:
+            return {}
+        out: dict[str, dict] = {}
+        with session_scope(self.db_path) as session:
+            rows = session.scalars(select(CompanyRow).where(CompanyRow.key.in_(list(by_key)))).all()
+            for row in rows:
+                info = self._company_public(row)
+                for n in by_key.get(row.key, []):
+                    out[n] = info
+        return out
+
+    def get_company(self, key: str) -> dict | None:
+        with session_scope(self.db_path) as session:
+            row = session.get(CompanyRow, key)
+            if row is None:
+                return None
+            return {**self._company_public(row), 'job_company_keys': list((row.data or {}).get('job_company_keys') or [])}
+
+    def companies_to_check(self, limit: int = 10, *, stale_days: int = 90, retry_hours: int = 24) -> list[dict]:
+        """Next companies for the worker: pending first (newest first, so companies
+        from just-added jobs jump ahead of the backfill), then errors to retry, then
+        stale results. Manually locked companies are never re-checked."""
+        now = datetime.utcnow()
+        out: list[dict] = []
+        with session_scope(self.db_path) as session:
+            q = [
+                select(CompanyRow).where(CompanyRow.status == 'pending').order_by(CompanyRow.created_at.desc()),
+                select(CompanyRow).where(CompanyRow.status == 'error',
+                                         CompanyRow.checked_at < now - timedelta(hours=retry_hours)),
+                select(CompanyRow).where(CompanyRow.status == 'done',
+                                         CompanyRow.checked_at < now - timedelta(days=stale_days)),
+            ]
+            for stmt in q:
+                for row in session.scalars(stmt.limit(limit * 3)).all():
+                    if len(out) >= limit:
+                        return out
+                    if (row.data or {}).get('locked'):
+                        continue
+                    out.append({'key': row.key, 'name': row.name,
+                                'job_company_keys': list((row.data or {}).get('job_company_keys') or [])})
+        return out
+
+    def jobs_for_company(self, job_company_keys: list[str], limit: int = 25) -> list[dict]:
+        if not job_company_keys:
+            return []
+        with session_scope(self.db_path) as session:
+            rows = session.scalars(select(JobRow).where(JobRow.company_key.in_(job_company_keys))
+                                   .order_by(JobRow.submitted_at.desc()).limit(limit)).all()
+            return [_normalize_job(dict(r.data or {})) for r in rows]
+
+    def save_company(self, key: str, data: dict, status: str = 'done') -> None:
+        """Store a check result. Preserves job_company_keys; never overwrites a locked row
+        unless `data` itself carries locked=True (a manual override)."""
+        with session_scope(self.db_path) as session:
+            _write_lock(session)
+            row = session.get(CompanyRow, key)
+            if row is None:
+                return
+            cur = dict(row.data or {})
+            if cur.get('locked') and not data.get('locked'):
+                return
+            row.data = {**data, 'job_company_keys': cur.get('job_company_keys') or []}
+            row.status = status
+            row.checked_at = datetime.utcnow()
+
+    def set_company_pending(self, key: str) -> bool:
+        with session_scope(self.db_path) as session:
+            _write_lock(session)
+            row = session.get(CompanyRow, key)
+            if row is None:
+                return False
+            d = dict(row.data or {})
+            d.pop('locked', None)
+            row.data = d
+            row.status = 'pending'
+            row.created_at = datetime.utcnow()   # jump the queue
+            return True
+
+    # ── Autofill (answers learned per profile + shared label knowledge) ──
+    def autofill_answers(self, profile_id: str) -> list[dict]:
+        with session_scope(self.db_path) as session:
+            rows = session.scalars(select(AutofillAnswerRow)
+                                   .where(AutofillAnswerRow.profile_id == profile_id)
+                                   .order_by(AutofillAnswerRow.question)).all()
+            return [{'question_key': r.question_key, 'question': r.question, 'answer': r.answer,
+                     'updated_by_username': r.updated_by_username,
+                     'updated_at': r.updated_at.strftime('%Y-%m-%dT%H:%M:%SZ') if r.updated_at else ''}
+                    for r in rows]
+
+    def save_autofill_answer(self, profile_id: str, question_key: str, question: str, answer: str,
+                             *, username: str = '') -> None:
+        with session_scope(self.db_path) as session:
+            row = session.get(AutofillAnswerRow, (profile_id, question_key))
+            if row is None:
+                row = AutofillAnswerRow(profile_id=profile_id, question_key=question_key)
+                session.add(row)
+            row.question = question[:500]
+            row.answer = answer[:2000]
+            row.updated_by_username = username
+            row.updated_at = datetime.utcnow()
+
+    def delete_autofill_answer(self, profile_id: str, question_key: str) -> bool:
+        with session_scope(self.db_path) as session:
+            row = session.get(AutofillAnswerRow, (profile_id, question_key))
+            if row is None:
+                return False
+            session.delete(row)
+            return True
+
+    def autofill_labels(self) -> dict[str, str]:
+        with session_scope(self.db_path) as session:
+            return {r.label_key: r.field for r in session.scalars(select(AutofillLabelRow)).all()}
+
+    def save_autofill_label(self, label_key: str, field: str) -> None:
+        with session_scope(self.db_path) as session:
+            row = session.get(AutofillLabelRow, label_key)
+            if row is None:
+                session.add(AutofillLabelRow(label_key=label_key, field=field))
+            else:
+                row.field = field
+                row.updated_at = datetime.utcnow()
+
+    # ── Bid skips (per-profile "not for this profile" on a job) ──────────
+    def skip_bid_job(self, profile_id: str, job_id: str, *, user_id: str = '', username: str = '',
+                     reason: str = '') -> None:
+        with session_scope(self.db_path) as session:
+            if session.get(BidSkipRow, (profile_id, job_id)) is None:
+                session.add(BidSkipRow(profile_id=profile_id, job_id=job_id, reason=reason[:500],
+                                       skipped_by_user_id=user_id, skipped_by_username=username))
+
+    def skipped_bid_job_ids(self, profile_id: str) -> set[str]:
+        with session_scope(self.db_path) as session:
+            return set(session.scalars(select(BidSkipRow.job_id).where(BidSkipRow.profile_id == profile_id)).all())
+
+    def seed_companies_from_jobs(self) -> int:
+        """Register every company that already has jobs (idempotent backfill)."""
+        added = 0
+        with session_scope(self.db_path) as session:
+            existing = set(session.scalars(select(CompanyRow.key)).all())
+            for company, ck in session.execute(select(JobRow.company, JobRow.company_key)).all():
+                k = company_key_for(company)
+                if k and k not in existing:
+                    session.add(CompanyRow(key=k, name=str(company or '').strip()[:255], status='pending',
+                                           created_at=datetime(2000, 1, 1),   # backfill sorts behind new jobs
+                                           data={'job_company_keys': [ck] if ck else []}))
+                    existing.add(k)
+                    added += 1
+                elif k:
+                    row = session.get(CompanyRow, k)
+                    keys = list((row.data or {}).get('job_company_keys') or [])
+                    if ck and ck not in keys:
+                        row.data = {**(row.data or {}), 'job_company_keys': keys + [ck]}
+        return added
 
     def export_recent_jobs(
         self,
@@ -1881,6 +2269,14 @@ class Storage:
                 stmt = stmt.where(JobRow.id != str(exclude_job_id).strip())
             row = session.scalar(stmt.limit(1))
             return _normalize_job(dict(row.data or {})) if row else None
+
+    def sync_remote_ids(self) -> set[str]:
+        """Every VPS1 job id already stored (any status) — job-sync's primary duplicate check."""
+        with session_scope(self.db_path) as session:
+            rows = session.execute(text(
+                "SELECT json_extract(data, '$.sync_remote_id') FROM jobs "
+                "WHERE json_extract(data, '$.sync_remote_id') IS NOT NULL")).all()
+            return {str(r[0]) for r in rows if r[0]}
 
     def find_recent_company_job(
         self, company: str, region: str, within_days: int = COMPANY_DEDUP_DAYS, exclude_job_id: str = '',
@@ -1970,12 +2366,16 @@ class Storage:
         row.scrape_status = normalized.get('scrape_status', 'done')
         row.submitted_at = _parse_iso_datetime(normalized.get('submitted_at', ''))
         row.created_by_user_id = str(normalized.get('created_by_user_id', '')).strip()
+        # Every job write registers its company for the startup/size check (the
+        # company-intel worker fills it in within seconds). Cheap: one PK lookup.
+        _ensure_company_row(session, normalized.get('company', ''), row.company_key)
 
     def add_job_report(self, job_id: str, report: dict) -> None:
         jid = str(job_id or '').strip()
         if not jid:
             return
         with session_scope(self.db_path) as session:
+            _write_lock(session)
             row = session.get(JobRow, jid)
             if row is None:
                 return
@@ -1990,6 +2390,7 @@ class Storage:
         if not jid:
             return
         with session_scope(self.db_path) as session:
+            _write_lock(session)
             row = session.get(JobRow, jid)
             if row is None:
                 return
@@ -2089,9 +2490,19 @@ class Storage:
                 changed = True
             return changed
 
-    def insert_interview_row(self, row_id: str, cells: dict, at: int | None = None) -> dict:
+    def insert_interview_row(self, row_id: str, cells: dict, at: int | None = None,
+                             prepare=None) -> dict | None:
+        """Insert one row at `at` (default: the bottom). `prepare(rows) -> cells | None`, if given,
+        runs INSIDE the write-locked transaction with the board as it is right now, and returns the
+        final cells (or None to insert nothing → returns None). Call numbers are allocated there: picking
+        "the smallest unused number" from an earlier read let two rows added at once share a number."""
         with session_scope(self.db_path) as session:
+            _write_lock(session)
             existing = session.scalars(select(InterviewRow).order_by(InterviewRow.position)).all()
+            if prepare is not None:
+                cells = prepare([{'id': r.id, 'cells': dict(r.cells or {})} for r in existing])
+                if cells is None:
+                    return None
             n = len(existing)
             pos = at if isinstance(at, int) and 0 <= at <= n else n
             new = InterviewRow(id=row_id, position=pos, cells=dict(cells or {}))
@@ -2105,6 +2516,7 @@ class Storage:
         """Merge `patch` into one row's cells — a single transaction, so two people editing
         different cells of the same row never overwrite each other."""
         with session_scope(self.db_path) as session:
+            _write_lock(session)
             r = session.get(InterviewRow, str(row_id or ''))
             if r is None:
                 return None
@@ -2117,6 +2529,7 @@ class Storage:
         """Atomic read-modify-write of ONE cell. The chat thread uses this so concurrent posts
         append rather than clobber (fn receives the stored value, returns the new one)."""
         with session_scope(self.db_path) as session:
+            _write_lock(session)
             r = session.get(InterviewRow, str(row_id or ''))
             if r is None:
                 return None
@@ -2207,12 +2620,27 @@ class Storage:
         if not pid:
             return None
         with session_scope(self.db_path) as session:
-            if session.get(Vps1ProfileRow, pid) is None:
+            _write_lock(session)
+            snap_row = session.get(Vps1ProfileRow, pid)
+            if snap_row is None:
                 return None                       # unknown profile — don't create an orphan override
+            snapshot = dict(snap_row.data or {})
             ov = session.get(Vps1ProfileOverrideRow, pid)
             fields = dict(ov.data or {}) if ov is not None else {}
-            fields.update(patch or {})
+            # The page sends the WHOLE profile; storing it all froze every VPS_1 field (contact
+            # details, uploaded resume…) against later mirror updates. Keep only real edits: a value
+            # equal to VPS_1's own drops the override, so that field follows VPS_1 again.
+            for k, v in (patch or {}).items():
+                if k in ('id', 'source'):
+                    continue
+                # A field VPS_1 omits comes back padded as "" (vps1_adapt), so "" vs a missing value is
+                # no edit either — storing it hid the value VPS_1 sent later, for good.
+                if v == snapshot.get(k) or (_blank(v) and _blank(snapshot.get(k))):
+                    fields.pop(k, None)
+                else:
+                    fields[k] = v
             fields.pop('id', None)                # the id is never an editable field
+            fields.pop('source', None)
             if ov is None:
                 session.add(Vps1ProfileOverrideRow(id=pid, data=fields))
             else:

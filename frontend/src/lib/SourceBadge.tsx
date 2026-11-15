@@ -16,8 +16,8 @@ export default function SourceBadge({ source }: { source?: string }) {
         fontSize: 11,
         fontWeight: 600,
         whiteSpace: 'nowrap',
-        color: remote ? '#a855f7' : '#22c55e',
-        border: `1px solid ${remote ? '#a855f7' : '#22c55e'}`,
+        color: remote ? 'var(--src-remote)' : 'var(--src-onsite)',
+        border: `1px solid ${remote ? 'var(--src-remote)' : 'var(--src-onsite)'}`,
         background: remote ? 'rgba(168,85,247,0.10)' : 'rgba(34,197,94,0.10)',
       }}
     >

@@ -43,6 +43,25 @@ def parse_dt(s):
     return dt
 
 
+def pick_removals(today, kept, is_applied):
+    """(rows to reject, number of applied rows kept) for the target day's rows, oldest first.
+
+    Applied rows claim their slot up front: walking in time order, an unapplied posting earlier in
+    the day used to take the slot first, so it AND the later applied posting both survived."""
+    kept = set(kept) | {r["key"] for r in today if is_applied(r)}
+    to_remove = []
+    protected = 0
+    for r in today:
+        if is_applied(r):
+            protected += 1
+            continue
+        if r["key"] in kept:
+            to_remove.append(r)
+        else:
+            kept.add(r["key"])
+    return to_remove, protected
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", default=datetime.now(ET).date().isoformat(),
@@ -92,17 +111,7 @@ def main():
     today = [r for r in rows if r["et"] == target and r["key"][0]]
     today.sort(key=lambda r: r["dt"] or datetime.min.replace(tzinfo=timezone.utc))
 
-    to_remove = []
-    protected = 0
-    for r in today:
-        if is_applied(r):
-            protected += 1
-            kept.add(r["key"])
-            continue
-        if r["key"] in kept:
-            to_remove.append(r)
-        else:
-            kept.add(r["key"])
+    to_remove, protected = pick_removals(today, kept, is_applied)
 
     print(f"Target ET day : {target}   window >= {win_start}  ({args.days}d)")
     print(f"Active jobs   : {len(rows)} total | {len(today)} on target day")

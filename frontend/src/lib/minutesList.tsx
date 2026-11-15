@@ -43,7 +43,7 @@ export function MinutesListEditor({ values, onChange, disabled }: {
       {values.map((n) => (
         <span key={n} style={{
           display: 'inline-flex', alignItems: 'center', gap: 5, padding: '3px 6px 3px 10px', borderRadius: 999,
-          background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', fontSize: '0.8rem',
+          background: 'rgba(var(--ink),0.06)', border: '1px solid rgba(var(--ink),0.12)', fontSize: '0.8rem',
         }}>
           {leadLabel(n)}
           <button type="button" disabled={disabled} title="Remove this time"

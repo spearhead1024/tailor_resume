@@ -13,15 +13,19 @@ import json
 import re
 import threading
 import uuid
-from datetime import datetime, timezone
+from urllib.parse import urlsplit
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import cast
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.responses import Response
 
-from auth import get_current_user, has_role, storage
+from auth import get_current_user, has_role, require_role, storage
 from core import vps1_adapt, vps1_client
+from core import cv_queue
+from core.job_questions import MAX_LEN, MAX_QUESTIONS, clean_questions, job_questions, questions_patch
+from core.ats_score import analyze_ats_score
 from core.docx_resume_export import build_docx_style_pdf_bundle
 from core.storage import normalize_job_url, tech_stacks_match
 
@@ -40,9 +44,12 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 BID_ACTIVITY_LOG = LOG_DIR / "bid_activity.jsonl"     # every event, one JSON per line
 BID_SUSPICIOUS_LOG = LOG_DIR / "bid_suspicious.log"   # human-readable cheat flags
 
-_BID_ACTIONS = {"copy_prompt", "generate", "download", "open_link", "mark_applied", "report"}
+_BID_ACTIONS = {"copy_prompt", "generate", "auto_generate", "download", "open_link", "mark_applied", "report", "skip", "autofill"}
 # Steps a bidder is expected to have done before marking a job applied.
 _BID_REQUIRED_BEFORE_APPLY = ["copy_prompt", "generate", "download", "open_link"]
+# The extension's ChatGPT connection wrote the CV itself (prompt → ChatGPT → build): that
+# covers the copy-prompt and generate steps.
+_BID_STEP_COVERS = {"auto_generate": ("copy_prompt", "generate")}
 
 _bid_log_lock = threading.Lock()
 # In-memory per (user_id, profile_id, job_id) -> {action: timestamp}; used only
@@ -218,8 +225,9 @@ def list_resumes(user: dict = Depends(get_current_user)):
     return [r for r in items if r.get("profile_id") in allowed]
 
 
-def _et_day(iso_ts: str) -> str:
-    """ET calendar date (YYYY-MM-DD) of a UTC ISO timestamp, '' if unparseable."""
+def _et_day(iso_ts: str, tz=None, start_hour: int = 0) -> str:
+    """Calendar date (YYYY-MM-DD) of a UTC ISO timestamp in `tz` (default US Eastern), '' if
+    unparseable. start_hour: the hour a day starts at (17 → 12th 5pm … 13th 4:59pm is the 12th)."""
     raw = str(iso_ts or "").strip()
     if not raw:
         return ""
@@ -229,7 +237,7 @@ def _et_day(iso_ts: str) -> str:
         return raw[:10]
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
-    return ts.astimezone(_ET).date().isoformat()
+    return (ts.astimezone(tz or _ET) - timedelta(hours=start_hour)).date().isoformat()
 
 
 @router.get("/search")
@@ -239,6 +247,8 @@ def search_applied_resumes(
     bidder: str = Query(""),
     date_from: str = Query(""),   # ET date YYYY-MM-DD (applied_at)
     date_to: str = Query(""),
+    tz: str = Query(""),          # IANA zone the dates are in (Applied: Etc/GMT-9, i.e. GMT+9)
+    day_start: int = Query(0, ge=0, le=23),   # the hour a day starts at in `tz` (Applied: 17 = 5pm)
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=200),
     user: dict = Depends(get_current_user),
@@ -252,6 +262,10 @@ def search_applied_resumes(
     """
     if not has_role(user, "admin", "bidder"):
         raise HTTPException(status_code=403, detail="Forbidden")
+    try:
+        day_tz = ZoneInfo(tz) if tz else None      # None → ET (the historical default)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Unknown time zone")
 
     profiles = {p.get("id"): p for p in storage.get_profiles()}
     allowed_pids = None
@@ -283,7 +297,7 @@ def search_applied_resumes(
             continue
         if bl and who.lower() != bl:
             continue
-        applied_day = _et_day(r.get("applied_at") or r.get("created_at"))
+        applied_day = _et_day(r.get("applied_at") or r.get("created_at"), day_tz, day_start)
         if date_from and applied_day and applied_day < date_from:
             continue
         if date_to and applied_day and applied_day > date_to:
@@ -335,7 +349,7 @@ def search_applied_resumes(
                 continue
             if bl and who.lower() != bl:
                 continue
-            applied_day = _et_day(row.get("applied_at") or row.get("created_at"))
+            applied_day = _et_day(row.get("applied_at") or row.get("created_at"), day_tz, day_start)
             if date_from and applied_day and applied_day < date_from:
                 continue
             if date_to and applied_day and applied_day > date_to:
@@ -349,6 +363,7 @@ def search_applied_resumes(
             rows.append(row)
 
     rows.sort(key=lambda x: x.get("applied_at") or x.get("created_at") or "", reverse=True)
+    active = storage.active_account_names()
     total = len(rows)
     start = (page - 1) * page_size
     page_rows = rows[start:start + page_size]
@@ -362,7 +377,10 @@ def search_applied_resumes(
             ({"id": pid, "name": name} for pid, name in facet_profiles.items()),
             key=lambda p: p["name"].lower(),
         ),
-        "bidders": sorted(facet_bidders, key=str.lower),
+        # Only accounts that still exist (here or on VPS1, see storage.active_account_names): a
+        # deleted bidder's applications stay in the results, but not as a dropdown choice.
+        "bidders": sorted((b for b in facet_bidders if active is None or b.lower() in active
+                           or b.lower() == bl), key=str.lower),
     }
 
 
@@ -410,71 +428,58 @@ def get_resume_job_detail(resume_id: str, user: dict = Depends(get_current_user)
     }
 
 
-# ---------------------------------------------------------------------------
-# Resumes tab — pending jobs per profile + per-job prompt
-# ---------------------------------------------------------------------------
 
-@router.get("/pending")
-def list_pending_for_profile(profile_id: str, user: dict = Depends(get_current_user)):
-    """Jobs that don't yet have a generated resume for this profile.
 
-    Used by the left pane of the Resumes tab.
-    """
-    if not has_role(user, "admin", "bidder"):
-        raise HTTPException(status_code=403, detail="Forbidden")
-    _check_profile_access(user, profile_id)
+def _biddable_jobs() -> list[dict]:
+    """The approved, recent, un-flagged jobs — the profile-independent part of the
+    Bid queue. Computed once so bid_profiles can reuse it across every profile
+    instead of re-scanning all jobs (thousands) per profile.
 
-    profile = _get_profile(profile_id)
-    p_region = str(profile.get("region") or "ANY").upper()
-
-    # Jobs already generated/skipped for this profile (so we exclude them)
-    processed_ids: set[str] = set()
-    for r in storage.get_generated_resumes():
-        if r.get("profile_id") != profile_id:
-            continue
-        if r.get("status") in ("generated", "skipped"):
-            jid = r.get("job_id") or ""
-            if jid:
-                processed_ids.add(jid)
-
+    Fast path: the DB filters to approved (indexed status) so pending/rejected rows
+    are never normalized, and the deadline window is read ONCE — previously
+    _is_recent_job called get_app_settings() per job, hitting settings thousands of
+    times (~2.4s). The recent-window filter then trims ~3k approved jobs to the
+    handful still open."""
+    hours = deadline_hours()
     out: list[dict] = []
-    for job in storage.get_jobs():
-        if job.get("status") != "approved":
-            continue
+    for job in storage.get_jobs(include_pending=False):
         if job.get("flagged") or job.get("admin_applied"):
             continue
-        if not _regions_match(str(job.get("region") or "ANY").upper(), p_region):
+        if not job.get("id"):
             continue
-        if not tech_stacks_match(job.get("description"), profile.get("tech_stacks") or []):
-            continue  # profile's main skills aren't mentioned in this job
-        if job.get("id") in processed_ids:
+        if not _is_recent_job(job, hours=hours):
             continue
-        if not _is_recent_job(job):  # configurable deadline from settings
-            continue
-        out.append({
-            "id": job.get("id"),
-            "company": job.get("company", ""),
-            "job_title": job.get("job_title", ""),
-            "region": job.get("region", "ANY"),
-            "submitted_at": job.get("submitted_at", ""),
-            "approved_at": job.get("approved_at", ""),
-        })
-
-    out.sort(key=lambda j: j.get("submitted_at") or "", reverse=True)
+        out.append(job)
     return out
 
 
-def _eligible_bid_items(profile: dict) -> list[dict]:
+def _eligible_bid_items(
+    profile: dict,
+    *,
+    jobs: list[dict] | None = None,
+    resumes: list[dict] | None = None,
+) -> list[dict]:
     """Unified Bid queue for one profile: approved, region- + tech-stack-matched,
     within-deadline jobs the profile has NOT applied to yet. Each item carries an
     existing résumé id (when one was already generated) so the Bid card can skip
-    straight to Download instead of regenerating."""
+    straight to Download instead of regenerating.
+
+    `jobs` (from _biddable_jobs) and `resumes` (from storage.get_generated_resumes)
+    may be passed in so a caller processing many profiles fetches each ONCE rather
+    than re-querying the DB per profile — the source of the slow Bid tab load."""
     pid = profile.get("id", "")
     p_region = str(profile.get("region") or "ANY").upper()
+    p_stacks = profile.get("tech_stacks") or []
 
     latest_by_job: dict[str, dict] = {}
     applied_jobs: set[str] = set()
-    for r in storage.get_generated_resumes():
+    # Only this profile's resumes are needed. When the caller didn't pre-fetch a
+    # shared list, query by the indexed profile_id (≈50 rows) instead of loading
+    # every generated resume (~3.8k rows / ~1.8s) — the slow Bid tab's main cost.
+    profile_resumes = resumes if resumes is not None else storage.get_generated_resumes_for_profile(pid)
+    # Jobs a bidder skipped for this profile ("Skip job") never come back to it.
+    applied_jobs |= storage.skipped_bid_job_ids(pid)
+    for r in profile_resumes:
         if r.get("profile_id") != pid:
             continue
         jid = r.get("job_id") or ""
@@ -488,19 +493,13 @@ def _eligible_bid_items(profile: dict) -> list[dict]:
                 latest_by_job[jid] = r
 
     items: list[dict] = []
-    for job in storage.get_jobs():
-        if job.get("status") != "approved":
-            continue
-        if job.get("flagged") or job.get("admin_applied"):
-            continue
+    for job in (jobs if jobs is not None else _biddable_jobs()):
         jid = job.get("id") or ""
         if not jid or jid in applied_jobs:
             continue  # already applied for this profile
         if not _regions_match(str(job.get("region") or "ANY").upper(), p_region):
             continue
-        if not tech_stacks_match(job.get("description"), profile.get("tech_stacks") or []):
-            continue
-        if not _is_recent_job(job):
+        if not tech_stacks_match(job.get("description"), p_stacks):
             continue
         existing = latest_by_job.get(jid)
         items.append({
@@ -511,6 +510,8 @@ def _eligible_bid_items(profile: dict) -> list[dict]:
             "link": job.get("link", ""),
             "submitted_at": job.get("submitted_at", ""),
             "resume_id": (existing or {}).get("saved_resume_id", ""),
+            "ats_score": (existing or {}).get("ats_score", 0),
+            "ats": (existing or {}).get("ats") or None,
         })
     items.sort(key=lambda j: j.get("submitted_at") or "", reverse=True)
     return items
@@ -551,8 +552,18 @@ def _bid_public_profile(p: dict) -> dict:
     }
 
 
+def _is_linkedin(link: str) -> bool:
+    """A posting hosted on LinkedIn (Easy Apply happens there). The extension's Bid tab leaves
+    them out (skip_linkedin=1) — they get their own flow; the web Bid tab still lists them."""
+    try:
+        host = (urlsplit(str(link or "").strip()).hostname or "").lower()
+    except ValueError:
+        return False
+    return host == "linkedin.com" or host.endswith(".linkedin.com")
+
+
 @router.get("/bid/profiles")
-def bid_profiles(user: dict = Depends(get_current_user)):
+def bid_profiles(user: dict = Depends(get_current_user), skip_linkedin: bool = Query(False)):
     """Accessible profiles for the Bid tab — full copyable fields + to-bid count."""
     if not has_role(user, "admin", "bidder"):
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -560,30 +571,113 @@ def bid_profiles(user: dict = Depends(get_current_user)):
     if not user.get("is_admin"):
         allowed = set(user.get("assigned_profile_ids") or [])
         profiles = [p for p in profiles if p.get("id") in allowed]
+    # Fetch the biddable-jobs list ONCE and reuse it for every profile (previously
+    # each profile re-scanned all ~3.4k jobs). Each profile's resumes are fetched
+    # via the indexed profile_id column (≈50 rows each) rather than deserializing
+    # all ~3.8k generated resumes per profile — together this took the Bid tab load
+    # from ~20s to well under a second.
+    jobs = _biddable_jobs()
+    if skip_linkedin:
+        jobs = [j for j in jobs if not _is_linkedin(j.get("link"))]
     out = [
-        {**_bid_public_profile(p), "bid_count": len(_eligible_bid_items(p))}
+        {
+            **_bid_public_profile(p),
+            "bid_count": len(_eligible_bid_items(
+                p, jobs=jobs, resumes=storage.get_generated_resumes_for_profile(p.get("id", "")),
+            )),
+        }
         for p in profiles
     ]
     return {"role": "admin" if user.get("is_admin") else "bidder", "profiles": out}
 
 
 @router.get("/bid")
-def bid_queue(profile_id: str, user: dict = Depends(get_current_user)):
-    """The ordered Bid queue (jobs to bid) for one profile."""
+def bid_queue(profile_id: str, user: dict = Depends(get_current_user), skip_linkedin: bool = Query(False)):
+    """The ordered Bid queue (jobs to bid) for one profile. skip_linkedin=1: without LinkedIn postings."""
     if not has_role(user, "admin", "bidder"):
         raise HTTPException(status_code=403, detail="Forbidden")
     _check_profile_access(user, profile_id)
-    return _eligible_bid_items(_get_profile(profile_id))
+    items = _eligible_bid_items(_get_profile(profile_id))
+    if skip_linkedin:
+        items = [it for it in items if not _is_linkedin(it.get("link"))]
+    infos = storage.company_info_for_names([it["company"] for it in items])
+    for it in items:
+        it["company_info"] = infos.get(it["company"])
+    return items
 
 
-@router.get("/bid-job/{job_id}")
-def bid_job_detail(job_id: str, user: dict = Depends(get_current_user)):
-    """Public detail (incl. full description) of an approved job, for the Bid tab."""
+@router.post("/bid/skip")
+def bid_skip(body: dict, user: dict = Depends(get_current_user)):
+    """Skip a job for one profile — it leaves that profile's Bid queue for good
+    (other profiles still see it). Body: {profile_id, job_id, reason} — the reason
+    (e.g. "Location / region") is kept with the skip."""
+    if not has_role(user, "admin", "bidder"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    profile_id = str((body or {}).get("profile_id") or "").strip()
+    job_id = str((body or {}).get("job_id") or "").strip()
+    if not profile_id or not job_id:
+        raise HTTPException(status_code=400, detail="profile_id and job_id are required")
+    _check_profile_access(user, profile_id)
+    if not storage.get_job_by_id(job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    reason = str((body or {}).get("reason") or "").strip()
+    storage.skip_bid_job(profile_id, job_id, user_id=user.get("id", ""), username=user.get("username", ""),
+                         reason=reason)
+    cv_queue.close(storage.db_path, profile_id=profile_id, job_id=job_id)   # its ChatGPT conversation is deleted
+    return {"ok": True}
+
+
+# ── Application questions: one shared list per job (core/job_questions.py) ──────
+_QUESTIONS_MAX = MAX_QUESTIONS
+_QUESTION_MAX_LEN = MAX_LEN
+
+
+def _available_job(job_id: str, user: dict) -> dict:
     if not has_role(user, "admin", "bidder"):
         raise HTTPException(status_code=403, detail="Forbidden")
     job = storage.get_job_by_id(job_id)
     if not job or job.get("status") != "approved" or job.get("flagged") or job.get("admin_applied"):
         raise HTTPException(status_code=404, detail="Job not available")
+    return job
+
+
+@router.put("/bid-job/{job_id}/questions")
+def set_job_questions(job_id: str, body: dict, user: dict = Depends(get_current_user)):
+    """Replace the job's shared application questions (one per line). Every bidder sees them."""
+    job = _available_job(job_id, user)
+    raw = (body or {}).get("questions")
+    lines = raw.splitlines() if isinstance(raw, str) else (raw if isinstance(raw, list) else [])
+    questions = clean_questions(lines)
+    storage.update_job(job_id, questions_patch(job, questions))
+    return {"questions": questions}
+
+
+@router.get("/{resume_id}/answers")
+def get_resume_answers(resume_id: str, user: dict = Depends(get_current_user)):
+    """This CV's answers to the job's application questions."""
+    record = _own_resume(resume_id, user)
+    return {"answers": record.get("application_answers") or []}
+
+
+@router.put("/{resume_id}/answers")
+def set_resume_answers(resume_id: str, body: dict, user: dict = Depends(get_current_user)):
+    """Store this CV's answers ([{question, answer}]) — written in the ChatGPT thread that wrote the CV."""
+    _own_resume(resume_id, user)
+    answers = []
+    for a in ((body or {}).get("answers") or [])[:_QUESTIONS_MAX * 2]:
+        if not isinstance(a, dict):
+            continue
+        q, ans = str(a.get("question") or "").strip()[:_QUESTION_MAX_LEN], str(a.get("answer") or "").strip()[:3000]
+        if q and ans:
+            answers.append({"question": q, "answer": ans})
+    storage.update_generated_resume(resume_id, {"application_answers": answers})
+    return {"answers": answers}
+
+
+@router.get("/bid-job/{job_id}")
+def bid_job_detail(job_id: str, user: dict = Depends(get_current_user)):
+    """Public detail (incl. full description) of an approved job, for the Bid tab."""
+    job = _available_job(job_id, user)
     return {
         "id": job.get("id", ""),
         "company": job.get("company", ""),
@@ -591,6 +685,8 @@ def bid_job_detail(job_id: str, user: dict = Depends(get_current_user)):
         "region": job.get("region", "ANY"),
         "link": job.get("link", ""),
         "description": job.get("description", ""),
+        "company_info": storage.company_info_for_names([job.get("company", "")]).get(job.get("company", "")),
+        "questions": job_questions(job),
     }
 
 
@@ -626,8 +722,12 @@ def bid_track(body: dict, user: dict = Depends(get_current_user)):
     steps[action] = ts
 
     if action == "mark_applied":
-        done = [s for s in _BID_REQUIRED_BEFORE_APPLY if s in steps]
-        missing = [s for s in _BID_REQUIRED_BEFORE_APPLY if s not in steps]
+        have = set(steps)
+        for step, covered in _BID_STEP_COVERS.items():
+            if step in have:
+                have.update(covered)
+        done = [s for s in _BID_REQUIRED_BEFORE_APPLY if s in have]
+        missing = [s for s in _BID_REQUIRED_BEFORE_APPLY if s not in have]
         summary = {"ts": ts, "username": uname, "company": company, "job_title": title,
                    "action": "apply_summary", "steps_done": done,
                    "missing": missing, "suspicious": bool(missing)}
@@ -781,62 +881,201 @@ def find_resume_by_job_url(
     return {"matched": True, "job": job_lite, "resume": resume_lite}
 
 
-def _build_prompt(profile: dict, job: dict, template: str) -> str:
-    """Assemble the 3-section prompt the operator copies into ChatGPT."""
-    # PROFILE JSON — only the fields the prompt template references
-    work_history = []
-    for w in profile.get("work_history", []) or []:
-        work_history.append({
-            "company_name": w.get("company_name", ""),
-            "duration": w.get("duration", ""),
-            "legacy_role": w.get("role_title") or w.get("role", "") or w.get("legacy_role", ""),
-            # bullet_count is filled below from generation_settings
-        })
+# ---------------------------------------------------------------------------
+# ChatGPT prompt (ported verbatim from VPS1's manual "chatGPT mode" flow).
+# The operator copies this into ChatGPT and pastes the returned JSON back into
+# generate-from-json. The prompt is fully self-contained — the whole spec lives
+# here, so there is no separate admin prompt-template setting. Sentinel tokens
+# {{TECH_MIN}} etc. are substituted below (str.replace, not .format(), because
+# the JSON skeleton is full of literal braces).
+# ---------------------------------------------------------------------------
+_CHATGPT_PROMPT_TEMPLATE = """You are an expert resume writer. Build a single JSON object that this app will feed directly into a DOCX/PDF template. Output the JSON inside ONE ```json fenced code block (so it renders with a copy button) and nothing else — no commentary before or after.
+
+INPUTS
+- TARGET ROLE: {{TARGET_ROLE}}
+- FIXED WORK HISTORY (use these companies and durations exactly — do NOT invent, reorder, or skip):
+{{COMPANY_BLOCK}}
+- JOB DESCRIPTION:
+{{JOB_DESCRIPTION}}
+
+METHOD — perform this analysis silently before writing; do NOT include it in the output:
+1. JOB DESCRIPTION ANALYSIS — extract every technology and theme and split into: (A) Required/must-have technologies across ALL layers (language, frontend, backend, database, cloud, DevOps, testing, auth, observability, messaging, AI); (B) Preferred/nice-to-have; (C) Engineering themes (architecture, scale, APIs, performance, CI/CD, testing, reliability, security); (D) Domain/workflow signals (product type, integrations, team structure). FIRST identify the PRIMARY stack — the language/framework the JD presents as its main stack (e.g. "our stack is Ruby on Rails", or the first/most-emphasized required technology). Languages or frameworks the JD offers only as acceptable ALTERNATIVES ("or Python/TypeScript works too", "willing to learn", "nice to have") are SECONDARY, not the lead — even if the candidate's background leans toward them.
+2. STACK EXPANSION — expand the required stack into a complete, realistic production environment by adding strongly-adjacent frameworks, libraries, infrastructure, and testing/operational tooling until technical_skills reaches the target. Only include tools strongly adjacent to the required stack; no generic terms.
+3. EXPERIENCE MAPPING — map the work history to the requirements as a believable career arc: thread the candidate's core competency through all roles, but using ERA-APPROPRIATE tools for each role's dates, deepening seniority and broadening the stack toward the present. Use exact matches first, then adjacent/related experience to cover required themes (e.g. if a role used REST APIs, surface OpenAPI/Swagger when the JD asks for it). Do NOT repeat the same modern stack in every role; reserve the newest tools for recent roles and keep early roles foundational.
+4. SCENARIO ASSIGNMENT — before writing any bullet, silently give EACH company a DIFFERENT engineering scenario by picking a distinct combination along these axes (see HARD RULE 16): product/domain context, core problem, system shape, team/ownership mode, and supporting tech mix. Then spread the JD's themes ACROSS the arc so each theme lands in the one or two companies where it fits best — never repeat every theme in every company. Sanity-check: if two companies' bullets could be swapped without anyone noticing, redo the assignment.
+
+OUTPUT — return ONE JSON object, wrapped in a single ```json fenced code block, with EXACTLY these top-level keys:
+{
+  "headline": string,            // The CANDIDATE'S professional identity — NOT the employer's product. Format "<Standard Role Title> | <Technical Specialization>", Title Case, ~4–8 words. (a) The ROLE TITLE must be a standard industry title, chosen from: Senior Software Engineer, Senior Backend Engineer, Senior Frontend Engineer, Senior Full Stack Engineer, Senior Platform Engineer, Senior Data Engineer, Senior DevOps Engineer, Senior Machine Learning Engineer, Staff Software Engineer, Principal Software Engineer. Pick the one closest to TARGET ROLE and let the work history set the seniority. NEVER coin a title out of the employer's product, feature, or business domain, and never copy the posting's literal title or level suffix. BAD: "Assessment Software Engineer", "Front End Software Engineer II", "Payments Platform Engineer". (b) The SPECIALIZATION must be an ENGINEERING domain grounded in the primary technical stack — never the employer's product, feature, or business domain. BAD: "AI-Enabled Technical Evaluation", "Platform UI Experiences", "Python Serverless Data Platforms". GOOD: "Senior Backend Engineer | Distributed Systems & APIs", "Senior Frontend Engineer | Design Systems & Web Performance", "Senior Full Stack Engineer | Cloud-Native Web Applications", "Senior Software Engineer | Scalable Backend & Cloud Infrastructure". Litmus test: the headline must still make sense on the candidate's LinkedIn a year from now, at a different company in a different industry. Not a sentence, no first person, no team/product names, no trailing tech list
+  "summary": string,             // 3–4 polished sentences (~50–80 words), confident third person, no first-person pronouns. Open with seniority and EXACTLY {{YEARS}} years of experience (use this exact number — do NOT invent a different figure), then domains and senior ownership of production systems, then the specialization angle. Weave in 3–5 of the JD's most important REQUIRED technologies as natural prose — no long comma-separated lists, and no raw tokens/shorthand (write "JavaScript" not "JS(ES+)", "SQL Server development" not "MS SQL objects")
+  "technical_skills": string[],  // EXACTLY {{TECH_MIN}}–{{TECH_MAX}} unique technologies/tools (target ≈ {{TECH_TARGET}}); broad coverage across languages, frameworks, databases, cloud, infra, testing, observability, data, security; specific items only (e.g. "PostgreSQL", "FastAPI"), not vague ("Backend")
+  "skill_groups": [              // 6–10 groups (more groups for the wider skill list), each item appears in technical_skills, no duplicates across groups
+    { "category": string, "items": string[] }
+  ],
+  "fit_keywords": string[],      // UP TO 18 keywords lifted from the JD that the resume must satisfy
+  "work_history": [              // EXACTLY one entry per company in FIXED WORK HISTORY, in the same order; company_index = 0 is the FIRST listed company
+    {
+      "company_index": number,   // 0-based, matches the FIXED WORK HISTORY order
+      "company_name": string,    // copy verbatim from FIXED WORK HISTORY
+      "role_title": string,      // tuned to TARGET ROLE; do not fabricate seniority
+      "role_headline": string,   // OR "" — short tagline; leave "" if unsure
+      "duration": string,        // copy verbatim from FIXED WORK HISTORY
+      "location": string,        // OR "" — leave "" if unsure
+      "bullets": string[]        // count controlled by FIXED WORK HISTORY ("EXACTLY N bullets" per company). Each bullet = a concrete piece of engineering work inside THIS company's assigned scenario (see HARD RULE 16): the problem or system, what was built/decided, and the outcome. Name only technologies that are era-appropriate for THIS role — do NOT force the JD's stack into every bullet; the JD's primary stack should dominate the RECENT roles and thin out in older ones. Show senior signals (architecture, ownership, trade-offs, performance, reliability, testing, CI/CD, observability) — but introduce them gradually along the arc, not in every role. NEVER include percentages or "%" anywhere; no "Responsible for"; max ~28 words; no trailing period required
+    }
+  ],
+  "education_history": [
+    { "institution": string, "degree": string, "field": string, "graduation_date": string }
+  ]
+}
+
+HARD RULES
+1. Output ONLY the JSON object, inside ONE ```json ... ``` fenced code block — nothing before the opening fence and nothing after the closing fence. No preamble, no explanation, no extra markdown.
+2. Use double quotes for every key and string. No trailing commas.
+3. work_history MUST contain exactly one entry per company listed in FIXED WORK HISTORY, in the same order, with company_name and duration copied verbatim.
+4. Bullets per company MUST match the count specified next to each company in FIXED WORK HISTORY — exact, not approximate.
+5. Weave JD vocabulary (frameworks, methodologies, domain terms) naturally into summary + bullets. Cover every required item from fit_keywords across the resume body.
+6. technical_skills count MUST be between {{TECH_MIN}} and {{TECH_MAX}} inclusive (aim for ≈ {{TECH_TARGET}}). Group every listed skill into exactly one skill_groups entry — no skill may appear in two groups.
+7. NEVER include percentages or the "%" character in any bullet, summary, or headline. No "reduced X by 30%", no "improved performance 25%", no "boosted by 40%". The character "%" must not appear anywhere in the JSON. Quantify with absolute numbers only when natural (e.g., "served 12 million requests/day", "shipped 4 production services"); otherwise lead with action and qualitative impact.
+8. RELEVANT — NOT A MIRROR OF THE JD. You do not have the candidate's actual achievements, so write strong bullets a senior practitioner could credibly own. But do NOT restate the job description's responsibilities back as their history, and do NOT make any SINGLE role a 100% match to the posting. The experience must be ADJACENT and TRANSFERABLE: the same class of engineering problems and the same technical depth, solved in DIFFERENT products, domains, and contexts than the JD's. A believable senior has deep relevant experience PLUS neighboring experience that is clearly not a carbon copy of this one JD. GROUND each role in its REAL company from FIXED WORK HISTORY: infer that company's likely industry and product from its name and write a scenario that fits a company of that kind (a fintech, a healthcare SaaS, an agency, a gaming studio, an enterprise integrator, etc.), so the arc reads like real, distinct employers — never as the same JD retold four times. A reader should conclude "this person has already solved comparable or harder problems elsewhere, so they can clearly do this job" — never "this reads like the job posting rewritten in past tense." Do not reuse the JD's phrasing, feature names, or product vocabulary as if it were the candidate's past work.
+9. Do NOT include any field besides the seven listed above. Do NOT include comments inside the JSON.
+10. If a section has no real data (e.g. no formal degree), use an empty array — not placeholder strings.
+11. headline and summary must read as polished professional copy, not keyword dumps. The headline describes the CANDIDATE (standard engineering title + technical specialization joined by " | "), NEVER the employer's product or business domain — do not coin a title or a specialization out of what the company sells (no "Assessment Software Engineer", no "AI-Enabled Technical Evaluation", no "Platform UI Experiences"), and never use the posting's literal title or a level suffix ("II"/"III"). The summary is confident third-person prose that weaves in only a few technologies naturally. NEVER put raw tokens or internal shorthand such as "JS(ES+)", "MS SQL objects", or "Transact SQL objects" in the headline or summary — use clean professional terms (JavaScript, SQL Server development, stored procedures).
+12. Spread the JD's core competencies across roles AS A BELIEVABLE CAREER PROGRESSION — not the same resume repeated. Seniority, scope, and ownership must GROW toward the present: early roles are hands-on/foundational (implementing, testing, supporting), mid roles add design and cross-team work, recent roles add architecture, then leadership and mentoring. Each company must have a DISTINCT focus and a largely DIFFERENT supporting-technology mix; never reuse the same tech set or sentence structures from one company to the next.
+13. RESPECT TECHNOLOGY TIMELINES — be realistic about when each tool existed. Only use technologies that were actually available and in common use during a role's dates; never place a framework, library, platform, or AI tool in a job that ended before that tool was released or widely adopted. Gate by real-world MAINSTREAM-ADOPTION years, for example: AngularJS ~2012, React ~2014, Angular(2+) ~2016, Vue ~2016, Node.js ~2011, TypeScript ~2014, Next.js ~2017, Tailwind CSS ~2019, Docker ~2014, Kubernetes ~2016, GraphQL ~2016, FastAPI ~2019, Spring Boot ~2014, Terraform ~2015, serverless/AWS Lambda ~2016, and most LLM/AI tooling ~2022+. For a role whose dates predate a required tool, DO NOT name that tool in that role — substitute the predecessor that was actually dominant then: jQuery / Backbone / AngularJS instead of React before ~2014; server-rendered PHP / Java / .NET / Rails instead of modern serverless; SVN before Git's mainstream dominance; jQuery AJAX / XMLHttpRequest before fetch/axios; hand-rolled scripts or Jenkins before GitHub Actions; on-prem or early EC2 before managed Kubernetes. Reserve the newest tools for the most recent roles; the earliest roles should read as junior/foundational with period-correct tools, not as a senior architect using a cutting-edge stack. A reviewer who checks each role's dates must find EVERY named technology plausible for that exact period.
+14. Required technologies must DOMINATE the Technical Skills section and thread through Experience; include preferred technologies only when relevant. Across all roles the bullets should collectively cover the JD's key engineering themes (architecture, APIs, performance, testing, CI/CD, observability, security) wherever the JD calls for them — but introduced gradually along the progression, not all at once in every role.
+15. LEAD WITH THE PRIMARY STACK. The summary and the MAJORITY of RECENT experience bullets must foreground the JD's primary language/framework as the candidate's core expertise (e.g. for a "Ruby on Rails" JD, lead with Ruby on Rails — not Python/TypeScript). Acceptable ALTERNATIVE languages and nice-to-haves ("or Python/TypeScript works too", "willing to learn") appear only as SECONDARY supporting skills, never as the dominant thread, and are listed AFTER the primary stack in Technical Skills. Do not let a secondary/alternative language dominate just because it is also mentioned or fits the candidate's background. In EARLY roles use that era's predecessors instead — the primary stack should thread the arc, not be pasted into every bullet.
+16. GIVE EVERY COMPANY A DISTINCT SCENARIO. Each company must read like a different job at a different kind of business. Vary these axes so no two companies overlap: (a) PRODUCT/DOMAIN CONTEXT — internal platform, customer-facing SaaS, data/ETL pipeline, marketplace, B2B integration, legacy modernization, greenfield build, developer tooling; (b) CORE PROBLEM — scale/throughput, latency, reliability and incidents, data correctness, developer velocity, cost, security/compliance, migration; (c) SYSTEM SHAPE — monolith, service extraction, event-driven, batch vs streaming, API platform, SDK/library; (d) TEAM/OWNERSHIP MODE — sole owner, embedded in a squad, cross-team lead, mentor, on-call owner; (e) SUPPORTING TECH MIX — largely different per company; only the ONE core competency thread may recur. Every bullet in a company must belong to THAT company's scenario. Never reuse another company's problem framing, tech set, or bullet pattern.
+17. VARY THE LANGUAGE. No two bullets anywhere in the resume may open with the same verb. No two companies may share the same sentence rhythm or bullet template. Deliberately mix bullet shapes: some open with the problem, some with the system built, some with a decision or trade-off, some with the operational outcome, some with scope/ownership. Do NOT repeat a uniform "Verb + JD technology + to + benefit" formula across the resume — that is the most common failure mode and it makes every company read identically.
+18. SHAPE THE RESUME AROUND THIS CANDIDATE — NOT A TEMPLATE. Several different candidates are tailored to this same job and their resumes may be read side by side, so the resume must be driven by THIS candidate's own companies, durations, and era — never a generic JD-shaped skeleton. Let the specific company scenarios and the era gating (RULES 8, 13, 16) do the differentiating, and additionally vary the SUMMARY's opening strategy (lead with a signature strength, OR the span of industries worked in, OR seniority + years), the headline's specialization angle, and the ordering of skill_groups. Two different candidates for this job must NOT produce the same summary skeleton, the same headline shape, or the same first-bullet pattern.
+
+Return the JSON now, inside a single ```json fenced code block."""
+
+
+# A detected/work-history "company" that is really an EDUCATION line (e.g.
+# "Baylor University … | Bachelor's Degree in Computer Science") or a leftover
+# template placeholder must never seed the FIXED WORK HISTORY — ChatGPT would then
+# generate a single fake "Computer Science Student" role. This guards the prompt.
+# An education line mis-parsed as a company: degree words, or a template marker.
+_NOT_A_COMPANY_RE = re.compile(
+    r"(?i)\b(bachelor|master|degree|b\.?\s?sc|m\.?\s?sc|ph\.?\s?d|diploma|certificat\w*|__role__|__headline__)\b"
+)
+_SCHOOL_WORD_RE = re.compile(r"(?i)\b(university|college|institute|academy|school)\b")
+_YEAR_RE = re.compile(r"(19|20)\d{2}")
+
+
+def _looks_like_real_company(name: str, duration: str = "", schools: frozenset = frozenset()) -> bool:
+    """Is this a work-history employer (not an education line)? A school-sounding name is still a
+    real employer when it has dates and isn't one of the profile's own schools — "Allen Institute
+    for AI" or "Boston College" (as an employer) must not silently drop out of the prompt."""
+    name = str(name or "").strip()
+    if not name:
+        return False
+    if _NOT_A_COMPANY_RE.search(f"{name} {duration}"):
+        return False
+    if _SCHOOL_WORD_RE.search(name):
+        return not _is_own_school(name, schools) and bool(_YEAR_RE.search(str(duration or "")))
+    return True
+
+
+def _school_key(name: str) -> str:
+    """'Baylor University, Waco, TX' → 'baylor university': the school without its place or punctuation."""
+    return " ".join(re.sub(r"[^a-z0-9 ]+", " ", str(name or "").split(",")[0].lower()).split())
+
+
+def _is_own_school(name: str, schools: frozenset) -> bool:
+    """Is this one of the profile's own schools? Compared loosely — exact string equality let
+    "Baylor University" through when education said "Baylor University, Waco, TX"."""
+    key = _school_key(name)
+    return bool(key) and any(k and (key in k or k in key) for k in map(_school_key, schools))
+
+
+def _prompt_companies(profile: dict) -> list[dict]:
+    """The FIXED WORK HISTORY companies that seed the prompt. Prefer the
+    DOCX-detected list (VPS1 flow), but fall back to the profile's own
+    work_history — and crucially use whichever source has MORE valid companies,
+    so a corrupted single detected entry (e.g. an education line mis-parsed as a
+    company) never overrides a clean multi-company work_history."""
     gs = profile.get("generation_settings", {}) or {}
-    bullet_counts = gs.get("bullet_counts", []) or []
-    for i, w in enumerate(work_history):
-        if i < len(bullet_counts):
-            w["bullet_count"] = int(bullet_counts[i] or 10)
-        else:
-            w["bullet_count"] = 10
-
-    profile_json = {
-        "profile_id": profile.get("id", ""),
-        "total_years_of_experience": int(profile.get("total_years_of_experience") or 0),
-        "skills_count": int(gs.get("skills_count") or 85),
-        "summary_char_count": int(gs.get("summary_char_count") or 650),
-        "work_history": work_history,
-    }
-    # Restricted profiles carry 2-3 main skills (their real/LinkedIn stack) that
-    # MUST appear on the résumé even when the JD doesn't mention them — this is
-    # also what keeps the résumé from being a perfect, AI-detectable JD match.
-    # All-Stack profiles (no tech_stacks) leave the prompt byte-identical to before.
-    must_include = [str(s).strip() for s in (profile.get("tech_stacks") or []) if str(s).strip()]
-    if must_include:
-        profile_json["must_include_skills"] = must_include
-    job_json = {
-        "job_id": job.get("id", ""),
-        "description": job.get("description", ""),
+    default_bullets = int(gs.get("bullets_per_company_default") or 5)
+    overrides = {
+        str(o.get("company_name") or "").strip().lower(): int(o.get("bullets") or default_bullets)
+        for o in (gs.get("bullets_per_company") or []) if isinstance(o, dict)
     }
 
-    extra = ""
-    if must_include:
-        extra = (
-            "\n# REQUIRED PROFILE SKILLS\n"
-            f"The candidate's core stack is: {', '.join(must_include)}.\n"
-            "Include EVERY one of these in technical_skills even if the job "
-            "description does not mention it, and weave the most relevant one or "
-            "two into professional_experience bullets, consistent with the work "
-            "history timeline. Do NOT wrap a skill in <B>...</B> unless the job "
-            "description itself requests it, so the résumé reads as naturally "
-            "curated rather than keyword-matched to the posting.\n"
+    schools = frozenset(str(e.get("university") or "").strip().lower()
+                        for e in (profile.get("education_history") or []) if isinstance(e, dict))
+
+    def _from_detected() -> list[dict]:
+        out: list[dict] = []
+        for item in profile.get("detected_work_history") or []:
+            name = str(item.get("company_name") or "").strip()
+            duration = str(item.get("duration") or "").strip()
+            if not _looks_like_real_company(name, duration, schools):
+                continue
+            bullets = int(item.get("bullets") or 0) or overrides.get(name.lower()) or default_bullets
+            out.append({"company_name": name, "duration": duration, "bullets": bullets})
+        return out
+
+    def _from_work_history() -> list[dict]:
+        bullet_counts = gs.get("bullet_counts", []) or []
+        out: list[dict] = []
+        for i, w in enumerate(profile.get("work_history", []) or []):
+            name = str(w.get("company_name") or "").strip()
+            duration = str(w.get("duration") or "").strip()
+            if not _looks_like_real_company(name, duration, schools):
+                continue
+            bullets = int(bullet_counts[i]) if i < len(bullet_counts) and bullet_counts[i] else default_bullets
+            out.append({"company_name": name, "duration": duration, "bullets": bullets})
+        return out
+
+    detected = _from_detected()
+    work = _from_work_history()
+    # Use whichever source yields more real companies. work_history is the reliable
+    # structured field; detected is a best-effort DOCX parse, so ties go to work_history.
+    return detected if len(detected) > len(work) else work
+
+
+def _build_prompt(profile: dict, job: dict) -> str:
+    """Assemble VPS1's self-contained ChatGPT prompt, with the target role, the
+    FIXED WORK HISTORY block, and the job description filled in."""
+    gs = profile.get("generation_settings", {}) or {}
+    tech_target = int(gs.get("tech_skills_target") or 70)
+    tech_min = max(40, tech_target - 5)
+    tech_max = tech_target + 5
+    # The candidate's real years of experience — differs per profile. Injected into
+    # the summary instruction so ChatGPT stops writing a hardcoded "8 years" for
+    # everyone. Falls back to 8 only when the profile has no value set.
+    try:
+        years = int(profile.get("total_years_of_experience") or 0)
+    except (TypeError, ValueError):
+        years = 0
+    if years <= 0:
+        years = 8
+
+    companies = _prompt_companies(profile)
+    if companies:
+        company_block = "\n".join(
+            f"  {idx}. {c['company_name']}"
+            + (f" · {c['duration']}" if c.get("duration") else "")
+            + f"  →  EXACTLY {c['bullets']} bullets"
+            for idx, c in enumerate(companies)
         )
+    else:
+        company_block = "  (no companies detected yet — upload a DOCX in the profile first)"
+
+    role = str(job.get("job_title") or "").strip() or '<<<paste target role here, e.g. "Senior Backend Engineer">>>'
+    jd = str(job.get("description") or "").strip() or "<<<paste the job description here>>>"
 
     return (
-        f"{template.strip()}\n\n"
-        f"# PROFILE JSON\n```json\n{json.dumps(profile_json, indent=2)}\n```\n\n"
-        f"# JOB DESCRIPTION JSON\n```json\n{json.dumps(job_json, indent=2)}\n```\n"
-        f"{extra}"
+        _CHATGPT_PROMPT_TEMPLATE
+        .replace("{{TARGET_ROLE}}", role)
+        .replace("{{COMPANY_BLOCK}}", company_block)
+        .replace("{{JOB_DESCRIPTION}}", jd)
+        .replace("{{TECH_MIN}}", str(tech_min))
+        .replace("{{TECH_MAX}}", str(tech_max))
+        .replace("{{TECH_TARGET}}", str(tech_target))
+        .replace("{{YEARS}}", str(years))
     )
 
 
@@ -850,12 +1089,7 @@ def get_prompt(profile_id: str, job_id: str, user: dict = Depends(get_current_us
     job = storage.get_job_by_id(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    settings = storage.get_app_settings()
-    template = str(settings.get("prompt_template", "")).strip()
-    if not template:
-        from core.storage import DEFAULT_PROMPT_TEMPLATE
-        template = DEFAULT_PROMPT_TEMPLATE
-    return {"prompt": _build_prompt(profile, job, template)}
+    return {"prompt": _build_prompt(profile, job)}
 
 
 # ---------------------------------------------------------------------------
@@ -883,233 +1117,92 @@ def _coerce_chatgpt_json(raw: str) -> dict:
     return data
 
 
-def _validate_resume_json(data: dict) -> None:
-    required = ["job_id", "profile_id", "professional_summary", "professional_experience", "technical_skills"]
-    missing = [k for k in required if not data.get(k)]
-    if missing:
-        raise HTTPException(status_code=400, detail=f"Missing required fields: {', '.join(missing)}")
-    if not isinstance(data["professional_experience"], list):
-        raise HTTPException(status_code=400, detail='"professional_experience" must be an array.')
-    if not isinstance(data["technical_skills"], list):
-        raise HTTPException(status_code=400, detail='"technical_skills" must be an array.')
+def _coerce_pasted_resume(raw: dict) -> dict:
+    """Coerce the pasted ChatGPT JSON (VPS1's 7-key shape) into the internal blob
+    the DOCX/PDF exporter consumes, WITHOUT rewriting content — only enforce
+    field types/defaults. Ported from VPS1's _coerce_pasted_resume.
 
-
-_SUMMARY_TOLERANCE = 50
-# A bullet passes validation if it is long enough to wrap to AT LEAST two
-# lines in the rendered PDF. The resume column wraps at roughly 95–105 chars,
-# so anything below ~110 chars renders as a single line and is rejected.
-# There is no upper bound — overly long bullets are tolerated, only single-
-# liners are rejected.
-_BULLET_MIN_LEN_FOR_TWO_LINES = 110
-
-
-def _validate_against_profile(data: dict, profile: dict) -> None:
-    """Enforce the per-profile format requirements declared in the prompt.
-
-    Raises HTTP 422 with a specific reason if ChatGPT's output deviates so the
-    operator can ask ChatGPT to retry rather than ending up with a malformed
-    PDF.
+    7 keys in: headline, summary, technical_skills[], skill_groups[{category,items}],
+    fit_keywords[], work_history[{company_index,company_name,role_title,role_headline,
+    duration,location,bullets[]}], education_history[{institution,degree,field,graduation_date}].
     """
-    issues: list[str] = []
+    def _s(x) -> str:
+        return str(x).strip() if x is not None else ""
 
-    gs = profile.get("generation_settings", {}) or {}
-    target_summary = int(gs.get("summary_char_count") or 0)
-    target_bullet_counts = list(gs.get("bullet_counts") or [])
-    target_skills = int(gs.get("skills_count") or 0)
-    profile_history = profile.get("work_history", []) or []
+    def _slist(x) -> list:
+        if not isinstance(x, list):
+            return []
+        return [_s(item) for item in x if _s(item)]
 
-    # 1) Summary length — counted including <B>...</B> tags, since that is how
-    # the prompt instructs ChatGPT to measure.
-    summary_raw = str(data.get("professional_summary") or "")
-    summary_len = len(summary_raw)
-    if target_summary > 0:
-        lo = target_summary - _SUMMARY_TOLERANCE
-        hi = target_summary + _SUMMARY_TOLERANCE
-        if summary_len < lo or summary_len > hi:
-            issues.append(
-                f"Summary length is {summary_len} chars but must be between {lo} and {hi} "
-                f"(target {target_summary} ±{_SUMMARY_TOLERANCE})."
-            )
-
-    # 2) Professional experience — one entry per profile work_history item,
-    # each with the configured bullet count and bullet length band.
-    exp = data.get("professional_experience") or []
-    if len(exp) != len(profile_history):
-        issues.append(
-            f"professional_experience has {len(exp)} companies but the profile has {len(profile_history)}."
-        )
-    for i, src in enumerate(profile_history):
-        company_label = src.get("company_name") or f"company #{i+1}"
-        if i >= len(exp):
-            issues.append(f"Missing entry for {company_label}.")
-            continue
-        entry = exp[i] if isinstance(exp[i], dict) else {}
-        bullets = entry.get("bullets") or []
-        expected = int(target_bullet_counts[i]) if i < len(target_bullet_counts) and target_bullet_counts[i] else None
-        if expected is not None and len(bullets) != expected:
-            issues.append(
-                f"{company_label}: returned {len(bullets)} bullets but profile requires exactly {expected}."
-            )
-        for j, b in enumerate(bullets):
-            # Strip <B>...</B> bold-marker tags before counting. Those tags are
-            # invisible markup the renderer consumes to apply bold styling; they
-            # don't take any space on the page, so they should not count toward
-            # the "renders as ≥ 2 lines" length check. Counting them was making
-            # short bullets pass validation purely because they had a lot of
-            # bold phrases, and making long-but-tag-light bullets fail when the
-            # visible text was actually fine.
-            visible = re.sub(r"<\s*/?\s*[bB]\s*>", "", str(b or ""))
-            n = len(visible)
-            if n < _BULLET_MIN_LEN_FOR_TWO_LINES:
-                issues.append(
-                    f"{company_label} bullet #{j+1} is only {n} visible chars (renders as 1 line); "
-                    f"each bullet must be at least {_BULLET_MIN_LEN_FOR_TWO_LINES} visible chars "
-                    f"(not counting <B>/</B> markup) so it wraps to 2 lines."
-                )
-
-    # 3) Technical skills — total count across all categories must match.
-    if target_skills > 0:
-        total_skills = 0
-        for grp in data.get("technical_skills") or []:
-            if not isinstance(grp, dict):
-                continue
-            items = grp.get("skills") or grp.get("items") or []
-            total_skills += sum(1 for s in items if str(s).strip())
-        # Overcount is tolerated — _resume_blob_from_json trims the tail down
-        # to target_skills. Only undercount is a hard fail because we cannot
-        # invent skills on the server side.
-        if total_skills < target_skills:
-            issues.append(
-                f"technical_skills total is {total_skills} but profile requires at least {target_skills}."
-            )
-
-    if issues:
-        # Cap the message length so the toast stays readable, but list the
-        # first few issues so the user knows what to ask ChatGPT to fix.
-        head = issues[:6]
-        extra = len(issues) - len(head)
-        body = " ".join(head)
-        if extra > 0:
-            body += f" (+{extra} more issue{'s' if extra != 1 else ''})"
-        raise HTTPException(
-            status_code=422,
-            detail=f"JSON validation failed — retry ChatGPT with the same prompt. {body}",
-        )
-
-
-_BOLD_TAG_RE = re.compile(r"<\s*/?\s*[bB]\s*>")
-_BOLD_PHRASE_RE = re.compile(r"<\s*[bB]\s*>(.*?)<\s*/\s*[bB]\s*>", re.DOTALL)
-
-
-def _strip_bold_tags(text: str) -> str:
-    """Remove <B> and </B> tags but keep the text inside them."""
-    return _BOLD_TAG_RE.sub("", str(text or ""))
-
-
-def _extract_bold_phrases(text: str, sink: set[str]) -> None:
-    """Collect every <B>...</B> phrase into the sink set (lowercase-deduped, original casing preserved on first sight)."""
-    if not text:
-        return
-    for m in _BOLD_PHRASE_RE.finditer(str(text)):
-        phrase = m.group(1).strip()
-        if len(phrase) >= 2:
-            sink.add(phrase)
-
-
-def _resume_blob_from_json(data: dict, profile: dict, job: dict) -> dict:
-    """Map ChatGPT JSON → the dict shape consumed by build_docx_style_pdf_bundle.
-
-    `<B>...</B>` tags ChatGPT emits get TWO things done in one pass:
-      1. The wrapped phrase is added as an extra bold-keyword so the exporter
-         renders it bold wherever it appears in the resume.
-      2. The tags themselves are stripped from the text so they don't leak
-         into the rendered PDF.
-    """
-    bold_phrases: set[str] = set()
-
-    profile_history = profile.get("work_history", []) or []
-    chat_experience = data.get("professional_experience", []) or []
-
+    work_raw = raw.get("work_history") if isinstance(raw.get("work_history"), list) else []
     work_history: list[dict] = []
-    for i, src in enumerate(profile_history):
-        chat = chat_experience[i] if i < len(chat_experience) else {}
-        bullets_raw = [str(b).strip() for b in (chat.get("bullets") or []) if str(b).strip()]
-        for b in bullets_raw:
-            _extract_bold_phrases(b, bold_phrases)
-        bullets_clean = [_strip_bold_tags(b) for b in bullets_raw]
+    for idx, item in enumerate(work_raw):
+        if not isinstance(item, dict):
+            continue
+        try:
+            company_index = int(item.get("company_index", idx))
+        except Exception:
+            company_index = idx
         work_history.append({
-            "company_name": _strip_bold_tags(chat.get("company") or src.get("company_name", "")),
-            "role_title":   _strip_bold_tags(chat.get("role") or src.get("role_title", "")),
-            "duration":     _strip_bold_tags(chat.get("duration") or src.get("duration", "")),
-            "location":     src.get("location", ""),
-            "role_headline": "",
-            "bullets":      bullets_clean,
+            "company_index": company_index,
+            "company_name": _s(item.get("company_name")),
+            "role_title": _s(item.get("role_title")),
+            "role_headline": _s(item.get("role_headline")),
+            "duration": _s(item.get("duration")),
+            "location": _s(item.get("location")),
+            "bullets": _slist(item.get("bullets")),
         })
 
-    # Skill groups: ChatGPT returns {skill_category, skills}; the exporter
-    # expects {category, items}. Strip tags from both, collect bolds first.
+    edu_raw = raw.get("education_history") if isinstance(raw.get("education_history"), list) else []
+    education_history: list[dict] = []
+    for item in edu_raw:
+        if not isinstance(item, dict):
+            continue
+        education_history.append({
+            "institution": _s(item.get("institution")),
+            "degree": _s(item.get("degree")),
+            "field": _s(item.get("field")),
+            "graduation_date": _s(item.get("graduation_date")),
+        })
+
+    sg_raw = raw.get("skill_groups") if isinstance(raw.get("skill_groups"), list) else []
     skill_groups: list[dict] = []
-    flat_skills: list[str] = []
-    for grp in data.get("technical_skills", []) or []:
+    for grp in sg_raw:
         if not isinstance(grp, dict):
             continue
-        cat_raw = str(grp.get("skill_category") or grp.get("category") or "").strip()
-        items_raw = [str(s).strip() for s in (grp.get("skills") or grp.get("items") or []) if str(s).strip()]
-        _extract_bold_phrases(cat_raw, bold_phrases)
-        for s in items_raw:
-            _extract_bold_phrases(s, bold_phrases)
-        cat = _strip_bold_tags(cat_raw)
-        items = [_strip_bold_tags(s) for s in items_raw]
-        if cat or items:
-            skill_groups.append({"category": cat, "items": items})
-            flat_skills.extend(items)
-
-    # If ChatGPT returned more skills than the profile target, trim from the
-    # tail (drop the last items of the last group, dropping the entire last
-    # group when emptied) until totals match. This avoids rejecting an
-    # otherwise-valid resume just because ChatGPT padded a few extra skills.
-    gs = profile.get("generation_settings", {}) or {}
-    target_skills = int(gs.get("skills_count") or 0)
-    if target_skills > 0:
-        total = sum(len(g["items"]) for g in skill_groups)
-        while total > target_skills and skill_groups:
-            last = skill_groups[-1]
-            if last["items"]:
-                last["items"].pop()
-                total -= 1
-            if not last["items"]:
-                skill_groups.pop()
-        flat_skills = [s for g in skill_groups for s in g["items"]]
-
-    # Summary: collect bolds, then strip
-    summary_raw = str(data.get("professional_summary") or "").strip()
-    _extract_bold_phrases(summary_raw, bold_phrases)
-    summary_clean = _strip_bold_tags(summary_raw)
-
-    # Headline: ChatGPT's professional positioning line feeds the resume's
-    # title placeholder. Falls back to the candidate name (legacy behaviour)
-    # when the model omits it. The name itself is static in the uploaded DOCX.
-    headline_clean = _strip_bold_tags(str(data.get("headline") or "")).strip() or profile.get("name", "")
-
-    # Use ChatGPT's bold phrases as auto-bold keywords for the exporter.
-    # technical_skills is already used as a keyword list by docx_resume_export,
-    # so merging the bold phrases in here means they get bolded wherever they
-    # appear in summary + bullets, on top of the built-in KNOWN_TECH_TERMS.
-    merged_keywords: list[str] = list(flat_skills)
-    for phrase in bold_phrases:
-        if phrase.lower() not in {s.lower() for s in merged_keywords}:
-            merged_keywords.append(phrase)
+        items = _slist(grp.get("items"))
+        category = _s(grp.get("category"))
+        if category and items:
+            skill_groups.append({"category": category, "items": items})
 
     return {
-        "headline": headline_clean,
-        "summary": summary_clean,
-        "technical_skills": merged_keywords,
+        "headline": _s(raw.get("headline")),
+        "summary": _s(raw.get("summary")),
+        "technical_skills": _slist(raw.get("technical_skills")),
         "skill_groups": skill_groups,
+        "fit_keywords": _slist(raw.get("fit_keywords")),
         "work_history": work_history,
-        "education_history": profile.get("education_history", []) or [],
-        "_job_id": data.get("job_id", ""),
-        "_profile_id": data.get("profile_id", ""),
+        "education_history": education_history,
     }
+
+
+def _missing_required_resume_fields(resume: dict) -> list:
+    """VPS1's required-field check on the coerced blob."""
+    missing: list[str] = []
+    if not resume.get("headline"):
+        missing.append("headline")
+    if not resume.get("summary"):
+        missing.append("summary")
+    if not resume.get("technical_skills"):
+        missing.append("technical_skills")
+    if not resume.get("work_history"):
+        missing.append("work_history")
+    else:
+        if not any(item.get("bullets") for item in resume["work_history"]):
+            missing.append("work_history bullets")
+    return missing
+
+
 
 
 @router.post("/generate-from-json")
@@ -1118,40 +1211,42 @@ def generate_from_json(
     background_tasks: BackgroundTasks,
     user: dict = Depends(get_current_user),
 ):
-    """Parse pasted JSON → save resume record → render PDF.
+    """Parse pasted ChatGPT JSON (VPS1's 7-key shape) → save resume record → render PDF.
 
-    Body: {"json_text": "<the pasted text from ChatGPT>"}
+    Body: {"json_text": "<pasted text>", "profile_id": "<selected>", "job_id": "<selected>"}
+
+    The job and profile come from the BODY (what the operator selected in the UI),
+    NOT from the pasted JSON — VPS1's prompt no longer echoes ids, and trusting the
+    UI selection also removes the old crosswiring risk.
     """
     if not has_role(user, "admin", "bidder"):
         raise HTTPException(status_code=403, detail="Forbidden")
 
     raw = str(body.get("json_text") or "")
     data = _coerce_chatgpt_json(raw)
-    _validate_resume_json(data)
+    job_id = str(body.get("job_id") or data.get("job_id") or "").strip()
+    profile_id = str(body.get("profile_id") or data.get("profile_id") or "").strip()
+    record = build_cv(user, profile_id, job_id, data, source="chatgpt_json")
+    background_tasks.add_task(_render_pdf_to_cache, record["saved_resume_id"])
+    return {
+        "ok": True,
+        "saved_resume_id": record["saved_resume_id"],
+        "job_company": record["job_company"],
+        "job_title": record["job_title"],
+        "ats_score": record["ats_score"],
+        "ats": record["ats"],
+    }
 
-    job_id = str(data.get("job_id") or "").strip()
-    json_profile_id = str(data.get("profile_id") or "").strip()
 
-    # The profile the operator actually selected in the UI is authoritative —
-    # NOT the profile_id ChatGPT echoes back (which it sometimes swaps,
-    # cross-wiring one candidate's content onto another's resume template).
-    # If the frontend sent the selected profile, require the pasted JSON to
-    # match it; otherwise fall back to the JSON's id (older clients).
-    selected_profile_id = str(body.get("profile_id") or "").strip()
-    profile_id = selected_profile_id or json_profile_id
-
-    if selected_profile_id and json_profile_id and json_profile_id != selected_profile_id:
-        sel = next((p for p in storage.get_profiles() if p.get("id") == selected_profile_id), None)
-        jsn = next((p for p in storage.get_profiles() if p.get("id") == json_profile_id), None)
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Profile mismatch — this JSON was generated for "
-                f"\"{(jsn or {}).get('name', json_profile_id)}\" but you have "
-                f"\"{(sel or {}).get('name', selected_profile_id)}\" selected. "
-                f"Re-copy the prompt for the selected profile and regenerate."
-            ),
-        )
+def build_cv(user: dict, profile_id: str, job_id: str, data: dict, *, source: str) -> dict:
+    """ChatGPT's resume JSON (VPS1's 7-key shape) → a saved resume record (the PDF is rendered
+    by the caller, in the background). Shared by the paste flow above and the extension's
+    ChatGPT queue (routers/cv_queue.py). Raises HTTPException(400) when the JSON or the
+    (profile, job) pair is not acceptable."""
+    resume_blob = _coerce_pasted_resume(data)
+    missing = _missing_required_resume_fields(resume_blob)
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Pasted JSON is missing required fields: {', '.join(missing)}")
 
     job = storage.get_job_by_id(job_id) if job_id else None
     if not job:
@@ -1161,7 +1256,7 @@ def generate_from_json(
         raise HTTPException(status_code=400, detail=f"Profile not found in DB: {profile_id!r}")
     _check_profile_access(user, profile_id)
 
-    # Verify the pasted IDs are internally consistent (no silent crosswiring).
+    # Keep VPS2's guards: the selected profile must fit this job's market + stack.
     job_region = str(job.get("region") or "ANY").upper()
     profile_region = str(profile.get("region") or "ANY").upper()
     if not _regions_match(job_region, profile_region):
@@ -1178,12 +1273,25 @@ def generate_from_json(
             ),
         )
 
-    # Format validation (summary length, bullet counts/lengths, skills count)
-    # is temporarily disabled. Re-enable by uncommenting the call below when
-    # ready — _validate_against_profile is still defined above.
-    # _validate_against_profile(data, profile)
+    # The DOCX filler maps work_history[i] onto the template's i-th company slot, so the pasted list
+    # must be the prompt's companies, in the prompt's order. Order by company_index (ChatGPT may
+    # reorder), and refuse a count mismatch rather than put bullets under the wrong employer.
+    expected = _prompt_companies(profile)
+    wh = resume_blob.get("work_history") or []
+    if all(isinstance(w.get("company_index"), int) for w in wh):
+        wh.sort(key=lambda w: w["company_index"])
+    if expected and len(wh) != len(expected):
+        raise HTTPException(status_code=400, detail=(
+            f"ChatGPT returned {len(wh)} compan{'y' if len(wh) == 1 else 'ies'} in work_history, but this "
+            f"profile has {len(expected)} ({', '.join(c['company_name'] for c in expected)}). "
+            "Ask ChatGPT to return exactly one entry per company, in that order, then paste again."))
 
-    resume_blob = _resume_blob_from_json(data, profile, job)
+    # Education is preserved from the profile (VPS1 flow: never rendered from the
+    # pasted JSON — the profile/template owns education).
+    resume_blob["education_history"] = profile.get("education_history", []) or []
+
+    # VPS1's ATS score (keyword / title / skills / experience / structure / fit).
+    ats = analyze_ats_score(resume_blob, job.get("description", "") or "", target_role=job.get("job_title", ""))
 
     saved_resume_id = f"resume_{uuid.uuid4().hex[:10]}"
     record = {
@@ -1193,50 +1301,69 @@ def generate_from_json(
         "job_company": job.get("company", ""),
         "job_title": job.get("job_title", ""),
         "job_link": job.get("link", ""),
+        # Snapshot of the job as applied to: the Applied tab searches the description, and it must
+        # survive the job being edited or deleted later.
+        "job_description": job.get("description", ""),
+        "job_region": job.get("region", "ANY"),
         "resume": resume_blob,
         "status": "generated",
         "applied_status": "pending",
         "created_at": _utcnow_iso(),
         "created_by_user_id": user.get("id", ""),
         "created_by_username": user.get("username", ""),
-        "source": "chatgpt_json",
+        "source": source,
+        "ats_score": int(ats.get("overall_score", 0) or 0),
+        "ats": ats,
     }
     storage.save_generated_resume(record)
-    background_tasks.add_task(_render_pdf_to_cache, saved_resume_id)
-
-    return {
-        "ok": True,
-        "saved_resume_id": saved_resume_id,
-        "job_company": job.get("company", ""),
-        "job_title": job.get("job_title", ""),
-    }
+    return record
 
 
 # ---------------------------------------------------------------------------
 # Bidder Apply actions (kept from previous flow)
 # ---------------------------------------------------------------------------
 
+def _own_resume(resume_id: str, user: dict) -> dict:
+    """The generated resume, if this user may act on it: an admin, or a bidder assigned its profile."""
+    record = storage.get_generated_resume_by_id(resume_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Resume not found")
+    if not has_role(user, "admin", "bidder"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    _check_profile_access(user, record.get("profile_id", ""))
+    return record
+
+
 @router.patch("/{resume_id}")
-def patch_resume(resume_id: str, payload: dict, user: dict = Depends(get_current_user)):
-    if hasattr(storage, "update_generated_resume"):
-        storage.update_generated_resume(resume_id, payload)
+def patch_resume(resume_id: str, payload: dict, user: dict = Depends(require_role("admin"))):
+    # Admin-only: the payload is merged as-is (profile_id, applied_by_*, status…), so no other role may
+    # call it. The app's own flows use /apply instead.
+    _own_resume(resume_id, user)
+    storage.update_generated_resume(resume_id, payload)
     return {"ok": True}
 
 
 @router.post("/{resume_id}/apply")
 def mark_applied(resume_id: str, user: dict = Depends(get_current_user)):
-    if hasattr(storage, "update_generated_resume"):
-        storage.update_generated_resume(resume_id, {
-            "applied_status": "applied",
-            "applied_at": _utcnow_iso(),
-            "applied_by_user_id": user.get("id", ""),
-            "applied_by_username": user.get("username", ""),
-        })
+    record = _own_resume(resume_id, user)
+    # Idempotent: re-applying an applied resume must not move the credit to whoever clicked last
+    # (per-bidder metrics count applied_by_user_id).
+    if record.get("applied_status") == "applied":
+        return {"ok": True}
+    storage.update_generated_resume(resume_id, {
+        "applied_status": "applied",
+        "applied_at": _utcnow_iso(),
+        "applied_by_user_id": user.get("id", ""),
+        "applied_by_username": user.get("username", ""),
+    })
+    # Applied: this CV's ChatGPT conversation is deleted (by the bidder's extension).
+    cv_queue.close(storage.db_path, profile_id=record.get("profile_id", ""), job_id=record.get("job_id", ""))
     return {"ok": True}
 
 
 @router.post("/{resume_id}/unapply")
-def mark_unapplied(resume_id: str, user: dict = Depends(get_current_user)):
+def mark_unapplied(resume_id: str, user: dict = Depends(require_role("admin"))):
+    _own_resume(resume_id, user)
     if hasattr(storage, "update_generated_resume"):
         storage.update_generated_resume(resume_id, {
             "applied_status": "pending",
@@ -1248,7 +1375,8 @@ def mark_unapplied(resume_id: str, user: dict = Depends(get_current_user)):
 
 
 @router.delete("/{resume_id}")
-def delete(resume_id: str, user: dict = Depends(get_current_user)):
+def delete(resume_id: str, user: dict = Depends(require_role("admin"))):
+    _own_resume(resume_id, user)
     if hasattr(storage, "delete_generated_resume"):
         storage.delete_generated_resume(resume_id)
     return {"ok": True}
@@ -1257,6 +1385,11 @@ def delete(resume_id: str, user: dict = Depends(get_current_user)):
 # ---------------------------------------------------------------------------
 # PDF
 # ---------------------------------------------------------------------------
+
+# VPS_1 resume ids are UUIDs. The id ends up in a cache filename and an outbound URL path, so
+# anything else ("../x", "a/b") is refused rather than sanitised.
+_VPS1_ID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
 
 @router.get("/{resume_id}/pdf")
 def get_resume_pdf(resume_id: str, user: dict = Depends(get_current_user)):
@@ -1267,6 +1400,8 @@ def get_resume_pdf(resume_id: str, user: dict = Depends(get_current_user)):
         if not has_role(user, "admin"):
             raise HTTPException(status_code=403, detail="Forbidden")
         remote_id = resume_id[len("vps1:"):]
+        if not _VPS1_ID_RE.fullmatch(remote_id):
+            raise HTTPException(status_code=404, detail="Resume not found")
         cache_file = PDF_CACHE_DIR / f"vps1_{remote_id}.pdf"
         if cache_file.exists() and cache_file.stat().st_size > 0:
             return Response(content=cache_file.read_bytes(), media_type="application/pdf")

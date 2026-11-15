@@ -33,8 +33,12 @@ export default function Account() {
   const [pw, setPw] = useState({ current: '', next: '', confirm: '' });
   const [pwSaving, setPwSaving] = useState(false);
 
+  // Seed the form once per signed-in user. `user` is replaced after an avatar/CV upload
+  // (loadCurrentUser), and re-seeding on every change silently wiped unsaved edits to the form.
+  const seededFor = useRef('');
   useEffect(() => {
-    if (!user) return;
+    if (!user || seededFor.current === user.id) return;
+    seededFor.current = user.id;
     setForm({
       full_name: user.full_name || '', email: user.email || '', country: user.country || '',
       telegram: user.telegram || '', whatsapp: user.whatsapp || '', discord: user.discord || '',
@@ -139,7 +143,7 @@ export default function Account() {
       {/* Avatar + identity */}
       <div className="card" style={{ display: 'flex', gap: 18, alignItems: 'center', marginBottom: '1rem' }}>
         <div style={{ width: 84, height: 84, borderRadius: '50%', overflow: 'hidden', flex: '0 0 auto',
-          background: '#3b82f640', color: '#93c5fd', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: 'var(--avatar-bg)', color: 'var(--avatar-fg)', display: 'flex', alignItems: 'center', justifyContent: 'center',
           fontSize: '1.6rem', fontWeight: 700 }}>
           {user.avatar_url
             ? <img src={user.avatar_url} alt="avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />

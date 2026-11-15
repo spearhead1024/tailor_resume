@@ -51,3 +51,15 @@ export function etDateTime(iso: string, fallback = '—'): string {
   });
   return `${s} ET`;
 }
+
+/** "May 31, 2026, 3:42 PM PDT" — date + time in the viewer's own time zone: the one
+ *  set on their Account (`tz`), else the browser's. The zone name is part of the text. */
+export function userDateTime(iso: string, tz?: string, fallback = '—'): string {
+  const d = safeDate(iso);
+  if (!d) return fallback;
+  const opts: Intl.DateTimeFormatOptions = {
+    year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
+  };
+  try { return d.toLocaleString('en-US', { ...opts, timeZone: tz || undefined }); }
+  catch { return d.toLocaleString('en-US', opts); }   // unknown zone id → browser zone
+}

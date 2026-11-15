@@ -15,5 +15,11 @@ def get_settings(user: dict = Depends(get_current_user)):
 
 @router.put("")
 def save_settings(body: SettingsUpsertRequest, user: dict = Depends(require_admin)):
-    storage.save_app_settings(body.payload)
+    """Partial update: only the keys sent are changed. The page used to send the whole
+    settings document as it was when the page was opened, so an admin with a stale
+    Settings tab who saved e.g. the prompt silently restored old values of every other
+    field — that is how the title blacklist (lead/staff/devops/principal) kept vanishing."""
+    current = storage.get_app_settings()
+    current.update(body.payload or {})
+    storage.save_app_settings(current)
     return storage.get_app_settings()

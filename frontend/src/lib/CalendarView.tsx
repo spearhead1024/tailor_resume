@@ -12,10 +12,9 @@ import { type CSSProperties, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom';
 import {
   addDays, availableAt, dateKeyAt, dayKeyOf, freeBands, instantAt, meetingBands, mergeBands,
-  minutesOfDay, startOfDay, wallClockIn,
+  minutesOfDay, startOfDay, wallClockIn, zonedToInstant,
   type Availability, type Band, type DailyMeeting, type MeetingBand,
 } from './availability';
-import { effCol } from './board-cols';
 
 export type CalOpt = { label: string; color?: string; kind?: 'team' | 'member'; group?: string };
 export type CalCol = { id: string; name: string; type: string; options?: CalOpt[] };
@@ -90,7 +89,7 @@ const DETAIL_FIELDS = [
   'c_index', 'c_sched', 'c_min', 'c_type',
   'c_company', 'c_title', 'c_account', 'c_client',
   'c_skill', 'c_salary', 'c_link',
-  'c_caller', 'c_approved', 'c_status', 'c_creater',
+  'c_caller', 'c_status', 'c_creater',
 ];
 
 const HOUR_PX = 44;                     // one hour of the day
@@ -110,16 +109,19 @@ type Drag =
 
 /* A stable colour per caller, so the same person is the same colour every week. Google gives each
    calendar a colour; here the caller IS the calendar. */
+/* bg/fg are theme tokens (--cal-ev-<hue>-bg/-fg in styles.css: deep fill + pale text in dark, pale
+   fill + deep text in light); the border/swatch hue reads on both, so it stays literal. */
+const evColour = (hue: string, bd: string) => ({ bg: `var(--cal-ev-${hue}-bg)`, bd, fg: `var(--cal-ev-${hue}-fg)` });
 const PALETTE = [
-  { bg: '#1e3a5f', bd: '#3b82f6', fg: '#bfdbfe' },
-  { bg: '#14532d', bd: '#22c55e', fg: '#bbf7d0' },
-  { bg: '#4c1d95', bd: '#a855f7', fg: '#e9d5ff' },
-  { bg: '#7c2d12', bd: '#f97316', fg: '#fed7aa' },
-  { bg: '#164e63', bd: '#06b6d4', fg: '#a5f3fc' },
-  { bg: '#701a3f', bd: '#ec4899', fg: '#fbcfe8' },
-  { bg: '#713f12', bd: '#eab308', fg: '#fef08a' },
+  evColour('blue', '#3b82f6'),
+  evColour('green', '#22c55e'),
+  evColour('purple', '#a855f7'),
+  evColour('orange', '#f97316'),
+  evColour('cyan', '#06b6d4'),
+  evColour('pink', '#ec4899'),
+  evColour('yellow', '#eab308'),
 ];
-const UNASSIGNED = { bg: '#2a2f3d', bd: '#6b7280', fg: '#d1d5db' };
+const UNASSIGNED = evColour('none', '#6b7280');
 
 function colourFor(name: string) {
   if (!name) return UNASSIGNED;
@@ -903,6 +905,38 @@ export default function CalendarView(props: Props) {
  * Fields the caller is not allowed to touch are disabled rather than hidden — seeing that the Company
  * is "Acme" and simply not being able to change it is more useful than the field vanishing.
  */
+/** Scheduled_at in the event popup. A datetime-local fires onChange on EVERY edited segment (day,
+ *  hour, arrow keys), so saving there moved the call several times per edit — each one a save, a
+ *  broadcast and a "time changed" notification. Keep a draft; save once on blur / Enter (Esc reverts),
+ *  converted to a UTC instant in the viewer's zone — the same as the table's cell — so it can never be
+ *  stored as a zone-less wall time. Claims the cell lock on focus like the other fields. */
+function SchedInput({ ts, tz, disabled, onClaim, onRelease, onSave }: {
+  ts: number; tz: string; disabled: boolean; onClaim: () => void; onRelease: () => void; onSave: (iso: string) => void;
+}) {
+  const shown = isNaN(ts) ? '' : wallClockIn(ts, tz);
+  const [draft, setDraft] = useState(shown);
+  const draftRef = useRef(shown);
+  const editingRef = useRef(false);
+  useEffect(() => { if (!editingRef.current) { setDraft(shown); draftRef.current = shown; } }, [shown]);
+  const commit = () => {
+    editingRef.current = false;
+    const v = draftRef.current;
+    const m = v.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+    if (m && v !== shown) onSave(new Date(zonedToInstant(+m[1], +m[2], +m[3], +m[4], +m[5], tz)).toISOString());
+    onRelease();      // like every other field: leaving it frees the cell (else others got 409 until the popup closed)
+  };
+  return (
+    <input type="datetime-local" disabled={disabled} value={draft}
+      onFocus={() => { editingRef.current = true; onClaim(); }}
+      onChange={(e) => { setDraft(e.target.value); draftRef.current = e.target.value; }}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+        if (e.key === 'Escape') { draftRef.current = shown; setDraft(shown); (e.target as HTMLInputElement).blur(); }
+      }} />
+  );
+}
+
 function EventDetail({ row, columns, hideFields, canEdit, userTz, onPatch, onDelete, onOpenRow, onClose,
                       lockOf, lockVarsOf, onClaim, onRelease }: {
   row: CalRow; columns: CalCol[]; hideFields?: Set<string>; canEdit: (rowId: string, colId: string) => boolean;
@@ -936,9 +970,8 @@ function EventDetail({ row, columns, hideFields, canEdit, userTz, onPatch, onDel
 
   const field = (cid: string) => {
     if (hideFields?.has(cid)) return null;          // not for this role — see hideFields
-    const raw = colById[cid];
-    if (!raw) return null;
-    const col = effCol(raw, row.cells);             // Approved can't be Confirmed with nobody assigned
+    const col = colById[cid];
+    if (!col) return null;
     // Somebody else is in this exact field right now. The server would refuse our write (409) — so make
     // it read-only and name them, rather than letting us type into something that will be thrown away.
     const heldBy = lockOf(row.id, cid);
@@ -953,13 +986,8 @@ function EventDetail({ row, columns, hideFields, canEdit, userTz, onPatch, onDel
 
     let input: React.ReactNode;
     if (cid === 'c_sched') {
-      // datetime-local speaks NAIVE local time; the server re-anchors it using this user's timezone —
-      // the same contract the table's Scheduled_at cell uses. Do not send a UTC string here.
-      input = (
-        <input type="datetime-local" disabled={!editable}
-          value={isNaN(schedTs) ? '' : wallClockIn(schedTs, userTz)}
-          onChange={(e) => e.target.value && onPatch(row.id, cid, e.target.value)} />
-      );
+      input = <SchedInput key={row.id} ts={schedTs} tz={userTz} disabled={!editable}
+        onClaim={() => onClaim(row.id, cid)} onRelease={onRelease} onSave={(iso) => onPatch(row.id, cid, iso)} />;
     } else if ((col.type === 'select' || col.type === 'person') && (col.options || []).length) {
       const opts = col.options || [];
       const loose = opts.filter((o) => !o.kind);                       // ungrouped people / plain options

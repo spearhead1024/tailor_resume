@@ -2,8 +2,13 @@ import { useState, useEffect, useMemo } from 'react';
 import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useToast } from '../lib/toast';
-import { etDateTime } from '../lib/etTime';
-import SourceBadge from '../lib/SourceBadge';
+import { userDateTime } from '../lib/etTime';
+import { useAuth } from '../lib/auth';
+import { useUrlState, useOnChange } from '../lib/urlState';
+
+// The From/To filter's day: from 5pm GMT+9 to 5pm GMT+9 the next day. ("Etc/GMT-9" IS GMT+9 —
+// the Etc zones' sign is inverted.)
+const APPLIED_DAY = { tz: 'Etc/GMT-9', startHour: 17 };
 
 type Row = {
   saved_resume_id: string;
@@ -34,22 +39,25 @@ type JobDetail = {
 
 export default function Applied() {
   const toast = useToast();
+  const { user } = useAuth();
+  const tz = user?.timezone || undefined;   // Applied times show in the viewer's zone (Account), else the browser's
 
-  const [query, setQuery] = useState('');
-  const [debounced, setDebounced] = useState('');
-  const [profileId, setProfileId] = useState('');
-  const [bidder, setBidder] = useState('');
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo] = useState('');
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(25);
+  // Filters live in the URL (lib/urlState) so a refresh keeps them.
+  const [query, setQuery] = useUrlState('q', '');
+  const [debounced, setDebounced] = useState(query.trim());
+  const [profileId, setProfileId] = useUrlState('profile', '');
+  const [bidder, setBidder] = useUrlState('bidder', '');
+  const [dateFrom, setDateFrom] = useUrlState('from', '');
+  const [dateTo, setDateTo] = useUrlState('to', '');
+  const [page, setPage] = useUrlState('page', 1);
+  const [pageSize, setPageSize] = useUrlState('size', 25);
   const [expanded, setExpanded] = useState<string | null>(null);
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(query.trim()), 350);
     return () => clearTimeout(t);
   }, [query]);
-  useEffect(() => { setPage(1); }, [debounced, profileId, bidder, dateFrom, dateTo, pageSize]);
+  useOnChange([debounced, profileId, bidder, dateFrom, dateTo, pageSize], () => setPage(1));
 
   const params = useMemo(() => {
     const sp = new URLSearchParams();
@@ -58,6 +66,8 @@ export default function Applied() {
     if (bidder) sp.set('bidder', bidder);
     if (dateFrom) sp.set('date_from', dateFrom);
     if (dateTo) sp.set('date_to', dateTo);
+    // A From/To day is a work day: 5pm GMT+9 to 5pm GMT+9 the next day (the 12th = 12th 5pm … 13th 4:59pm).
+    if (dateFrom || dateTo) { sp.set('tz', APPLIED_DAY.tz); sp.set('day_start', String(APPLIED_DAY.startHour)); }
     sp.set('page', String(page));
     sp.set('page_size', String(pageSize));
     return sp.toString();
@@ -73,6 +83,9 @@ export default function Applied() {
   const total = data?.total || 0;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const safePage = Math.min(page, totalPages);
+  // Deleting/rejecting everything on the last page left page > totalPages: an empty list labelled
+  // "Page N-1 of N-1" with Next disabled. Snap back to the real last page once the counts arrive.
+  useEffect(() => { if (data && page > totalPages) setPage(totalPages); }, [data, page, totalPages, setPage]);
 
   async function viewPdf(id: string) {
     try {
@@ -123,7 +136,7 @@ export default function Applied() {
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: '0.5rem' }}>
-        <h1 style={{ margin: 0 }}>Applied resumes</h1>
+        <h1 style={{ margin: 0 }}>Applied Resumes</h1>
         {isFetching && <span className="spinner" />}
         <span className="muted" style={{ fontSize: '0.85rem' }}>{total} applied</span>
       </div>
@@ -140,9 +153,9 @@ export default function Applied() {
           <option value="">All bidders</option>
           {(data?.bidders || []).map((b) => <option key={b} value={b}>{b}</option>)}
         </select>
-        <label style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>Applied</label>
-        <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} style={{ maxWidth: 150 }} title="From (ET)" />
-        <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} style={{ maxWidth: 150 }} title="To (ET)" />
+        <label style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>Applied <span title="A day runs from 5pm GMT+9 to 5pm GMT+9 the next day">(day from 5pm GMT+9)</span></label>
+        <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} style={{ maxWidth: 150 }} title="From — the day starts at 5pm GMT+9 (the 12th = 12th 5pm to 13th 5pm)" />
+        <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} style={{ maxWidth: 150 }} title="To — the day starts at 5pm GMT+9 (the 12th = 12th 5pm to 13th 5pm)" />
         {hasFilters && <button className="secondary" onClick={clearFilters} style={{ fontSize: '0.82rem' }}>Clear</button>}
       </div>
 
@@ -169,7 +182,7 @@ export default function Applied() {
       ) : (
         <table>
           <thead>
-            <tr><th>Source</th><th>Company</th><th>Title</th><th>Profile</th><th>Bidder</th><th style={{ whiteSpace: 'nowrap' }}>Applied (ET)</th><th></th></tr>
+            <tr><th>Company</th><th>Title</th><th>Profile</th><th>Bidder</th><th style={{ whiteSpace: 'nowrap' }}>Applied</th><th></th></tr>
           </thead>
           <tbody>
             {rows.map((r) => (
@@ -180,6 +193,7 @@ export default function Applied() {
                 onToggle={() => setExpanded(expanded === r.saved_resume_id ? null : r.saved_resume_id)}
                 onPdf={() => viewPdf(r.saved_resume_id)}
                 onSchedule={() => scheduleInterview(r)}
+                tz={tz}
               />
             ))}
           </tbody>
@@ -197,11 +211,10 @@ export default function Applied() {
   );
 }
 
-function RowView({ row, open, onToggle, onPdf, onSchedule }: {
-  row: Row; open: boolean; onToggle: () => void; onPdf: () => void; onSchedule: () => Promise<void>;
+function RowView({ row, open, onToggle, onPdf, onSchedule, tz }: {
+  row: Row; open: boolean; onToggle: () => void; onPdf: () => void; onSchedule: () => Promise<void>; tz?: string;
 }) {
   const [scheduling, setScheduling] = useState(false);
-  const remote = row.source === 'VPS_1';
   const { data: detail, isLoading } = useQuery({
     queryKey: ['applied', 'job', row.saved_resume_id],
     queryFn: () => api.get<JobDetail>(`/api/resumes/${row.saved_resume_id}/job`),
@@ -211,18 +224,17 @@ function RowView({ row, open, onToggle, onPdf, onSchedule }: {
   return (
     <>
       <tr style={{ cursor: 'pointer' }} onClick={onToggle}>
-        <td><SourceBadge source={row.source} /></td>
         <td>{row.job_company || '—'}</td>
         <td>{row.job_link
           ? <a href={row.job_link} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>{row.job_title}</a>
           : row.job_title}</td>
         <td>{row.profile_name || '—'}</td>
         <td>{row.bidder || '—'}</td>
-        <td style={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }}>{etDateTime(row.applied_at || row.created_at)}</td>
+        <td style={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }}>{userDateTime(row.applied_at || row.created_at, tz)}</td>
         <td style={{ whiteSpace: 'nowrap' }}>
           {/* PDF works for both: a VPS_1 resume streams through the backend, falling back to VPS_1's
               public link if it can't be fetched. Schedule adds a row to the Interviews board. */}
-          <button className="secondary" onClick={(e) => { e.stopPropagation(); onPdf(); }}>📄 PDF</button>
+          <button className="secondary" onClick={(e) => { e.stopPropagation(); onPdf(); }}>📄 Resume</button>
           <button className="secondary" style={{ marginLeft: 4 }} disabled={scheduling}
             onClick={async (e) => { e.stopPropagation(); setScheduling(true); try { await onSchedule(); } finally { setScheduling(false); } }}
             title="Add this resume + job description as a row on the Interviews board">{scheduling ? '…' : '📅 Schedule'}</button>
@@ -230,7 +242,7 @@ function RowView({ row, open, onToggle, onPdf, onSchedule }: {
       </tr>
       {open && (
         <tr>
-          <td colSpan={7} style={{ background: 'var(--panel-2)', padding: '1rem' }}>
+          <td colSpan={6} style={{ background: 'var(--panel-2)', padding: '1rem' }}>
             {isLoading ? <span className="spinner" /> : detail ? (
               <div style={{ fontSize: '0.86rem', lineHeight: 1.6 }}>
                 <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 8 }}>

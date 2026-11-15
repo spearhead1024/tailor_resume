@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Extension dev harness</title>
+<link rel="stylesheet" href="/harness/harness.css">
+</head>
+<body>
+  <header class="bar">
+    <strong>TailorResume extension</strong><span class="muted" id="ver"></span>
+    <label class="tog" title="On: API writes (Add job, Generate, Mark as Applied…) are answered by the harness and never reach the server. Sign-in, reads and the duplicate check are real.">
+      <input type="checkbox" id="dry" checked> Dry run <span class="muted">— writes are NOT saved (on at every start)</span>
+    </label>
+    <span class="live" id="liveNote" hidden>LIVE — writes go to the real database</span>
+    <span class="grow"></span>
+    <button id="reloadPanel" title="Reload the side panel — picks up your edits in extension/ (Ctrl+Shift+R)">↻ Reload panel</button>
+    <button id="resetStore" class="ghost" title="Clear chrome.storage (signs out, forgets profile / tab / region)">Reset storage</button>
+    <button id="toggleLog" class="ghost">Requests</button>
+  </header>
+
+  <div class="split">
+    <section class="browser">
+      <div class="tabstrip" id="tabstrip"></div>
+      <form class="addr" id="addr">
+        <input id="url" spellcheck="false" autocomplete="off" placeholder="Job posting URL — or pick a sample →">
+        <button type="submit">Go</button>
+        <select id="samples"><option value="">Samples…</option></select>
+      </form>
+      <div class="frames" id="frames"></div>
+      <iframe id="bgFrame" title="Extension background worker" hidden></iframe>
+      <div class="log" id="log" hidden>
+        <div class="log-head"><strong>API requests</strong><span class="muted">panel → /api (proxied to the backend)</span><span class="grow"></span><button class="ghost sm" id="clearLog">Clear</button></div>
+        <div class="log-body" id="logBody"></div>
+      </div>
+    </section>
+    <div class="handle" id="handle" title="Drag to resize the side panel"></div>
+    <aside class="panel" id="panelBox">
+      <div class="panel-head"><span>Side panel</span><span class="muted" id="pw"></span></div>
+      <iframe id="panelFrame" title="Side panel"></iframe>
+      <div class="dry-notice" id="dryNotice" role="status" hidden></div>
+      <div class="panel-err" id="panelErr" role="alert" hidden></div>
+    </aside>
+  </div>
+  <script src="/harness/harness.js"></script>
+</body>
+</html>

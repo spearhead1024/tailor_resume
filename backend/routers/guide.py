@@ -7,6 +7,8 @@ uploaded the meta reports `available: false` and the UI shows "Coming soon".
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -75,14 +77,28 @@ def video(user: dict = Depends(get_current_user)):
     return FileResponse(fpath, media_type=meta.get("content_type", "video/mp4"))
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 @router.post("/video")
-async def upload_video(
+def upload_video(
     request: Request,
     video: UploadFile = File(...),
     user: dict = Depends(require_admin),
 ):
-    """Replace the guide video. Admin only."""
-    # Reject early on the declared size before buffering the whole upload.
+    """Replace the guide video. Admin only.
+
+    A plain `def` on purpose: FastAPI runs it in the threadpool, so copying up to 300 MB to disk
+    doesn't block the event loop (the single uvicorn worker also serves the live-board sockets)."""
+    # Reject early on the declared size before copying anything.
     try:
         if int(request.headers.get("content-length") or 0) > _MAX_BYTES + 1024 * 1024:
             raise HTTPException(status_code=413, detail="Video too large (max 300 MB).")
@@ -93,31 +109,42 @@ async def upload_video(
     if not ext:
         raise HTTPException(status_code=400, detail="Unsupported video type (mp4 / webm / ogg / mov).")
 
-    data = await video.read()
-    if not data:
-        raise HTTPException(status_code=400, detail="Empty file.")
-    if len(data) > _MAX_BYTES:
-        raise HTTPException(status_code=413, detail="Video too large (max 300 MB).")
+    # Stream into a temp file beside the target with a running size cap, then os.replace — a failed
+    # or oversized upload never touches the current video.
+    fd, tmp = tempfile.mkstemp(dir=GUIDE_DIR, prefix=".upload-", suffix=".part")
+    size = 0
+    try:
+        with os.fdopen(fd, "wb") as out:
+            while chunk := video.file.read(1024 * 1024):
+                size += len(chunk)
+                if size > _MAX_BYTES:
+                    raise HTTPException(status_code=413, detail="Video too large (max 300 MB).")
+                out.write(chunk)
+        if not size:
+            raise HTTPException(status_code=400, detail="Empty file.")
+        fname = f"video{ext}"
+        prev = _load_meta()
+        os.replace(tmp, GUIDE_DIR / fname)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
-    # Remove any prior file (extension may differ), then write the new one.
-    prev = _load_meta()
-    if prev:
+    # Drop the prior file only once the new one is in place (its extension may differ).
+    if prev and prev.get("file") != fname:
         try:
             (GUIDE_DIR / prev["file"]).unlink(missing_ok=True)
         except Exception:
             pass
 
-    fname = f"video{ext}"
-    (GUIDE_DIR / fname).write_bytes(data)
     meta = {
         "file": fname,
         "content_type": video.content_type,
-        "bytes": len(data),
+        "bytes": size,
         "original_name": video.filename or "",
         "uploaded_at": _utcnow_iso(),
         "uploaded_by": user.get("username", ""),
     }
-    _META.write_text(json.dumps(meta, indent=2))
+    _atomic_write_text(_META, json.dumps(meta, indent=2))
     return {"ok": True, **{k: meta[k] for k in ("content_type", "bytes", "uploaded_at", "original_name")}}
 
 

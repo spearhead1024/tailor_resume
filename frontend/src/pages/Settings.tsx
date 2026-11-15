@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useUrlState } from '../lib/urlState';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useToast } from '../lib/toast';
@@ -50,8 +51,8 @@ function ReminderCard({ on, onToggle, icon, title, when, to, preview, note }: {
   return (
     <div style={{
       display: 'flex', alignItems: 'flex-start', gap: 12, padding: '13px 14px', borderRadius: 10,
-      border: `1px solid ${on ? 'rgba(255,255,255,0.10)' : 'transparent'}`,
-      background: on ? 'rgba(255,255,255,0.03)' : 'transparent',
+      border: `1px solid ${on ? 'rgba(var(--ink),0.10)' : 'transparent'}`,
+      background: on ? 'rgba(var(--ink),0.03)' : 'transparent',
       opacity: on ? 1 : 0.5, transition: 'opacity .12s ease, background .12s ease',
     }}>
       {/* the flex-basis values are explicit: the checkbox and icon must never grow, and the body
@@ -96,7 +97,7 @@ export default function Settings() {
     queryFn: () => api.get<any>('/api/settings'),
   });
 
-  const [subTab, setSubTab] = useState<SubTab>('general');
+  const [subTab, setSubTab] = useUrlState<SubTab>('tab', 'general');   // in the URL — a refresh stays on this sub-tab
 
   const [deadline, setDeadline] = useState('12');
   const [deadlineDirty, setDeadlineDirty] = useState(false);
@@ -124,16 +125,17 @@ export default function Settings() {
   const [remindersDirty, setRemindersDirty] = useState(false);
   const [remindersSaving, setRemindersSaving] = useState(false);
 
+  // (Re)seed from the server — but only the sections WITHOUT unsaved edits. Saving one section
+  // refetches settings; re-seeding everything wiped what the admin had typed into the others.
   useEffect(() => {
-    if (data) {
-      setDeadline(String(data.job_deadline_hours ?? 12)); setDeadlineDirty(false);
-      setTemplate(String(data.prompt_template || '')); setPromptDirty(false);
-      setDomainsText(toLines(data.blacklist_domains)); setDomainsDirty(false);
-      setTitlesText(toLines(data.blacklist_titles)); setTitlesDirty(false);
-      setCompaniesText(toLines(data.blacklist_companies)); setCompaniesDirty(false);
-      setNotif({ ...NOTIF_DEFAULTS, ...(data.notifications || {}) }); setNotifDirty(false);
-    }
-  }, [data]);
+    if (!data) return;
+    if (!deadlineDirty) setDeadline(String(data.job_deadline_hours ?? 12));
+    if (!promptDirty) setTemplate(String(data.prompt_template || ''));
+    if (!domainsDirty) setDomainsText(toLines(data.blacklist_domains));
+    if (!titlesDirty) setTitlesText(toLines(data.blacklist_titles));
+    if (!companiesDirty) setCompaniesText(toLines(data.blacklist_companies));
+    if (!notifDirty) setNotif({ ...NOTIF_DEFAULTS, ...(data.notifications || {}) });
+  }, [data]);   // eslint-disable-line react-hooks/exhaustive-deps -- reads the dirty flags as of this data
 
   useEffect(() => {
     if (!user) return;
@@ -178,8 +180,10 @@ export default function Settings() {
 
   if (isLoading) return <div><span className="spinner" /> Loading…</div>;
 
+  // Send ONLY the field being saved — the server merges it into the current settings.
+  // (Sending this page's possibly-stale copy of everything overwrote other admins' edits.)
   const save = (patch: any, what: string) =>
-    saveMutation.mutate({ payload: { ...(data || {}), ...patch }, what });
+    saveMutation.mutate({ payload: patch, what });
 
   const tabBtn = (key: SubTab, label: string) => (
     <button key={key} onClick={() => setSubTab(key)}
@@ -288,14 +292,6 @@ export default function Settings() {
                 </span>
               </div>
               <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-                <span style={{ fontSize: '1rem' }}>✅</span>
-                <span style={{ fontSize: '0.85rem' }}>
-                  The <strong>Creator</strong> and <strong>Board mgr</strong> heads-ups additionally require{' '}
-                  <strong>Approved is “Confirmed”</strong> — a call still Pending or Rejected doesn't page them yet.
-                  The <strong>Caller</strong>'s reminder and the daily summary are not affected by Approved.
-                </span>
-              </div>
-              <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
                 <span style={{ fontSize: '1rem' }}>👤</span>
                 <span style={{ fontSize: '0.85rem' }}>
                   <strong>Creator</strong>/<strong>Board mgr</strong> lead times below are <strong>per person</strong> —
@@ -322,8 +318,7 @@ export default function Settings() {
                   when={<MinutesListEditor values={creatorMins} disabled={!notif.creator_enabled}
                     onChange={(v) => { setCreatorMins(v); setRemindersDirty(true); }} />}
                   note={<>Your <strong>own</strong> times — Creater is always the signed-in admin who books the call.
-                    Names the caller. Sent <strong>once per time</strong>, even if you reschedule.
-                    Requires Approved: Confirmed.</>}
+                    Names the caller. Sent <strong>once per time</strong>, even if you reschedule.</>}
                   preview={creatorMins.map((m) => `Interview you booked — in ${leadLabel(m)}`)} />
 
                 {hasRole(user, 'call_board_manager') ? (
@@ -333,8 +328,7 @@ export default function Settings() {
                     when={<MinutesListEditor values={cbmMins} disabled={!notif.cbm_enabled}
                       onChange={(v) => { setCbmMins(v); setRemindersDirty(true); }} />}
                     note={<>Your <strong>own</strong> times, as a Call Board Manager. Sent for <em>every</em>
-                      scheduled call, and it names the caller. Sent <strong>once per time</strong> per call.
-                      Requires Approved: Confirmed.</>}
+                      scheduled call, and it names the caller. Sent <strong>once per time</strong> per call.</>}
                     preview={cbmMins.map((m) => `Board interview — <creater> — in ${leadLabel(m)}`)} />
                 ) : (
                   <ReminderCard
@@ -342,7 +336,7 @@ export default function Settings() {
                     icon="📋" title="Heads-up to the call board manager" to="Board mgr"
                     when={<Hint>on — you aren't a Call Board Manager, so there's nothing of yours to set here;
                       each CBM sets their own time when they're signed in.</Hint>}
-                    note="Sent to everyone with the Call Board Manager role, for every scheduled call. Requires Approved: Confirmed."
+                    note="Sent to everyone with the Call Board Manager role, for every scheduled call."
                     preview="Board interview — <creater> — in …" />
                 )}
 

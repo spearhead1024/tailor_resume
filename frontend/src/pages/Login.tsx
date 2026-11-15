@@ -18,7 +18,9 @@ export default function Login() {
     setError(''); setBusy(true);
     try {
       await login(identifier, password);
-      navigate('/todo');
+      // Land on the root route; LandingRedirect sends the user to their role's
+      // default tab (interviews / bid / jobs).
+      navigate('/');
     } catch (err: any) {
       setError(err?.response?.data?.detail || 'Sign-in failed');
     } finally { setBusy(false); }

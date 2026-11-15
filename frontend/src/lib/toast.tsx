@@ -57,8 +57,8 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
                 // OPAQUE. The old toast used a 12%-alpha tint, so whatever was behind it bled
                 // through and the text became unreadable over a busy board. A solid panel with a
                 // coloured accent bar keeps the kind obvious without sacrificing legibility.
-                background: '#141a2b',
-                border: '1px solid rgba(255,255,255,0.10)',
+                background: 'var(--toast-bg)',
+                border: '1px solid rgba(var(--ink),0.10)',
                 borderLeft: `4px solid ${accent}`,
                 color: 'var(--text)',
                 borderRadius: 10,
@@ -67,7 +67,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
                 fontSize: '0.88rem',
                 fontWeight: 500,
                 lineHeight: 1.45,
-                boxShadow: '0 8px 28px rgba(0,0,0,0.55)',
+                boxShadow: 'var(--shadow-pop)',
                 animation: 'toastIn 0.2s ease-out',
               }}>
               <span style={{ color: accent, fontWeight: 700, flex: '0 0 auto' }}>

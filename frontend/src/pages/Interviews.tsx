@@ -1,4 +1,5 @@
 import { type CSSProperties, type MouseEvent as ReactMouseEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useUrlJson, useUrlState } from '../lib/urlState';
 import { createPortal } from 'react-dom';
 import { api } from '../api/client';
 import { useToast } from '../lib/toast';
@@ -8,7 +9,6 @@ import { dateKeyIn, thisWeek } from '../lib/board-dates';
 import CalendarView, { type CalPerson } from '../lib/CalendarView';
 import ProfileCard from '../lib/ProfileCard';
 import { insertRowAt, removeRow, upsertRow } from '../lib/board-merge';
-import { effCol } from '../lib/board-cols';
 import { disablePush, enablePush, initPushSound, notifPermission, pushSupported, sendTestPush, syncPushIfGranted } from '../lib/push';
 import { useAuth } from '../lib/auth';
 
@@ -30,7 +30,7 @@ type Grid = { columns: Col[]; rows: Row[] };
     clipboard all agree on the order. */
 /* ONE board, left → right:
      Index │ Scheduled_at (min) │ Call Type │ Company Info │ Position/Title │ Job Description │
-     Profile Name │ Caller/Approved │ Status │ Creater/Created_At
+     Profile Name │ Caller │ Status │ Creater/Created_At
 
    Everybody sees this board. The roles differ only in what is TAKEN AWAY from it, and in what may be
    typed into it — never in the order of the columns, which used to be shuffled per role and made two
@@ -41,16 +41,11 @@ type Grid = { columns: Col[]; rows: Row[] };
      team member  no Creater
      solo caller  no Creater, no Caller (every row on their board is already theirs)
 
-   Caller carries Approved beneath it — who makes the call and whether the call is agreed are two
-   halves of one decision. Status is the OUTCOME, a different question, so it stands alone.
-   A stacked column is ranked by its PRIMARY (c_caller), so c_approved needs no rank here. */
+   A stacked column is ranked by its PRIMARY column; its secondary fields need no rank here. */
 const COL_RANK_ADMIN: Record<string, number> = {
   c_index: 0, c_sched: 1, c_type: 2, c_company: 3, c_title: 4, c_jd: 5, c_account: 6,
   c_caller: 7, c_status: 8, c_creater: 9,
 };
-// Solo caller: with the Caller column gone there is nothing for Approved to stack under, so Approved
-// takes Caller's slot as a column of its own. Everything else is in exactly the same place.
-const COL_RANK_CALLER: Record<string, number> = { ...COL_RANK_ADMIN, c_approved: 7 };
 function orderColumns(g: Grid): Grid {
   const rank = (id: string) => (id in L.COL_RANK ? L.COL_RANK[id] : 100);   // unranked (hidden/custom) → after, stable
   return { ...g, columns: [...(g.columns || [])].sort((a, b) => rank(a.id) - rank(b.id)) };
@@ -81,7 +76,10 @@ const TYPES: { value: string; label: string }[] = [
   { value: 'email', label: 'Email' }, { value: 'phone', label: 'Phone' },
 ];
 /* Notion's documented dark-mode tag tokens — each select option resolves to one
-   of these {bg, text} pairs, so pills get Notion's muted look (not neon). */
+   of these {bg, text} pairs, so pills get Notion's muted look (not neon).
+   The `text` hex is also the option's stored identity (option.color). What's PAINTED comes from
+   styles.css (--iv-tag-<name>-bg/-fg, via tagPaint): the same values in dark, Notion's light tag
+   tokens in light. */
 const NOTION: Record<string, { bg: string; text: string }> = {
   gray:   { bg: '#252525', text: '#9B9B9B' },
   brown:  { bg: '#2E2724', text: '#A27763' },
@@ -94,6 +92,12 @@ const NOTION: Record<string, { bg: string; text: string }> = {
   red:    { bg: '#332523', text: '#BE524B' },
 };
 const NOTION_LIST = Object.values(NOTION);
+const NOTION_NAME = new Map(Object.entries(NOTION).map(([k, c]) => [c.text, k]));
+/** Theme-aware paint for a Notion token — CSS variables, so pills follow the light/dark theme. */
+const tagPaint = (c: { text: string }) => {
+  const k = NOTION_NAME.get(c.text) || 'gray';
+  return { bg: `var(--iv-tag-${k}-bg)`, fg: `var(--iv-tag-${k}-fg)` };
+};
 const PALETTE = NOTION_LIST.map((c) => c.text); // option.color stores the token's text hex
 
 /* Presence colours — WHO is editing a cell right now. The opposite job from the status pills above:
@@ -132,13 +136,13 @@ const SEL = '#2383E2';        // Coda/Sheets selection blue — the anchor cell'
  * ONE constant, used by both the plain cells (cellSel) and the stacked ones (StackedCell). It used to
  * be a hardcoded '#15212e' in StackedCell AND a separate `.iv-td-fill` rule in the CSS; the two drifted,
  * so selecting a row lit up the one unstacked column and left every stacked one looking untouched. */
-const SEL_FILL = `linear-gradient(rgba(35,131,226,0.62), rgba(35,131,226,0.62))`;
+const SEL_FILL = `linear-gradient(var(--iv-sel-fill), var(--iv-sel-fill))`;   // rgba(35,131,226,0.62) in dark; lighter in light (styles.css)
 // Fixed text columns: no ⋯ settings menu (can't be renamed/retyped/deleted). Still resizable + editable cells.
 // Merged primaries are locked so an admin can't rename/delete them out of sync with the MERGED map below
 // (admins can still edit their select-option lists via the ⋯ menu).
-// (c_approved and c_status are locked too: the layout maps, the filter bar and the server's workflow
-//  rule all name them, so deleting either from the schema would break the board.)
-const LOCKED_COLS = new Set(['c_index', 'c_title', 'c_skill', 'c_client', 'c_type', 'c_sched', 'c_caller', 'c_creater', 'c_account', 'c_jd', 'c_company', 'c_approved', 'c_status']);
+// (c_status is locked too: the layout maps, the filter bar, reminders and the follow-up flow all name
+//  it, so deleting it from the schema would break the board.)
+const LOCKED_COLS = new Set(['c_index', 'c_title', 'c_skill', 'c_client', 'c_type', 'c_sched', 'c_caller', 'c_creater', 'c_account', 'c_jd', 'c_company', 'c_status']);
 // Stacked columns: render { primary: secondary } as ONE column with two stacked cells
 // (primary on top, secondary below). The secondary column is hidden as a standalone column
 // but stays in the schema so its cells still save. Each sub-cell keeps its own type.
@@ -152,9 +156,6 @@ const MERGED_ADMIN: Record<string, SubField[]> = {
   c_company: [{ colId: 'c_company', row: 0 }, { colId: 'c_salary', row: 1 }],                     // Company Info / Salary Range
   c_type:    [{ colId: 'c_type', row: 0 }, { colId: 'c_client', row: 1 }],                        // Call Type / Interviewer(role)
   c_sched:   [{ colId: 'c_sched', row: 0 }, { colId: 'c_min', row: 0, width: 35, icon: '🕐', hdText: '(min)' }, { colId: 'c_link', row: 1, label: 'Meeting Link' }],  // Scheduled_at | 🕐 (min) / Meeting Link
-  // Caller carries Approved: whether a call is agreed only means anything once you know WHO is making
-  // it, so the two read together. Status — how the call went — is a separate question and stands alone.
-  c_caller:  [{ colId: 'c_caller', row: 0 }, { colId: 'c_approved', row: 1 }],                     // Caller / Approved
   c_creater: [{ colId: 'c_creater', row: 0 }, { colId: 'c_created', row: 1, label: 'Created_At' }], // Creater / Created_At
   c_account: [{ colId: 'c_account', row: 0 }, { colId: 'c_resume', row: 1, label: 'Resume' }],     // Profile Name(Country) / Resume
   c_jd:      [{ colId: 'c_jd', row: 0 }, { colId: 'c_feedback', row: 1, label: 'Chat & Feedback' }], // Job Description / Chat & Feedback
@@ -163,12 +164,9 @@ const MERGED_ADMIN: Record<string, SubField[]> = {
 // they cannot do with it is a question of permission (see MANAGER_EDITABLE / CALLER_EDITABLE), not of
 // layout, and the two were being confused.
 const MERGED_MANAGER = MERGED_ADMIN;
-// A solo caller loses the Caller stack — and losing it means losing the stack's SECOND field too, so
-// Approved would vanish with it. Drop the key and Approved stands on its own instead (COL_RANK_CALLER
-// puts it in Caller's slot). Every other stack is untouched.
-const MERGED_CALLER: Record<string, SubField[]> = Object.fromEntries(
-  Object.entries(MERGED_ADMIN).filter(([colId]) => colId !== 'c_caller'),
-);
+// A solo caller too: Caller is a plain column, so hiding it (ROLE_HIDDEN / STACK_HIDDEN below) takes
+// nothing else with it.
+const MERGED_CALLER = MERGED_ADMIN;
 // Written by the machine, never by a person — visible (Created_At now sits under Creater) but not
 // editable by anyone, admin included. Showing a value is not the same as inviting someone to retype it.
 const SYSTEM_COLS = new Set<string>(['c_created']);
@@ -187,11 +185,15 @@ function displayValue(row: Row, colId: string): any {
 }
 // Displayed names that differ from the persisted column name (display-only override; used for headers AND cells).
 const DISPLAY_NAME: Record<string, string> = { c_account: 'Profile Name(Country)', c_jd: 'Job Description', c_feedback: 'Chat & Feedback' };
-// Select columns offered as dropdown filters above the table (c_caller is admin-only).
-const FILTER_COLS = ['c_type', 'c_approved', 'c_status', 'c_account', 'c_caller'];
-// Filters only admins/managers get. The API hands every user the full column list (the frontend is
+// Select columns offered as dropdown filters above the table (c_caller + c_creater are admin-only).
+const FILTER_COLS = ['c_type', 'c_status', 'c_account', 'c_caller', 'c_creater'];
+// Filters only admins get. The API hands every user the full column list (the frontend is
 // what hides them), so without this a caller would be offered a Caller filter they can't see.
-const STAFF_ONLY_FILTERS = new Set(['c_caller']);
+// c_creater is in ROLE_HIDDEN for managers+callers, so listing it here keeps the filter admin-only.
+const STAFF_ONLY_FILTERS = new Set(['c_caller', 'c_creater']);
+// Labels for the FILTER dropdowns only (kept separate from DISPLAY_NAME so the column header/modal
+// titles are unaffected). Creater → "Creator" in the filter bar.
+const FILTER_LABEL: Record<string, string> = { c_creater: 'Creator' };
 // Created_at is data-only now: hidden from the grid, surfaced on Index hover (see the row render).
 function buildStackHidden(merged: Record<string, SubField[]>, extra: string[] = []): Set<string> {
   return new Set<string>([...Object.values(merged).flatMap((fs) => fs.slice(1).map((f) => f.colId)), 'c_created', ...extra]);
@@ -227,7 +229,7 @@ type Layout = {
 const ADMIN_LAYOUT: Layout = { MERGED: MERGED_ADMIN, STACK_HIDDEN: STACK_HIDDEN_ADMIN, COL_RANK: COL_RANK_ADMIN, ROLE_HIDDEN: ROLE_HIDDEN_ADMIN };
 // A manager and a team member read the admin's board in the admin's order — same ranks, same stacks.
 const MANAGER_LAYOUT: Layout = { MERGED: MERGED_MANAGER, STACK_HIDDEN: STACK_HIDDEN_MANAGER, COL_RANK: COL_RANK_ADMIN, ROLE_HIDDEN: ROLE_HIDDEN_MANAGER };
-const CALLER_LAYOUT: Layout = { MERGED: MERGED_CALLER, STACK_HIDDEN: STACK_HIDDEN_CALLER, COL_RANK: COL_RANK_CALLER, ROLE_HIDDEN: ROLE_HIDDEN_CALLER };
+const CALLER_LAYOUT: Layout = { MERGED: MERGED_CALLER, STACK_HIDDEN: STACK_HIDDEN_CALLER, COL_RANK: COL_RANK_ADMIN, ROLE_HIDDEN: ROLE_HIDDEN_CALLER };
 let L: Layout = ADMIN_LAYOUT;
 const isMerged = (colId: string): boolean => colId in L.MERGED;
 // How long you must stay in a cell before it is claimed as yours. This is the exact width of the
@@ -239,9 +241,9 @@ const LOCK_CLAIM_MS = 700;
 // left-click is also how you SELECT a cell, so merely clicking across the board signed you as the
 // author of somebody else's row — and quietly redirected that row's 90-minute creator heads-up to you.
 
-// A caller is read-only on the board except these columns — Approved, Status, and the
+// A caller is read-only on the board except these columns — Status and the
 // Chat & Feedback thread (c_feedback); admins may edit everything. Backend enforces this too.
-const CALLER_EDITABLE = new Set<string>(['c_approved', 'c_status', 'c_feedback']);
+const CALLER_EDITABLE = new Set<string>(['c_status', 'c_feedback']);
 // A team manager may additionally hand a call to another caller — but only one on their own team
 // (the backend rejects anyone else, and their Caller dropdown only lists the team).
 const MANAGER_EDITABLE = new Set<string>([...CALLER_EDITABLE, 'c_caller']);
@@ -460,8 +462,8 @@ function FilterDropdown({ label, options, selected, onChange }: {
 }
 
 function Pill({ opt }: { opt: Opt }) {
-  const c = resolveNotion(opt.color);
-  return <span className="iv-pill" style={{ background: c.bg, color: c.text }}>{opt.label}</span>;
+  const c = tagPaint(resolveNotion(opt.color));
+  return <span className="iv-pill" style={{ background: c.bg, color: c.fg }}>{opt.label}</span>;
 }
 
 /* ---- cells: display-by-default, EDIT controlled by the grid (double-click) ----
@@ -479,6 +481,12 @@ function EditInput({ type = 'text', initial, seeded, placeholder, onCommit, onDo
   const dirty = useRef(false);   // true once the user actually edits (typing, or the date/time picker changing the value)
   // commit once; skip a write that didn't change anything (but a seeded/typed edit always commits)
   const commit = (v: string) => { if (done.current) return; done.current = true; if (seeded || v !== initial) onCommit(v); };
+  // Opened by typing: put the caret AFTER the typed letters so the next ones follow them.
+  useEffect(() => {
+    const el = ref.current;
+    if (!seeded || !el) return;
+    try { el.setSelectionRange(el.value.length, el.value.length); } catch { /* date/time inputs */ }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const el = ref.current;
     // Save a pending edit on real click-away (unmount without a blur). Gated on `dirty` so React
@@ -551,7 +559,7 @@ function SelectCell({ col, value, editing, seed, onCommit, onDone, onOpen, onPee
 
   // Place the list against the VIEWPORT, not the table. It's portalled out of .iv-wrap (which is
   // `overflow:auto`), so the table can no longer clip it — previously it was cut off below the last
-  // rows and past the right edge on the right-most column (the caller's Approved/Status). Flips above
+  // rows and past the right edge on the right-most column (the caller's Status). Flips above
   // the cell when it can't fit below, and is nudged left so it always stays on screen.
   useLayoutEffect(() => {
     if (!editing) { setPos(null); return; }
@@ -643,7 +651,7 @@ function PersonCell({ value, editing, seed, avatar, onCommit, onDone }: Omit<Cel
       {name ? <>
         {avatar
           ? <img className="iv-av" src={avatar} alt="" style={{ objectFit: 'cover' }} />
-          : <span className="iv-av" style={{ background: 'rgba(68,122,203,0.20)', color: '#447ACB' }}>{initials(name)}</span>}
+          : <span className="iv-av" style={{ background: 'rgba(68,122,203,0.20)', color: 'var(--iv-person-fg)' }}>{initials(name)}</span>}
         <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
       </> : <span style={{ flex: 1 }} />}
       <span className="iv-caret">▾</span>
@@ -666,7 +674,7 @@ function LinkCell({ value, editing, seed, onCommit, onDone }: Omit<CellProps, 'c
       {href
         ? <a href={href} target="_blank" rel="noreferrer noopener" title={url} onClick={(e) => e.stopPropagation()} onMouseDown={stop} style={{ fontSize: '0.95rem', textDecoration: 'none', lineHeight: 1 }}>🌐</a>
         : <span title={`Unsafe link: ${url}`} style={{ opacity: 0.35, fontSize: '0.95rem', lineHeight: 1 }}>🌐</span>}
-      <span title={url} style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.78rem', color: href ? '#60a5fa' : '#9B9B9B' }}>{url}</span>
+      <span title={url} style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.78rem', color: href ? 'var(--iv-link)' : 'var(--iv-muted)' }}>{url}</span>
       <button className="iv-copybtn" title="Copy meeting link" onMouseDown={stop} onClick={copy}>⧉</button>
     </div>
   );
@@ -711,7 +719,7 @@ function ResumeCell({ value, editing, seed, onCommit, onDone }: Omit<CellProps, 
       <span onClick={downloadable ? open : undefined} onMouseDown={stop} title={downloadable ? 'Open / download resume' : raw}
         style={{ fontSize: '0.95rem', lineHeight: 1, cursor: downloadable ? 'pointer' : 'default', opacity: downloadable ? 1 : 0.55 }}>📄</span>
       <span onClick={downloadable ? open : undefined} onMouseDown={stop} title={raw}
-        style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.78rem', color: downloadable ? '#60a5fa' : '#9B9B9B', cursor: downloadable ? 'pointer' : 'default' }}>{label}</span>
+        style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.78rem', color: downloadable ? 'var(--iv-link)' : 'var(--iv-muted)', cursor: downloadable ? 'pointer' : 'default' }}>{label}</span>
       <button className="iv-copybtn" title="Copy resume link" onMouseDown={stop} onClick={copy}>⧉</button>
     </div>
   );
@@ -798,7 +806,7 @@ function ConfirmModal({ title, message, confirmLabel = 'Delete', danger, onConfi
     <div className="iv-modal-backdrop" onMouseDown={onCancel}>
       <div className="iv-modal iv-modal--sm" onMouseDown={(e) => e.stopPropagation()}>
         <div className="iv-modal-hd"><div className="iv-modal-title">{title}</div></div>
-        <div style={{ padding: '2px 18px 6px', fontSize: '0.86rem', color: '#CFCFCF', lineHeight: 1.55 }}>{message}</div>
+        <div style={{ padding: '2px 18px 6px', fontSize: '0.86rem', color: 'var(--iv-text-soft)', lineHeight: 1.55 }}>{message}</div>
         <div className="iv-modal-ft">
           <span />
           <div style={{ display: 'flex', gap: 8 }}>
@@ -972,8 +980,7 @@ function StackedCell({ fields, row, subState, editSub, editSeed, meName, avatarB
   commit: (colId: string, v: any) => void;
 }) {
   const cellFor = (f: { col: Col; sub: number; width?: number }) => {
-    const { col: rawCol, sub } = f;
-    const col: Col = effCol(rawCol, row.cells);   // Approved can't be Confirmed with nobody assigned
+    const { col, sub } = f;
     const isSelect = col.type === 'select';
     const value = displayValue(row, col.id);
     const empty = value === '' || value === null || value === undefined;
@@ -1020,16 +1027,16 @@ function SwatchPicker({ value, onChange }: { value: string; onChange: (hex: stri
   return (
     <div ref={ref} style={{ position: 'relative', flex: '0 0 auto' }}>
       <button type="button" title="Pill color" onClick={() => setOpen((o) => !o)}
-        style={{ width: 24, height: 24, borderRadius: 4, border: '1px solid rgba(255,255,255,0.15)', background: cur.bg, cursor: 'pointer', padding: 0 }}>
-        <span style={{ display: 'block', width: 10, height: 10, borderRadius: '50%', background: cur.text, margin: '0 auto' }} />
+        style={{ width: 24, height: 24, borderRadius: 4, border: '1px solid rgba(var(--iv-ink),0.15)', background: tagPaint(cur).bg, cursor: 'pointer', padding: 0 }}>
+        <span style={{ display: 'block', width: 10, height: 10, borderRadius: '50%', background: tagPaint(cur).fg, margin: '0 auto' }} />
       </button>
       {open && (
         <div className="card" style={{ position: 'absolute', top: '112%', left: 0, zIndex: 70, padding: 8, display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 6, width: 178 }}>
           {NOTION_LIST.map((c) => (
             <button key={c.text} type="button" title={c.text} onClick={() => { onChange(c.text); setOpen(false); }}
-              style={{ width: 26, height: 26, borderRadius: 5, padding: 0, cursor: 'pointer', background: c.bg,
-                border: cur.text === c.text ? '2px solid #2383e2' : '1px solid rgba(255,255,255,0.12)' }}>
-              <span style={{ display: 'block', width: 11, height: 11, borderRadius: '50%', background: c.text, margin: '0 auto' }} />
+              style={{ width: 26, height: 26, borderRadius: 5, padding: 0, cursor: 'pointer', background: tagPaint(c).bg,
+                border: cur.text === c.text ? '2px solid #2383e2' : '1px solid rgba(var(--iv-ink),0.12)' }}>
+              <span style={{ display: 'block', width: 11, height: 11, borderRadius: '50%', background: tagPaint(c).fg, margin: '0 auto' }} />
             </button>
           ))}
         </div>
@@ -1042,10 +1049,16 @@ function OptionsEditor({ options, onChange }: { options: Opt[]; onChange: (o: Op
   const setAt = (i: number, patch: Partial<Opt>) => onChange(options.map((o, idx) => (idx === i ? { ...o, ...patch } : o)));
   const remove = (i: number) => onChange(options.filter((_, idx) => idx !== i));
   const add = () => onChange([...options, { label: 'New', color: PALETTE[options.length % PALETTE.length] }]);
+  // Key each row by its label (+ occurrence, for duplicate labels), NOT its index. The label
+  // input is uncontrolled (defaultValue), so with index keys deleting option #2 left row #2's
+  // input still showing the deleted text while the LAST row vanished — the data was right but
+  // the screen wasn't. A renamed option gets a new key and simply re-mounts with its new label.
+  const seen: Record<string, number> = {};
+  const keyOf = (o: Opt) => { const n = (seen[o.label] = (seen[o.label] ?? -1) + 1); return `${o.label}\u0000${n}`; };
   return (
     <div>
       {options.map((o, i) => (
-        <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
+        <div key={keyOf(o)} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
           <SwatchPicker value={o.color} onChange={(color) => setAt(i, { color })} />
           <input defaultValue={o.label} onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== o.label) setAt(i, { label: v }); }} style={{ flex: 1 }} />
           <button className="ghost" onClick={() => remove(i)} style={{ padding: '0 6px' }}>✕</button>
@@ -1204,9 +1217,9 @@ function NotifBell() {
 export default function Interviews() {
   const toast = useToast();
   const { user: me } = useAuth();
-  // Pick the column layout for this session's role before render / listeners use it: callers see a
-  // combined Approved/Status column in place of the admin-only Caller & Creater columns; a team
-  // manager sees that same board plus the Caller column, so they can hand a call to a team-mate.
+  // Pick the column layout for this session's role before render / listeners use it: callers lose
+  // the admin-only Caller & Creater columns; a team manager sees that same board plus the Caller
+  // column, so they can hand a call to a team-mate.
   // `L.MERGED` and `L.STACK_HIDDEN` are stable per-session objects, so aliasing them is render-safe.
   const isTeamManager = !me?.is_admin && (me?.roles || []).includes('manager');
   // A caller who's on a team sees the team's whole schedule, so they get the same board as their
@@ -1225,10 +1238,11 @@ export default function Interviews() {
   // Default view: everything from MONDAY OF THIS WEEK onwards — the week you're working in plus what's
   // still to come. Open-ended on purpose: no To date, so a call booked for next month is still there.
   // It's a normal filter, so the From picker shows it and Clear drops it to show all history.
-  const [flt, setFlt] = useState<Record<string, string>>(() => ({
+  // Filters live in the URL (lib/urlState) — a refresh or a shared link keeps them.
+  const [flt, setFlt] = useUrlJson<Record<string, string>>('f', {
     dateFrom: thisWeek(me?.timezone || undefined).from,
-  }));
-  const [colFlt, setColFlt] = useState<Record<string, string[]>>({});  // per-column multi-select (checkable) filters
+  });
+  const [colFlt, setColFlt] = useUrlJson<Record<string, string[]>>('cols', {});  // per-column multi-select (checkable) filters
   // Rows added in this session. A brand-new row is empty, so it matches no filter and would vanish
   // the instant it was created — you'd click Add and see nothing. It used to be worse: adding WIPED
   // your filters. Exempt the new row from the filters instead, so your filter survives and the row
@@ -1236,18 +1250,18 @@ export default function Interviews() {
   const [justAdded, setJustAdded] = useState<Set<string>>(() => new Set());
   // 0 = no cap. The default view is scoped by the From date above, not by a recent-N count; the box is
   // still there to cap the list by hand when you want.
-  const [limit, setLimit] = useState(0);
+  const [limit, setLimit] = useUrlState('limit', 0);
   const [liveUp, setLiveUp] = useState(true);                      // socket connected? (shown in the toolbar)
-  // Table or calendar — the SAME rows, the same socket, the same filters, drawn two ways. Remembered,
-  // because whichever one you work in is the one you want back tomorrow.
-  const [view, setView] = useState<'table' | 'calendar'>(
-    () => (localStorage.getItem('iv.view') === 'calendar' ? 'calendar' : 'table'));
+  // Table or calendar — the SAME rows, the same socket, the same filters, drawn two ways. In the URL,
+  // and the last one used is also the default, because whichever one you work in is the one you
+  // want back tomorrow.
+  const [view, setView] = useUrlState<'table' | 'calendar'>('view',
+    localStorage.getItem('iv.view') === 'calendar' ? 'calendar' : 'table');
   useEffect(() => { localStorage.setItem('iv.view', view); }, [view]);
   // A board read is in flight, and these live messages arrived while it was — replayed onto the
   // response so the snapshot can't roll them back. See loadGrid / the socket effect.
   const loadingRef = useRef(false);
   const pendingRef = useRef<LiveMsg[]>([]);
-  const everUpRef = useRef(false);
   const gridRef = useRef<Grid | null>(null);
 
   /** Re-read the roster: everyone's hours, time zone, meetings and days off.
@@ -1280,13 +1294,30 @@ export default function Interviews() {
 
   // ── cell selection (Coda/Sheets-style): click = select one cell, double-click = edit, drag = range,
   //    Delete/Backspace = clear. Stacked columns: each sub-cell selects/edits independently. ──
-  const [sel, setSel] = useState<{ r1: number; c1: number; r2: number; c2: number } | null>(null);
+  // Selection and the open editor are addressed by VISIBLE row index (keyboard nav, ranges), but the
+  // board re-sorts and loses rows live (someone reschedules or deletes a call, the Recent-N cap drops
+  // one). So each also remembers the row id it was made on (`rid`): a selection follows its row to the
+  // new index, and an editor whose row moved or vanished is closed — it must never land on (and save
+  // into) whatever call now sits at that index.
+  type SelState = { r1: number; c1: number; r2: number; c2: number; rid?: string };
+  type EditState = { r: number; c: number; s: number; seed?: string; rid?: string };
+  const [sel, setSelRaw] = useState<SelState | null>(null);
   const [aSub, setASub] = useState<number>(0);                // which sub-field of the anchor cell is selected
-  const [editing, setEditing] = useState<{ r: number; c: number; s: number; seed?: string } | null>(null);
+  const [editing, setEditingRaw] = useState<EditState | null>(null);
+  const setSel = (v: SelState | null) => setSelRaw(v ? { ...v, rid: v.rid ?? gridRef.current?.rows[v.r1]?.id } : null);
+  const setEditing = (v: EditState | null) => setEditingRaw(v ? { ...v, rid: v.rid ?? gridRef.current?.rows[v.r]?.id } : null);
   const [copied, setCopied] = useState<SelRect | null>(null);  // copy-highlight, cleared on paste / Escape / new copy
   const [modal, setModal] = useState<{ rowId: string; colId: string; title: string; subtitle: string; value: string; readOnly: boolean; kind: 'text' | 'chat' } | null>(null);  // JD editor / Chat thread
   const [confirmDel, setConfirmDel] = useState<string | null>(null);   // rowId pending delete-confirmation
   const [flashRow, setFlashRow] = useState<string | null>(null);       // row just re-sorted by a Scheduled_at edit → scroll to + flash it
+  // A Scheduled_at edit does NOT re-sort the row immediately (that yanks it out from
+  // under the user while they are still on it). Instead we HOLD the row at its old
+  // chronological position — { rowId, oldMs } — and only release the hold (letting it
+  // slide to its new spot) once the user's focus leaves the row (selects another row
+  // or clicks elsewhere). See releaseHeldSort below.
+  const [heldSort, setHeldSort] = useState<{ rowId: string; oldMs: number } | null>(null);
+  const heldSortRef = useRef<{ rowId: string; oldMs: number } | null>(null);
+  heldSortRef.current = heldSort;
   const [locks, setLocks] = useState<Record<string, LockInfo>>({});    // "rowId|colId" → who is editing it
   const liveRef = useRef<BoardLive | null>(null);
   // The "next upcoming call" highlight is derived from Date.now() at render time. Tick every minute
@@ -1302,6 +1333,27 @@ export default function Interviews() {
   const selRef = useRef(sel); useEffect(() => { selRef.current = sel; }, [sel]);
   const aSubRef = useRef(aSub); useEffect(() => { aSubRef.current = aSub; }, [aSub]);
   const editingRef = useRef(editing); useEffect(() => { editingRef.current = editing; }, [editing]);
+  // After every render (gridRef now holds this render's visible rows): re-anchor the selection to its
+  // row, and close an editor whose row is no longer at its index. See SelState/EditState above.
+  useEffect(() => {
+    const rows = gridRef.current?.rows;
+    if (!rows) return;
+    if (editing?.rid && rows[editing.r]?.id !== editing.rid) setEditingRaw(null);
+    if (sel?.rid && rows[sel.r1]?.id !== sel.rid) {
+      const at = rows.findIndex((r) => r.id === sel.rid);
+      if (at < 0) setSelRaw(null);
+      else {
+        const d = at - sel.r1;
+        setSelRaw({ ...sel, r1: at, r2: Math.max(0, Math.min(rows.length - 1, sel.r2 + d)) });
+      }
+    }
+  });
+  // A "type to edit" that has been requested but whose editor isn't on screen yet. Set
+  // SYNCHRONOUSLY in the key handler (editingRef only catches up after React renders), so
+  // letters typed during that render are appended to the seed instead of starting a NEW
+  // edit that replaced it — which is what swallowed the first letter.
+  const pendingSeedRef = useRef<{ r: number; c: number; s: number; seed: string } | null>(null);
+  useEffect(() => { if (!editing) pendingSeedRef.current = null; }, [editing]);
   // Grid keys/clipboard go inert while ANY overlay is open — the editor, the delete confirm, or the
   // profile card. The card belongs in here too: opening it deliberately does NOT clear the cell
   // selection, so without this, reading a profile and pressing Delete would wipe the cell still
@@ -1313,8 +1365,8 @@ export default function Interviews() {
   /* Write permission for the once-bound document listeners (keyboard, paste, cut, fill).
    *
    * It takes the ROW, not just the column. Asking only "may you write this column?" was wrong for
-   * everyone who shares a board: a team member sees their team-mates' calls and may write Approved —
-   * on THEIR OWN calls. The column-only check let Enter open an editor on a team-mate's Approved (the
+   * everyone who shares a board: a team member sees their team-mates' calls and may write Status —
+   * on THEIR OWN calls. The column-only check let Enter open an editor on a team-mate's Status (the
    * typed value then vanished on commit, with no error), and let a paste or Ctrl+D spray writes across
    * team-mates' rows that the server answered with a 404 apiece. It also ignored per-cell locks, so
    * the same keys walked straight over a cell somebody else was in the middle of editing. */
@@ -1375,11 +1427,19 @@ export default function Interviews() {
   // — a flaky network, or simply a backend restart, which drops every socket at once — stays silently
   // stale for as long as it is open, missing rows other people can plainly see, until a manual reload.
   // Reconnecting is exactly the moment we know we may have missed something, so we resync there.
-  useEffect(() => subscribeLiveState((up) => {
-    setLiveUp(up);
-    if (up && everUpRef.current) { void loadGrid(); void loadPeople(); }   // skip the first connect: the mount load covers it
-    if (up) everUpRef.current = true;
-  }), []);
+  //
+  // Only an "up" reported synchronously on subscribe is skipped: the socket was already open when this
+  // board mounted, so the mount load is current. (Skipping the first "up" whenever it came left a board
+  // opened while the socket was down — e.g. during a restart's backoff — stale until a manual reload.)
+  useEffect(() => {
+    let subscribing = true;
+    const off = subscribeLiveState((up) => {
+      setLiveUp(up);
+      if (up && !subscribing) { void loadGrid(); void loadPeople(); }
+    });
+    subscribing = false;
+    return off;
+  }, []);
 
   // Claim the cell you're editing — but only after a beat, so tabbing/clicking through the board
   // doesn't lock every cell you pass over. Once claimed, everyone else sees "✎ <you>" on it and the
@@ -1397,7 +1457,7 @@ export default function Interviews() {
     const col = vis[editing.c];
     const row = g?.rows[editing.r];
     const colId = col ? (fieldIdsOf(col)[editing.s] ?? col.id) : '';
-    if (!row || !colId) return;
+    if (!row || !colId || (editing.rid && row.id !== editing.rid)) return;   // its row moved — don't lock another call
     const t = window.setTimeout(() => live.startEdit(row.id, colId), LOCK_CLAIM_MS);
     return () => { window.clearTimeout(t); live.endEdit(); };
   }, [editing]);
@@ -1409,6 +1469,18 @@ export default function Interviews() {
     const t = window.setTimeout(() => setFlashRow(null), 1500);
     return () => window.clearTimeout(t);
   }, [flashRow]);
+  // Release a held (just-rescheduled) row once the user's focus moves to a DIFFERENT
+  // row — then it slides to its new chronological slot. Keeps the row put while the
+  // user is still working on it, then repositions the moment they move away.
+  useEffect(() => {
+    const held = heldSortRef.current;
+    if (!held) return;
+    // Focus left the held row when: the selection cleared (clicked empty/deselected),
+    // OR the active cell is on a different row. Either way, release → it re-sorts.
+    const activeRowId = sel ? gridRef.current?.rows?.[sel.r1]?.id : undefined;
+    if (!sel || (activeRowId && activeRowId !== held.rowId)) { setHeldSort(null); setFlashRow(held.rowId); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sel]);
   useEffect(() => {
     const up = () => { dragging.current = false; };
     document.addEventListener('mouseup', up);
@@ -1419,6 +1491,19 @@ export default function Interviews() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (modalRef.current) return;                                       // JD/Feedback modal is open → grid keys inert
+      // An edit was just started by typing but its input hasn't mounted/focused yet: keep the
+      // letters, in order, by appending them to the seed the editor will open with.
+      const pend = pendingSeedRef.current;
+      if (pend && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const ae = document.activeElement as HTMLElement | null;
+        if (!(ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName))) {
+          e.preventDefault();
+          const next = { ...pend, seed: pend.seed + e.key };
+          pendingSeedRef.current = next;
+          setEditing(next);
+          return;
+        }
+      }
       if (editingRef.current) return;                                     // the editor owns its own keys
       const t = e.target as HTMLElement | null;
       if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;        // typing in a field
@@ -1486,7 +1571,9 @@ export default function Interviews() {
       }
       if (editable && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {  // typing → edit, seeded with the char
         e.preventDefault();
-        setEditing({ r: s.r1, c: s.c1, s: aSubRef.current, seed: e.key });
+        const next = { r: s.r1, c: s.c1, s: aSubRef.current, seed: e.key };
+        pendingSeedRef.current = next;
+        setEditing(next);
       }
     };
     document.addEventListener('keydown', onKey);
@@ -1520,6 +1607,9 @@ export default function Interviews() {
         const row = g.rows[r]; if (!row) return;
         const lc = logi[li];
         if (!canWriteRef.current(row, lc.colId)) return;               // skip what this user can't write HERE
+        // Job Description / Chat are modal-managed: pasting "over" them would write this tab's cached
+        // copy back (a stale chat thread wiped newer messages). Same rule as Delete and Fill.
+        if (colOf(lc.colId)?.type === 'button') return;
         changes.push({ rowId: row.id, colId: lc.colId, value: parseCell(colOf(lc.colId), str, row.cells?.[lc.colId] ?? '') });
       };
       const rmin = Math.min(s.r1, s.r2), rmax = Math.max(s.r1, s.r2);
@@ -1632,8 +1722,14 @@ export default function Interviews() {
     if (!list.length) return;
     const byRow: Record<string, Record<string, any>> = {};
     for (const ch of list) (byRow[ch.rowId] = byRow[ch.rowId] || {})[ch.colId] = ch.value;
+    // Marking a call Passed makes the server create its follow-up row (patch_row) — say so,
+    // so nobody reaches for the ⧉ button to make a second one.
+    const isPassed = (v: any) => String(v ?? '').trim().toLowerCase() === 'passed';
+    const newlyPassed = new Set(Object.keys(byRow).filter((rowId) => 'c_status' in byRow[rowId] && isPassed(byRow[rowId].c_status)
+      && !isPassed(grid?.rows.find((r) => r.id === rowId)?.cells?.c_status) && !followupOf(rowId)));
     setGrid((g) => (g ? { ...g, rows: g.rows.map((r) => (byRow[r.id] ? { ...r, cells: { ...r.cells, ...byRow[r.id] } } : r)) } : g));
     Object.keys(byRow).forEach((rowId) => api.patch(`/api/interviews/rows/${rowId}`, { cells: byRow[rowId] })
+      .then(() => { if (newlyPassed.has(rowId) && isAdmin) toastRef.current('Marked Passed — its follow-up row was created at the bottom', 'success'); })
       .catch((err: any) => {
         // The write was REFUSED — someone else holds a lock on that cell (409), the workflow rules say
         // no (400), the row is gone (404). We already applied it locally, so without this the board goes
@@ -1660,11 +1756,12 @@ export default function Interviews() {
   };
   const insertRowOp = (row: Row, at: number) => {        // re-insert a row (undo of delete / redo of add)
     setGrid((g) => (g ? { ...g, rows: insertRowAt(g.rows, row, at) } : g));   // idempotent: the socket may restore it too
-    api.post('/api/interviews/rows', { id: row.id, at, cells: row.cells }).catch(() => toastRef.current('Failed to restore row', 'error'));
+    // On failure, re-read the board: the optimistic change above must not linger as if it had worked.
+    api.post('/api/interviews/rows', { id: row.id, at, cells: row.cells }).catch(() => { toastRef.current('Failed to restore row', 'error'); void loadGrid(); });
   };
   const removeRowOp = (rowId: string) => {               // delete a row (undo of add / redo of delete)
     setGrid((g) => (g ? { ...g, rows: removeRow(g.rows, rowId) } : g));
-    api.delete(`/api/interviews/rows/${rowId}`).catch(() => toastRef.current('Failed to remove row', 'error'));
+    api.delete(`/api/interviews/rows/${rowId}`).catch(() => { toastRef.current('Failed to remove row', 'error'); void loadGrid(); });
   };
   const undo = () => {
     const op = undoStack.current.pop(); if (!op) return;
@@ -1684,13 +1781,13 @@ export default function Interviews() {
   const undoRef = useRef(undo); undoRef.current = undo;
   const redoRef = useRef(redo); redoRef.current = redo;
 
-  // Callers may write only Approved, Status, and Feedback; admins anything. Backend enforces this too.
+  // Callers may write only Status and Feedback; admins anything. Backend enforces this too.
   const canEditCol = (colId: string) =>
     !SYSTEM_COLS.has(colId)
     && (!!me?.is_admin || (isTeamManager ? MANAGER_EDITABLE : CALLER_EDITABLE).has(colId));
   // Row-level rule. A team caller SEES the whole team's schedule but may only write their own calls
   // (the backend 404s on the rest) — without this the UI would happily let them edit a team-mate's
-  // Approved/Status and then silently drop it. Admins and the team's manager may write anywhere in
+  // Status and then silently drop it. Admins and the team's manager may write anywhere in
   // scope, so they short-circuit.
   const ownsRow = (row?: Row | null) => {
     if (me?.is_admin || isTeamManager) return true;
@@ -1739,9 +1836,6 @@ export default function Interviews() {
   };
   const heldColorOf = (rowId: string, colId: string): LockColor | null =>
     heldInfo(rowId, colId)?.color ?? null;
-  // Status is NOT gated on Approved. A call can be cancelled, rescheduled or no-showed long before
-  // anyone gets round to confirming it, and locking the outcome behind the paperwork just meant the
-  // board couldn't record what actually happened. (The server dropped the same rule.)
   const canEditCell = (row: Row | null | undefined, colId: string) => {
     if (row && lockedBy(row.id, colId)) return false;   // held by someone else — don't let me overwrite them
     return canEditCol(colId) && ownsRow(row);
@@ -1778,11 +1872,18 @@ export default function Interviews() {
     // hidden, but now that it shows under Creater it would mean correcting the Index on an old row
     // silently re-dated it to today. A creation date is a fact about the past; nothing you type later
     // can change it.
+    // Editing Scheduled_at would re-sort the row instantly, yanking it out from under
+    // the user. Instead HOLD it at its current chronological position: capture the OLD
+    // sched ms BEFORE the change, and keep the row sorted there until focus leaves it
+    // (releaseHeldSort). Only then does it slide to its new slot + flash.
+    if (colId === 'c_sched') {
+      const prevRow = (grid?.rows || []).find((r) => r.id === rowId);
+      const prevSched = String(prevRow?.cells?.c_sched ?? '').trim();
+      const oldMs = prevSched ? new Date(prevSched).getTime() : NaN;
+      setHeldSort({ rowId, oldMs });
+    }
     const changes: CellChange[] = [{ rowId, colId, value }];
     recordCells(changes);
-    // Editing Scheduled_at re-sorts the row to a new position — flag it so the effect above scrolls
-    // to + flashes it, making the change (and where the row went) obvious instead of looking unchanged.
-    if (colId === 'c_sched') setFlashRow(rowId);
   };
   /** `extra` lets the calendar book a slot: same row creation, but pre-filled with the time clicked.
    *  Returns the created row so the caller can act on it — the calendar opens its detail popup, so a
@@ -1791,9 +1892,10 @@ export default function Interviews() {
     try {
       const rows = grid?.rows ?? [];   // full rows (not the filtered view) so Index numbering is correct
       const at = rows.length;
-      // auto-fill the next Index (max existing + 1) and Created_at (now → shown on Index hover)
-      const maxIdx = rows.reduce((m, r) => { const n = parseInt(String(r.cells?.c_index ?? ''), 10); return Number.isFinite(n) ? Math.max(m, n) : m; }, 0);
-      const row = await api.post<Row>('/api/interviews/rows', { cells: { c_index: String(maxIdx + 1), c_created: new Date().toISOString(), ...extra } });
+      // Index is assigned by the SERVER (smallest unused number, unique + gap-free across
+      // plain and chain indices) — do NOT compute it here. The frontend's old parseInt of
+      // "13_16_19" read 13 and disagreed with the server, producing colliding numbers.
+      const row = await api.post<Row>('/api/interviews/rows', { cells: { c_created: new Date().toISOString(), ...extra } });
       // upsert, NOT append: the server already broadcast this row to every admin — including us — and
       // that socket message usually beats this response home. Appending blindly added it a second time,
       // which is why adding one row produced two on the author's board and one on everybody else's.
@@ -1811,7 +1913,68 @@ export default function Interviews() {
     const row = at >= 0 ? rows[at] : null;
     setGrid((gg) => (gg ? { ...gg, rows: removeRow(gg.rows, rowId) } : gg));
     setSel(null); setEditing(null);
-    try { await api.delete(`/api/interviews/rows/${rowId}`); if (row) { undoStack.current.push({ k: 'delRow', row, at }); redoStack.current = []; } } catch { toast('Failed to delete row', 'error'); }
+    try { await api.delete(`/api/interviews/rows/${rowId}`); if (row) { undoStack.current.push({ k: 'delRow', row, at }); redoStack.current = []; } }
+    catch {
+      // The row was hidden optimistically; put it back (or re-read the board) so it doesn't look deleted.
+      toast('Failed to delete row', 'error');
+      if (row) setGrid((gg) => (gg ? { ...gg, rows: insertRowAt(gg.rows, row, at) } : gg)); else void loadGrid();
+    }
+  };
+  // A call's follow-up row: index "<parent>_<n>" (the direct child — shortest — in a chain).
+  const followupOf = (rowId: string): Row | null => {
+    const rows = grid?.rows || [];
+    const base = String(rows.find((r) => r.id === rowId)?.cells?.c_index ?? '').trim();
+    if (!base) return null;
+    const kids = rows.filter((r) => String(r.cells?.c_index ?? '').trim().startsWith(base + '_'));
+    return kids.sort((a, b) => String(a.cells.c_index).length - String(b.cells.c_index).length)[0] || null;
+  };
+  // Scroll to a row and flash it — exempt from the filters so it can't be hidden.
+  const goToRow = (id: string) => { setJustAdded((s) => new Set(s).add(id)); setFlashRow(id); };
+  // Create a follow-up ("passed") row: the backend clones the source verbatim (incl.
+  // the full Chat & Feedback thread), chains the index, and appends it at the bottom.
+  // One follow-up per call — and marking a call Passed already creates it — so when one
+  // exists, the button takes you to it instead of failing with "already exists".
+  // A notification's "Open on board" (and the OS push banner) links to /interviews?row=<id>: once the
+  // board has loaded, scroll to that call and flash it, then drop the param.
+  const [focusRow, setFocusRow] = useUrlState('row', '');
+  useEffect(() => {
+    if (!focusRow || !grid) return;
+    if (grid.rows.some((r) => r.id === focusRow)) goToRow(focusRow);
+    else toast('That call is no longer on the board, or not visible to you', 'error');
+    setFocusRow('');
+  }, [focusRow, grid]);   // eslint-disable-line react-hooks/exhaustive-deps
+  // Clicking a board push while this tab is open: the service worker focuses us and names the call.
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return;
+    const onMsg = (e: MessageEvent) => {
+      if (e.data?.type === 'open-row' && e.data.row_id) setFocusRow(String(e.data.row_id));
+    };
+    navigator.serviceWorker.addEventListener('message', onMsg);
+    return () => navigator.serviceWorker.removeEventListener('message', onMsg);
+  }, [setFocusRow]);
+  const cloning = useRef(new Set<string>());
+  const cloneRow = async (rowId: string) => {
+    const existing = followupOf(rowId);
+    if (existing) { goToRow(existing.id); toast(`Follow-up row #${existing.cells.c_index} already exists — here it is`, 'info'); return; }
+    if (cloning.current.has(rowId)) return;               // a second click while the first is in flight
+    cloning.current.add(rowId);
+    try {
+      const row = await api.post<Row>(`/api/interviews/rows/${rowId}/clone`, {});
+      setGrid((gg) => (gg ? { ...gg, rows: gg.rows.some((r) => r.id === row.id) ? gg.rows : [...gg.rows, row] } : gg));
+      goToRow(row.id);
+      toast(`Follow-up row #${row.cells?.c_index ?? ''} created`, 'success');
+    } catch (e: any) {
+      const d = e?.response?.data?.detail;
+      if (d && typeof d === 'object' && d.row_id) {     // created a moment ago (e.g. by marking Passed) — go to it
+        if (!grid?.rows.some((r) => r.id === d.row_id)) void loadGrid();
+        goToRow(d.row_id);
+        toast(d.message || 'This call already has a follow-up row', 'info');
+      } else {
+        toast((typeof d === 'string' && d) || 'Failed to create follow-up row', 'error');
+      }
+    } finally {
+      cloning.current.delete(rowId);
+    }
   };
   // Keep one empty row available by default: if an admin opens an empty board, seed a blank row (once).
   const seededRef = useRef(false);
@@ -2028,14 +2191,19 @@ export default function Interviews() {
     if (isNaN(t.getTime())) return thisWeek(userTz).from;
     return addDays(base, -((t.getUTCDay() + 6) % 7));       // Mon=0
   })();
-  // Always sorted by Scheduled_at (earliest first). Changing a row's Scheduled_at re-renders → re-sorts,
-  // so the row moves to its correct place. Unscheduled rows (incl. newly-added) stay at the bottom, visible.
-  const withMs = matched.map((r) => ({ r, ms: schedMs(r) }));
+  // Sorted by Scheduled_at (earliest first). A row whose time was JUST edited is held
+  // at its OLD position (heldSort.oldMs) until the user's focus leaves it, so it does
+  // not jump out from under them mid-edit. Unscheduled rows stay at the bottom.
+  const withMs = matched.map((r) => ({
+    r,
+    ms: (heldSort && heldSort.rowId === r.id) ? heldSort.oldMs : schedMs(r),
+  }));
   const scheduled = withMs.filter((x) => !isNaN(x.ms)).sort((a, b) => a.ms - b.ms).map((x) => x.r);
   const unscheduled = withMs.filter((x) => isNaN(x.ms)).map((x) => x.r);
   // "Recent N" keeps the latest N schedules; unscheduled rows are always shown (the limit never hides them).
   const shownScheduled = limit > 0 && scheduled.length > limit ? scheduled.slice(scheduled.length - limit) : scheduled;
   const viewRows = [...shownScheduled, ...unscheduled];
+
   // Exactly ONE row is highlighted: the NEXT upcoming call — the soonest Scheduled_at still in the
   // future. `shownScheduled` is already sorted ascending, so the first one at/after now is it. Calls
   // that have passed, and every call after the next one, stay uncoloured.
@@ -2043,7 +2211,10 @@ export default function Interviews() {
   // A call whose time has already gone is greyed out — done with, but still on the board. Unscheduled
   // rows are NOT past (they simply haven't been booked yet), so they stay normal.
   const isPast = (r: Row) => { const ms = schedMs(r); return !isNaN(ms) && ms < nowMs; };
-  gridRef.current = { ...grid, rows: viewRows };   // keyboard/clipboard index into the visible (filtered) rows
+  gridRef.current = { ...grid, rows: viewRows };
+  // The editor renders only on the row it was opened on — in the render where a live update has just
+  // moved that row, it shows nowhere (the effect above then closes it) instead of on the wrong call.
+  const editingView = editing && (!editing.rid || viewRows[editing.r]?.id === editing.rid) ? editing : null;   // keyboard/clipboard index into the visible (filtered) rows
 
   // Shared cell movement: collapse + move (sub-aware) or Shift-extend the focus. Used by keys AND editor nav.
   const moveActive = (dir: Dir, extend: boolean) => {
@@ -2159,7 +2330,7 @@ export default function Interviews() {
         {FILTER_COLS.filter((cid) => (!STAFF_ONLY_FILTERS.has(cid) || !L.ROLE_HIDDEN.has(cid)) && colById[cid]).map((cid) => {
           const col = colById[cid];
           return (
-            <FilterDropdown key={cid} label={DISPLAY_NAME[cid] || col.name} options={filterOptionsFor(cid)}
+            <FilterDropdown key={cid} label={FILTER_LABEL[cid] || DISPLAY_NAME[cid] || col.name} options={filterOptionsFor(cid)}
               selected={colFlt[cid] || []} onChange={(next) => setColFlt((f) => ({ ...f, [cid]: next }))} />
           );
         })}
@@ -2290,8 +2461,8 @@ export default function Interviews() {
                         <StackedCell fields={fields} row={row} meName={meName} avatarByName={avatarByName} tz={userTz}
                           lockOf={(colId) => heldInfo(row.id, colId)}
                           subState={stackState(ri, c, col.id)}
-                          editSub={editing && editing.r === ri && editing.c === c ? editing.s : null}
-                          editSeed={editing && editing.r === ri && editing.c === c ? editing.seed : undefined}
+                          editSub={editingView && editingView.r === ri && editingView.c === c ? editingView.s : null}
+                          editSeed={editingView && editingView.r === ri && editingView.c === c ? editingView.seed : undefined}
                           onSelect={(sub, openType, shift) => selectCellSub(ri, c, sub, openType, shift)}
                           onEdit={(sub) => editCell(ri, c, sub)}
                           onDone={(dir) => { setEditing(null); if (dir) moveActive(dir, false); }}
@@ -2305,10 +2476,10 @@ export default function Interviews() {
                   const ce = copiedEdge(ri, c);
                   const tdStyle: CSSProperties = { padding: 0, position: 'relative', ...ss };
                   if (ce.length) tdStyle.boxShadow = [ss.boxShadow, ...ce].filter(Boolean).join(', ');
-                  const isEditing = !!editing && editing.r === ri && editing.c === c && editing.s === 0;
+                  const isEditing = !!editingView && editingView.r === ri && editingView.c === c && editingView.s === 0;
                   const cval = displayValue(row, col.id);   // Caller falls back to the Team it was handed to
                   // Somebody else is in this cell. The tag only ever showed on STACKED cells, so a plain
-                  // one (Status always, Approved for a solo caller) just went quietly dead in your hands:
+                  // one (Status, Caller) just went quietly dead in your hands:
                   // no tag, and double-click did nothing. Same treatment for both kinds of cell now,
                   // tinted in the holder's own presence colour.
                   const held = heldInfo(row.id, col.id);
@@ -2319,7 +2490,7 @@ export default function Interviews() {
                         onMouseDown={(e) => selectCell(e, ri, c, 0, false)}
                         onMouseEnter={() => extendTo(ri, c)}
                         onDoubleClick={() => editCell(ri, c, 0)}>
-                      <CellEditor col={effCol(col, row.cells)} value={cval} editing={isEditing} seed={isEditing ? editing?.seed : undefined} tz={userTz}
+                      <CellEditor col={col} value={cval} editing={isEditing} seed={isEditing ? editing?.seed : undefined} tz={userTz}
                         avatar={col.type === 'person' ? avatarByName[String(cval ?? '')] : undefined}
                         onCommit={(v) => commitCell(row.id, col.id, v)} onDone={(dir) => { setEditing(null); if (dir) moveActive(dir, false); }}
                         onOpen={col.type === 'button' ? () => openModal(row, col) : () => editCell(ri, c, 0)}
@@ -2330,18 +2501,25 @@ export default function Interviews() {
                 })}
                 {/* Delete sits AFTER the last column, in a transparent margin outside the panel — the
                     mirror of the row-number gutter on the left. It only appears on the hovered row. */}
-                {isAdmin && (
+                {isAdmin && (() => {
+                  const fu = followupOf(row.id);
+                  return (
                   <td className="iv-rowend">
+                    <button className="ghost iv-del"
+                      title={fu ? `Go to its follow-up row (#${fu.cells.c_index})` : 'Create follow-up row (copies everything incl. Chat & Feedback)'}
+                      style={{ marginRight: 2 }}
+                      onClick={(e) => { e.stopPropagation(); void cloneRow(row.id); }}>{fu ? '↪' : '⧉'}</button>
                     <button className="ghost iv-del" title="Delete row"
                       onClick={(e) => { e.stopPropagation(); setConfirmDel(row.id); }}>✕</button>
                   </td>
-                )}
+                  );
+                })()}
               </tr>
             ))}
             {isAdmin && (
               <tr className="iv-addrow" onClick={() => addRow()}   /* not {addRow} — that would spread the MouseEvent into the new row's cells */
                   title={hasFilters ? 'Add a row (clears the filters, or the new empty row would be filtered out)' : 'Add a row'}>
-                <td className="iv-gutter" style={{ cursor: 'pointer', color: '#9B9B9B' }}>+</td>
+                <td className="iv-gutter" style={{ cursor: 'pointer', color: 'var(--iv-muted)' }}>+</td>
                 <td colSpan={ncols} style={{ cursor: 'pointer' }} />
                 <td className="iv-rowend" />
               </tr>

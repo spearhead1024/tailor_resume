@@ -53,7 +53,10 @@ def snooze(body: dict = Body(...)):
     from core import notify
 
     token = str((body or {}).get("token", ""))
-    minutes = (body or {}).get("minutes", 5)
+    try:
+        minutes = min(max(int((body or {}).get("minutes", 5) or 5), 1), 120)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="minutes must be a number")
     try:
         data = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
     except Exception:
@@ -65,7 +68,7 @@ def snooze(body: dict = Body(...)):
         raise HTTPException(status_code=400, detail="Malformed snooze ticket")
 
     notify.snooze_add(user_id, payload, minutes)
-    return {"ok": True, "minutes": min(max(int(minutes or 5), 1), 120)}
+    return {"ok": True, "minutes": minutes}
 
 
 @router.post("/test")

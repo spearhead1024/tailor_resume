@@ -1,7 +1,9 @@
 """Jobs CRUD."""
 from __future__ import annotations
 
+import re
 import threading
+from urllib.parse import urlsplit
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
@@ -10,6 +12,7 @@ from auth import get_current_user, require_role, storage
 # Both admins and job_adders can manage jobs.
 require_jobs_access = require_role("admin", "job_adder")
 from schemas import JobUpsertRequest
+from core.job_questions import clean_questions
 
 try:
     from zoneinfo import ZoneInfo
@@ -40,6 +43,63 @@ def _et_date_to_utc(date_str: str, *, end: bool = False) -> datetime | None:
 
 # Guards against overlapping manual + scheduled sync runs.
 _sync_lock = threading.Lock()
+
+
+# ── Stricter job submit ──────────────────────────────────────────────────────
+# A manually added job is only useful when it is complete: duplicate detection keys on
+# company + title and the link, bidders open the link, and the resume flow needs the full
+# description. Every client (web Jobs tab, browser extension) gets the same rules here.
+_JOB_REQUIRED = {"company": "company", "job_title": "job title", "link": "job link", "description": "job description"}
+_JOB_REGIONS = {"US", "EU", "LATAM", "ANY"}                         # what profiles are matched on
+_JOB_REGION_ALIASES = {"GLOBAL": "ANY", "ANYWHERE": "ANY", "WORLDWIDE": "ANY", "ALL": "ANY", "REMOTE": "ANY"}
+_JOB_MIN_DESCRIPTION = 100                                          # a pasted link or one line is not a posting
+_JOB_MAX_LEN = {"company": 200, "job_title": 200, "link": 2000, "description": 60_000, "note": 5_000}
+
+
+def _valid_job_link(link: str) -> bool:
+    try:
+        parts = urlsplit(link)
+    except ValueError:
+        return False
+    host = parts.hostname or ""
+    return parts.scheme in ("http", "https") and "." in host and not any(c.isspace() for c in link)
+
+
+def _clean_job_fields(payload: dict, *, partial: bool = False) -> dict:
+    """Trim the job's text fields and enforce the submit rules; raise ONE 422 naming every
+    problem (so a form can show them all at once). partial=True (an edit) checks only the
+    fields the edit sends — changing a job's status alone never trips over its other fields."""
+    out = dict(payload)
+    problems: list[str] = []
+    present = lambda key: not partial or key in out  # noqa: E731
+    for key in ("company", "job_title", "link", "description", "note"):
+        if key in out:
+            out[key] = str(out.get(key) or "").strip()
+    missing = [label for key, label in _JOB_REQUIRED.items() if present(key) and not out.get(key)]
+    if missing:
+        problems.append(f"Missing: {', '.join(missing)}. Company, job title, job link and job description are all required.")
+    link = out.get("link", "")
+    if link and not _valid_job_link(link):
+        problems.append("The job link must be a full web address starting with http:// or https:// (e.g. https://boards.greenhouse.io/acme/jobs/123).")
+    for key, label in (("company", "company"), ("job_title", "job title")):
+        if re.match(r"(?i)^(https?://|www\.)", out.get(key, "")):
+            problems.append(f"The {label} looks like a link — enter the {label} itself.")
+    desc = out.get("description", "")
+    if desc and len(desc) < _JOB_MIN_DESCRIPTION:
+        problems.append(f"The job description is too short ({len(desc)} characters) — paste the full posting (at least {_JOB_MIN_DESCRIPTION} characters).")
+    for key, limit in _JOB_MAX_LEN.items():
+        if len(out.get(key, "") or "") > limit:
+            problems.append(f"The {_JOB_REQUIRED.get(key, key)} is too long (at most {limit:,} characters).")
+    if present("region"):
+        region = str(out.get("region") or "").strip().upper()
+        region = _JOB_REGION_ALIASES.get(region, region)
+        if region not in _JOB_REGIONS:
+            problems.append("Pick the region: US, EU, LATAM or Any.")
+        else:
+            out["region"] = region
+    if problems:
+        raise HTTPException(status_code=422, detail=" ".join(problems))
+    return out
 
 
 def _check_duplicate(payload: dict, exclude_job_id: str = "") -> None:
@@ -117,6 +177,19 @@ def _check_company_week(payload: dict, exclude_job_id: str = "") -> None:
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
+# Who added / approved a job is recorded by the server, never taken from the client.
+_SERVER_OWNED = ("id", "created_by_user_id", "created_by_username",
+                 "approved_by_user_id", "approved_by_username", "approved_at", "sync_locked")
+
+
+def _job_for_write(job_id: str, user: dict) -> dict:
+    """The job, if this user may change it: admins any job, job_adders only the jobs they added —
+    the same rule list/get already apply (404, so other people's job ids aren't confirmed)."""
+    job = storage.get_job_by_id(job_id)
+    if not job or (not user.get("is_admin") and job.get("created_by_user_id") != user.get("id")):
+        raise HTTPException(status_code=404, detail="Not found")
+    return job
+
 
 @router.get("")
 def list_jobs(
@@ -127,6 +200,7 @@ def list_jobs(
     date_from: str = Query(""),
     date_to: str = Query(""),
     reported: bool = Query(False),
+    added_by: str = Query(""),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     user: dict = Depends(get_current_user),
@@ -136,9 +210,11 @@ def list_jobs(
     Returns {jobs, total, page, page_size, counts}. The `jobs` list omits the
     heavy description/note fields — GET /api/jobs/{id} returns the full row.
     Pass reported=true to show only flagged (reported) jobs for review.
+    added_by (admins only) narrows to one adder's jobs — see storage.query_jobs.
     """
     # Job-adders only see jobs they uploaded; admins see every job.
-    created_by = "" if user.get("is_admin") else user.get("id", "")
+    is_admin = bool(user.get("is_admin"))
+    created_by = "" if is_admin else user.get("id", "")
     return storage.query_jobs(
         status=status,
         region=region,
@@ -148,9 +224,30 @@ def list_jobs(
         date_to=_et_date_to_utc(date_to, end=True),
         reported=reported,
         created_by=created_by,
+        added_by=added_by if is_admin else "",   # a job_adder's list is already just their own
         page=page,
         page_size=page_size,
     )
+
+
+@router.get("/adders")
+def list_job_adders(
+    status: str = Query(""),
+    region: str = Query(""),
+    company: str = Query(""),
+    q: str = Query(""),
+    date_from: str = Query(""),
+    date_to: str = Query(""),
+    reported: bool = Query(False),
+    user: dict = Depends(require_role("admin")),
+):
+    """Options for the Jobs tab's "Added by" filter: [{name, count}], counted within the same
+    filters as the list (GET /api/jobs, minus added_by itself) — so each count is what picking
+    that adder would show. name '' = no adder on record. Admin only, like the Added by column."""
+    return storage.job_adders(
+        status=status, region=region, company=company, q=q,
+        date_from=_et_date_to_utc(date_from), date_to=_et_date_to_utc(date_to, end=True),
+        reported=reported)
 
 
 @router.post("/sync-now")
@@ -165,7 +262,11 @@ async def sync_now(user: dict = Depends(require_role("admin"))):
     try:
         from core import job_sync
         result = await run_in_threadpool(job_sync.sync_once)
+        if (result or {}).get("busy"):
+            raise HTTPException(status_code=409, detail="A sync is already running — try again in a moment.")
         return {"ok": True, **(result or {})}
+    except HTTPException:
+        raise
     except Exception as exc:  # surface the failure to the toast
         raise HTTPException(status_code=502, detail=f"Sync failed: {exc}")
     finally:
@@ -183,9 +284,38 @@ def get_job(job_id: str, user: dict = Depends(get_current_user)):
     return job
 
 
+@router.post("/check-duplicate")
+def check_duplicate(body: dict, user: dict = Depends(require_jobs_access)):
+    """Live pre-save check for the add/edit form: runs the SAME rules as saving
+    (same link, same company + title, one job per company per region per month,
+    blacklist) and returns every conflict instead of rejecting. Read-only.
+
+    Body: {company, job_title, link, region, exclude_job_id?} — exclude_job_id is
+    the job being edited, so it never conflicts with itself. Editing skips the
+    one-per-month rule, matching update_job."""
+    payload = {k: str((body or {}).get(k) or "").strip() for k in ("company", "job_title", "link", "region")}
+    exclude = str((body or {}).get("exclude_job_id") or "").strip()
+    conflicts: list[dict] = []
+    checks = [lambda: _check_duplicate(payload, exclude_job_id=exclude)]
+    if not exclude and payload["company"]:
+        checks.append(lambda: _check_company_week(payload))
+    for check in checks:
+        try:
+            check()
+        except HTTPException as exc:
+            if isinstance(exc.detail, dict):
+                conflicts.append(exc.detail)
+    if payload["company"] or payload["link"] or payload["job_title"]:
+        reason = storage.job_block_reason(payload)
+        if reason is not None:
+            conflicts.append({"kind": "blacklist", "message": f"Blocked — {reason} (Settings → Blacklist)."})
+    return {"duplicate": bool(conflicts), "conflicts": conflicts}
+
+
 @router.post("")
 def create_job(body: JobUpsertRequest, user: dict = Depends(require_jobs_access)):
-    payload = dict(body.payload)
+    payload = _clean_job_fields({k: v for k, v in dict(body.payload).items() if k not in _SERVER_OWNED})
+    payload["application_questions"] = clean_questions(str(payload.get("note") or "").splitlines())
     _check_duplicate(payload)
     _check_company_week(payload)
     # Reject blacklisted jobs up-front so the toast shows the real reason
@@ -196,18 +326,19 @@ def create_job(body: JobUpsertRequest, user: dict = Depends(require_jobs_access)
             status_code=422,
             detail=f"Blocked — {reason} (Settings → Blacklist).",
         )
-    if not payload.get("id"):
-        payload["id"] = storage.make_id("job")
-    payload.setdefault("created_by_user_id", user["id"])
-    payload.setdefault("created_by_username", user.get("username", ""))
+    # Always a fresh id: upsert_job REPLACES a row with the same id, so a client-chosen id could
+    # overwrite somebody else's job.
+    payload["id"] = storage.make_id("job")
+    payload["created_by_user_id"] = user["id"]
+    payload["created_by_username"] = user.get("username", "")
     now = _utcnow()
     payload.setdefault("submitted_at", now)
     # Manually-added jobs go live as approved (job_adders included).
     payload.setdefault("status", "approved")
     if payload.get("status") == "approved":
-        payload.setdefault("approved_at", now)
-        payload.setdefault("approved_by_user_id", user["id"])
-        payload.setdefault("approved_by_username", user.get("username", ""))
+        payload["approved_at"] = now
+        payload["approved_by_user_id"] = user["id"]
+        payload["approved_by_username"] = user.get("username", "")
     if not storage.upsert_job(payload):
         # Defensive — blacklist could change between the check above and now.
         raise HTTPException(status_code=422, detail="Blocked by blacklist.")
@@ -216,7 +347,12 @@ def create_job(body: JobUpsertRequest, user: dict = Depends(require_jobs_access)
 
 @router.patch("/{job_id}")
 def update_job(job_id: str, body: JobUpsertRequest, user: dict = Depends(require_jobs_access)):
-    patch = dict(body.payload)
+    _job_for_write(job_id, user)
+    patch = _clean_job_fields({k: v for k, v in dict(body.payload).items() if k not in _SERVER_OWNED}, partial=True)
+    # The web form's "Application questions" box is `note`: on a VPS2 job it IS the shared
+    # question list. (A synced job's note is VPS1's reviewer note — left alone.)
+    if "note" in patch and (storage.get_job_by_id(job_id) or {}).get("source") != "sync":
+        patch["application_questions"] = clean_questions(str(patch.get("note") or "").splitlines())
     # When the edit touches a duplicate-relevant field, check against the
     # rest of the table (but allow the row to keep its own values).
     if any(k in patch for k in ("link", "company", "job_title")):
@@ -246,7 +382,11 @@ def update_job(job_id: str, body: JobUpsertRequest, user: dict = Depends(require
 
 @router.delete("/{job_id}")
 def delete_job(job_id: str, user: dict = Depends(require_jobs_access)):
-    storage.delete_job(job_id)
+    """Soft delete: status "deleted" + sync_locked. A hard delete removed the row, so the next job-sync
+    found the job "new" on VPS1 again and re-inserted it within 20 minutes; the kept row is what
+    tells the sync (and duplicate checks) that this job was already handled."""
+    _job_for_write(job_id, user)
+    storage.update_job(job_id, {"status": "deleted", "sync_locked": True})
     return {"ok": True}
 
 
@@ -278,6 +418,9 @@ def report_job(job_id: str, body: dict, user: dict = Depends(get_current_user)):
         "reported_at": _utcnow(),
         "source": "user",
     })
+    # Reported: the job leaves every Bid queue — its ChatGPT conversations are deleted.
+    from core import cv_queue
+    cv_queue.close(storage.db_path, job_ids=[job_id])
     return {"ok": True}
 
 
@@ -288,8 +431,6 @@ def clear_job_report(job_id: str, user: dict = Depends(require_jobs_access)):
     The job returns to circulation (visible again in Resumes/Apply). To take
     it OUT of circulation instead, change its status to rejected/deleted.
     """
-    job = storage.get_job_by_id(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    _job_for_write(job_id, user)
     storage.clear_job_reports(job_id)
     return {"ok": True}

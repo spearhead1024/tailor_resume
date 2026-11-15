@@ -14,6 +14,7 @@ from auth import (
     devices,
     get_current_user,
     has_role,
+    identity_taken,
     storage,
 )
 from core.devices import is_mobile_or_tablet, parse_user_agent
@@ -138,6 +139,9 @@ def update_me(body: dict = Body(...), user: dict = Depends(get_current_user)):
     body = body or {}
     patch: dict = {k: str(body.get(k, "")).strip() for k in _PROFILE_FIELDS if k in body}
     patch.update({k: str(body.get(k, "")) for k in _PROFILE_TEXTAREAS if k in body})
+    for k in _PROFILE_STRUCTS:
+        if k in body and not isinstance(body[k], dict if k == "availability" else list):
+            raise HTTPException(status_code=400, detail=f"{k} has the wrong shape")
     patch.update({k: body[k] for k in _PROFILE_STRUCTS if k in body})
     patch.update({k: body[k] for k in _PROFILE_LEAD_LISTS if k in body and isinstance(body[k], list)})
     # Saving the availability form is the ONLY moment we can tell a real schedule from the default one
@@ -149,6 +153,10 @@ def update_me(body: dict = Body(...), user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="Invalid email")
     if patch.get("timezone") and _VALID_TZS and patch["timezone"] not in _VALID_TZS:
         raise HTTPException(status_code=400, detail="Invalid time zone")
+    for field, label in (("full_name", "name"), ("email", "email")):
+        if patch.get(field) and patch[field].lower() != str(user.get(field) or "").strip().lower() \
+                and identity_taken(patch[field], user["id"]):
+            raise HTTPException(status_code=400, detail=f"That {label} is already used by another account.")
     storage.update_user(user["id"], patch)
     updated = storage.get_user_by_id(user["id"]) or {}
 
@@ -384,11 +392,14 @@ def register(body: RegisterRequest):
     err = _password_policy_error(password)
     if err:
         raise HTTPException(status_code=400, detail=err)
-    if storage.get_user_by_username(username):
+    # Each of the three must be free as ANY account's username, full name or email (see identity_taken):
+    # the board finds callers by name and login accepts username or email.
+    if identity_taken(username):
         raise HTTPException(status_code=409, detail="Username taken")
-    for u in storage.get_users():
-        if str(u.get("email", "")).strip().lower() == email.lower():
-            raise HTTPException(status_code=409, detail="Email in use")
+    if identity_taken(email):
+        raise HTTPException(status_code=409, detail="Email in use")
+    if identity_taken(full_name):
+        raise HTTPException(status_code=409, detail="That name is already used by another account")
     pw = build_password_record(password)
     storage.upsert_user({
         "id": storage.make_id("user"),
@@ -410,10 +421,13 @@ def change_password(body: ChangePasswordRequest, user: dict = Depends(get_curren
     err = _password_policy_error(body.new_password)
     if err:
         raise HTTPException(status_code=400, detail=err)
-    # If the caller supplies their current password (the Profile page does),
-    # verify it. The force-password-change flow omits it and is unaffected.
-    if body.current_password:
-        full = storage.get_user_by_id(user["id"]) or {}
+    # The current password is REQUIRED — a stolen session token alone must not be enough to take the
+    # account over. The only exception is the forced change after an admin reset, where the user
+    # doesn't know a password of their own yet.
+    full = storage.get_user_by_id(user["id"]) or {}
+    if not full.get("force_password_change"):
+        if not body.current_password:
+            raise HTTPException(status_code=400, detail="Enter your current password.")
         if not verify_password(body.current_password, full.get("password_salt", ""), full.get("password_hash", "")):
             raise HTTPException(status_code=400, detail="Current password is incorrect.")
     pw = build_password_record(body.new_password)

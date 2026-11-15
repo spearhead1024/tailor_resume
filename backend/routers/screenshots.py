@@ -8,7 +8,9 @@ JSON metadata sidecar so admins can list/browse them later.
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,17 +39,34 @@ def _safe_id(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "", str(value or ""))[:64]
 
 
-def _load_index() -> list[dict]:
+def _load_index(strict: bool = False) -> list[dict]:
+    """The index, or [] if there is none. An unreadable index reads as empty for listing, but with
+    `strict` (the write path) it raises: appending to "[]" and saving would wipe every entry."""
     if not _INDEX.exists():
         return []
     try:
-        return json.loads(_INDEX.read_text())
+        items = json.loads(_INDEX.read_text())
+        if not isinstance(items, list):
+            raise ValueError("index is not a list")
+        return items
     except Exception:
+        if strict:
+            raise
         return []
 
 
 def _save_index(items: list[dict]) -> None:
-    _INDEX.write_text(json.dumps(items, indent=2))
+    # Temp file + os.replace: a crash mid-write leaves the old index, never a torn one.
+    fd, tmp = tempfile.mkstemp(dir=SHOTS_DIR, prefix=".index-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(items, indent=2))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, _INDEX)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def _check_profile_access(user: dict, profile_id: str) -> None:
@@ -77,11 +96,15 @@ async def upload_screenshot(
     if not ext:
         raise HTTPException(status_code=400, detail="Unsupported image type (png/jpeg/webp only).")
 
-    data = await image.read()
+    # Read in chunks and stop at the cap, rather than buffering an arbitrarily large body first.
+    buf = bytearray()
+    while chunk := await image.read(256 * 1024):
+        buf += chunk
+        if len(buf) > _MAX_BYTES:
+            raise HTTPException(status_code=413, detail="Screenshot too large.")
+    data = bytes(buf)
     if not data:
         raise HTTPException(status_code=400, detail="Empty image.")
-    if len(data) > _MAX_BYTES:
-        raise HTTPException(status_code=413, detail="Screenshot too large.")
 
     shot_id = f"shot_{uuid.uuid4().hex[:12]}"
     sub = SHOTS_DIR / (pid or "_unassigned")
@@ -111,7 +134,11 @@ async def upload_screenshot(
         "created_by_user_id": user.get("id", ""),
         "created_by_username": user.get("username", ""),
     }
-    items = _load_index()
+    try:
+        items = _load_index(strict=True)
+    except Exception:
+        fpath.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail="Screenshot index is unreadable — not overwriting it.")
     items.append(entry)
     _save_index(items)
 

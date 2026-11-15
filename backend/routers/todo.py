@@ -15,9 +15,7 @@ Mutations
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
 
 from auth import get_current_user, storage
 from core.storage import tech_stacks_match
@@ -42,10 +40,6 @@ def _resume_applyable(resume: dict, job: dict | None, *, hours: int) -> bool:
     if job.get("flagged") or job.get("admin_applied"):
         return False
     return _is_recent_resume(resume, hours=hours)
-
-
-def _utcnow() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _profile_or_403(user: dict, profile_id: str) -> dict:
@@ -166,50 +160,6 @@ def get_todo(
     return {"role": role, "profiles": profiles, "resumes": resumes}
 
 
-# ── Mutations ───────────────────────────────────────────────────────────────
-
-class JobIdsRequest(BaseModel):
-    profile_id: str
-    job_ids: list[str]
-
-
-@router.post("/skip")
-def skip_jobs(body: JobIdsRequest, user: dict = Depends(get_current_user)):
-    _profile_or_403(user, body.profile_id)
-    # Reset any existing record first so a single (profile, job) pair stays unique
-    if hasattr(storage, "delete_generated_resumes_for"):
-        storage.delete_generated_resumes_for(body.profile_id, body.job_ids)
-    now = _utcnow()
-    skipped = 0
-    for jid in body.job_ids:
-        jid = (jid or "").strip()
-        if not jid:
-            continue
-        job = storage.get_job_by_id(jid)
-        if not job:
-            continue
-        storage.save_generated_resume({
-            "profile_id": body.profile_id,
-            "job_id": jid,
-            "job_company": job.get("company", ""),
-            "job_title": job.get("job_title", ""),
-            "job_link": job.get("link", ""),
-            "status": "skipped",
-            "applied_status": "pending",
-            "created_at": now,
-            "created_by_user_id": user.get("id", ""),
-            "created_by_username": user.get("username", ""),
-        })
-        skipped += 1
-    return {"skipped": skipped}
-
-
-@router.post("/reset")
-def reset_jobs(body: JobIdsRequest, user: dict = Depends(get_current_user)):
-    """Delete any generated/skipped records for (profile_id, job_ids), so
-    those jobs return to 'pending' status."""
-    _profile_or_403(user, body.profile_id)
-    if not hasattr(storage, "delete_generated_resumes_for"):
-        return {"reset": 0}
-    deleted = storage.delete_generated_resumes_for(body.profile_id, body.job_ids)
-    return {"reset": deleted}
+# Note: the POST /skip and /reset mutations belonged to the retired
+# "Resumes + Apply" bidder flow and were removed with it. GET /api/todo stays —
+# the browser extension still uses it for its profiles/counts overview.

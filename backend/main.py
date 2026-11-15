@@ -8,7 +8,9 @@ Start:
 """
 from __future__ import annotations
 
+import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -24,6 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from routers import auth as auth_router
 from routers import devices as devices_router
 from routers import jobs as jobs_router
+from routers import cv_queue as cv_queue_router
 from routers import metrics as metrics_router
 from routers import profiles as profiles_router
 from routers import resumes as resumes_router
@@ -39,6 +42,8 @@ from routers import push as push_router
 from routers import teams as teams_router
 from routers import live as live_router
 from routers import notifications as notifications_router
+from routers import companies as companies_router
+from routers import autofill as autofill_router
 
 FRONTEND_DIST = PROJECT_ROOT.parent / "frontend" / "dist"
 
@@ -61,9 +66,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+class _RedactTokens(logging.Filter):
+    """The board's websocket carries the login token in its query string (browsers can't set headers
+    on a WebSocket), and uvicorn logs every handshake URL, so 30-day tokens piled up in the log files."""
+    _RX = re.compile(r"([?&]token=)[^&\s\"]+")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if "token=" in msg:
+            record.msg, record.args = self._RX.sub(r"\1***", msg), None
+        return True
+
+
+for _name in ("uvicorn.error", "uvicorn.access"):
+    logging.getLogger(_name).addFilter(_RedactTokens())
+
 # Mount /api/* routers
 app.include_router(auth_router.router)
 app.include_router(jobs_router.router)
+app.include_router(companies_router.router)
+app.include_router(autofill_router.router)
 app.include_router(profiles_router.router)
 app.include_router(resumes_router.router)
 app.include_router(users_router.router)
@@ -80,6 +103,7 @@ app.include_router(push_router.router)
 app.include_router(teams_router.router)
 app.include_router(live_router.router)   # /api/interviews/live (WebSocket)
 app.include_router(notifications_router.router)
+app.include_router(cv_queue_router.router)   # /api/gpt — the extension's ChatGPT queue
 
 
 @app.get("/api/health")
@@ -102,6 +126,15 @@ def _start_reminder_scheduler():
     threading.Thread(target=notify.scheduler_loop, kwargs={"interval_s": 60}, daemon=True).start()
 
 
+@app.on_event("shutdown")
+def _flush_board_notifications():
+    """Board notifications wait a minute for the editor to finish (core/live.py). Announce any still
+    waiting before the process exits, while the live socket loop is still up — so a restart or deploy
+    doesn't swallow them. (live.py also registers this with atexit as a last resort.)"""
+    from core import live
+    live.flush_pending()
+
+
 # ---------------------------------------------------------------------------
 # Frontend static files (SPA fallback for non-/api/* paths)
 # ---------------------------------------------------------------------------
@@ -118,8 +151,11 @@ if FRONTEND_DIST.exists():
         # /api/* is handled by routers; anything else returns index.html for client-side routing
         if full_path.startswith("api/"):
             return JSONResponse({"detail": "Not Found"}, status_code=404)
-        target = FRONTEND_DIST / full_path
-        if target.is_file() and target.name != "index.html":
+        # Resolve and require the file to sit INSIDE dist/: `full_path` may contain "..%2f", which
+        # used to let an unauthenticated request read any file (data/jwt_secret.txt, app.db, …).
+        target = (FRONTEND_DIST / full_path).resolve()
+        if (target.is_relative_to(FRONTEND_DIST.resolve()) and target.is_file()
+                and target.name != "index.html"):
             # The service worker must NEVER be cached — a stale sw.js means the browser keeps an old
             # worker and the user never receives notification/sound fixes. (Hashed /assets/* are safe
             # to cache: a new build gives them new URLs.)

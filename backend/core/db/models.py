@@ -219,3 +219,128 @@ class DeviceSessionRow(Base):
     last_seen: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow, index=True)
     revoked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
+    # Set on revoke and NOT cleared by a re-login: JWTs for this session issued at or before it stay
+    # invalid (same sid, so `revoked` alone would resurrect them). Sub-second precision.
+    tokens_valid_after: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
+
+
+class CompanyRow(Base):
+    """Size/age intelligence per company, used to flag startups.
+
+    `key` is the company name lowercased with punctuation and legal suffixes
+    (Inc, LLC, Ltd…) stripped, so "Acme" and "Acme, Inc." share one row. Rows are
+    created (status 'pending') whenever a job is written, and filled in by the
+    company-intel worker (core/company_intel.py). `data` holds the findings:
+    employees / size label, founded year, public flag, verdict, sources."""
+    __tablename__ = 'companies'
+
+    key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), default='')
+    status: Mapped[str] = mapped_column(String(16), default='pending', index=True)   # pending | done | error
+    checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+    data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class BidSkipRow(Base):
+    """A bidder skipped a job for one profile (e.g. its location doesn't suit the
+    profile's region). Skipped (profile, job) pairs drop out of that profile's Bid
+    queue only — the job stays live for every other profile."""
+    __tablename__ = 'bid_skips'
+
+    profile_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    skipped_by_user_id: Mapped[str] = mapped_column(String(64), default='')
+    skipped_by_username: Mapped[str] = mapped_column(String(255), default='')
+    reason: Mapped[str] = mapped_column(String(500), default='', server_default='')
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+
+
+class AutofillAnswerRow(Base):
+    """An application-form answer the extension learned for one profile.
+
+    `question_key` is the normalized question text (lowercase, alphanumerics,
+    single spaces, without "required"/"optional") so the same question on any
+    site maps to one row. Captured when a bidder clicks "Remember answers" in
+    the side panel; admins can edit or delete them in the Profiles tab."""
+    __tablename__ = 'autofill_answers'
+
+    profile_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    question_key: Mapped[str] = mapped_column(String(300), primary_key=True)
+    question: Mapped[str] = mapped_column(String(500), default='')
+    answer: Mapped[str] = mapped_column(String(2000), default='')
+    updated_by_username: Mapped[str] = mapped_column(String(255), default='')
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class AutofillLabelRow(Base):
+    """Shared (all profiles) knowledge that a form label means a known profile
+    field — e.g. "given name" → first_name. Learned when a bidder types a
+    profile's own value into a field the scanner didn't recognize."""
+    __tablename__ = 'autofill_labels'
+
+    label_key: Mapped[str] = mapped_column(String(300), primary_key=True)
+    field: Mapped[str] = mapped_column(String(64), default='')
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class CvQueueRow(Base):
+    """One CV being written by ChatGPT for one (profile, job) — the extension's work queue.
+
+    Kept on the server so nothing is lost when a browser or the extension closes: the
+    extension leases a row (lease_until), runs it in a hidden ChatGPT frame and reports back;
+    the server builds the CV the moment ChatGPT's JSON arrives. A lease that runs out puts the
+    work back in the queue. user_id is the bidder whose ChatGPT account does the writing (the
+    conversation lives there, so only their extension can delete it).
+
+    stage: queued → writing → ready | failed;  closing = the job is done while ChatGPT was still
+           working on it (whatever it reports is thrown away, its conversation deleted)
+    work:  '' | write | answer   (what the current lease is doing)
+    A conversation no longer needed moves to GptChatRow (deleted from the ChatGPT account).
+    delete_tries / retry_delete_at: unused since gpt_chats_to_delete (kept: SQLite columns stay)."""
+    __tablename__ = 'cv_queue'
+
+    profile_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True, default='')
+    username: Mapped[str] = mapped_column(String(255), default='')
+    company: Mapped[str] = mapped_column(String(255), default='')
+    job_title: Mapped[str] = mapped_column(String(255), default='')
+    stage: Mapped[str] = mapped_column(String(16), index=True, default='queued')
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    want: Mapped[list] = mapped_column(JSON, default=list)          # questions waiting for an answer
+    context: Mapped[str] = mapped_column(String(20000), default='')  # job + CV text, for a CV built by hand
+    conversation: Mapped[str] = mapped_column(String(500), default='')
+    resume_id: Mapped[str] = mapped_column(String(64), default='')
+    ats_score: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str] = mapped_column(String(1000), default='')
+    work: Mapped[str] = mapped_column(String(16), default='')
+    lease_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    lease_device: Mapped[str] = mapped_column(String(64), default='')
+    delete_tries: Mapped[int] = mapped_column(Integer, default=0)
+    retry_delete_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+
+
+class GptChatRow(Base):
+    """A ChatGPT conversation the extension created that is no longer needed: the owner's
+    extension deletes it from their ChatGPT account (a hidden frame calls ChatGPT's own
+    "Delete chat"), then the row goes. Every conversation is recorded the moment it exists
+    (the extension reports its URL as soon as ChatGPT opens it), so a failed CV, a retry, a
+    closed browser or a Disconnect never leaves one behind in the account.
+
+    device: the browser that created it (its ChatGPT account) — that browser deletes it; any
+    browser of the user may after a day. tries / retry_at: failed deletes wait longer each time."""
+    __tablename__ = 'gpt_chats_to_delete'
+
+    conversation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True, default='')
+    device: Mapped[str] = mapped_column(String(64), default='')
+    label: Mapped[str] = mapped_column(String(255), default='')     # company — job title
+    tries: Mapped[int] = mapped_column(Integer, default=0)
+    retry_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    lease_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    lease_device: Mapped[str] = mapped_column(String(64), default='')
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)

@@ -11,6 +11,7 @@ trail, not a security boundary.
 from __future__ import annotations
 
 import hashlib
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,7 @@ from user_agents import parse as ua_parse  # type: ignore[import-untyped]
 
 from .db import session_scope
 from .db.models import DeviceSessionRow
+from .storage import _write_lock
 
 
 _FINGERPRINT_SALT = "TAILORRESUME_DEVICE_FP_V1"
@@ -101,11 +103,15 @@ class DeviceStore:
         fp = fingerprint(user_id, ua_string)
         now = datetime.utcnow()
         with session_scope(self.db_path) as session:
+            # Two logins at once (two tabs, the extension + the web app) both used to see "no row" and
+            # each insert one; from then on scalar_one_or_none() raised on every login. The write lock
+            # serialises them; first() keeps any duplicate that already exists from breaking sign-in.
+            _write_lock(session)
             stmt = select(DeviceSessionRow).where(
                 DeviceSessionRow.user_id == user_id,
                 DeviceSessionRow.fingerprint == fp,
-            )
-            row = session.execute(stmt).scalar_one_or_none()
+            ).order_by(DeviceSessionRow.last_seen.desc())
+            row = session.execute(stmt).scalars().first()
             if row is None:
                 row = DeviceSessionRow(
                     id=f"dev_{uuid.uuid4().hex[:12]}",
@@ -127,12 +133,22 @@ class DeviceStore:
                 row.last_seen = now
                 row.ip = (ip or "")[:64]
                 row.user_agent = (ua_string or "")[:500]
-                # If admin previously revoked this device, fresh login un-revokes
-                # (admin can revoke again to kick out).
+                # A fresh login un-revokes the device (admin can revoke again to kick out) — but only
+                # for the token minted now: tokens_valid_after survives, so the JWTs that were revoked
+                # stay dead (the session id is the same, so the flag alone can't tell them apart).
+                if row.revoked and row.tokens_valid_after is None:
+                    row.tokens_valid_after = row.revoked_at or now   # revoked before this column existed
                 row.revoked = False
                 row.revoked_at = None
             session.flush()
-            return _row_to_dict(row)
+            result = _row_to_dict(row)
+        # token_problem() rejects iat <= floor(tokens_valid_after), and iat is whole seconds — a login in
+        # the same second as the revoke would mint a token that's dead on arrival. Wait out that second
+        # (outside the DB lock; at most once per revoke, and login runs in the threadpool).
+        cutoff = result["tokens_valid_after"]
+        if cutoff and int(time.time()) <= int(cutoff):
+            time.sleep(int(cutoff) + 1 - time.time())
+        return result
 
     def get(self, session_id: str) -> dict | None:
         with session_scope(self.db_path) as session:
@@ -158,8 +174,12 @@ class DeviceStore:
             row = session.get(DeviceSessionRow, session_id)
             if not row:
                 return False
+            now = datetime.utcnow()
             row.revoked = True
-            row.revoked_at = datetime.utcnow()
+            row.revoked_at = now
+            # Every JWT issued for this session up to now is dead for good, even after a re-login
+            # un-revokes the row (see record_login / auth.token_problem).
+            row.tokens_valid_after = now
             return True
 
     def delete(self, session_id: str) -> bool:
@@ -188,6 +208,10 @@ def _row_to_dict(row: DeviceSessionRow | None) -> dict:
         "last_seen": _iso(row.last_seen),
         "revoked": bool(row.revoked),
         "revoked_at": _iso(row.revoked_at) if row.revoked_at else "",
+        # epoch seconds (float, 0 = never revoked): tokens with iat at or before its second are invalid
+        "tokens_valid_after": (
+            row.tokens_valid_after.replace(tzinfo=timezone.utc).timestamp() if row.tokens_valid_after else 0.0
+        ),
     }
 
 

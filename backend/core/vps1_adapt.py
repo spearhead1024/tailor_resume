@@ -39,7 +39,7 @@ def profile(p: dict) -> dict:
 
 def user(u: dict) -> dict:
     """VPS_1 UserSummary → the dict Users.tsx renders. VPS_1 has a single `role`; the local table
-    reads `roles` (a list), so wrap it. Team/bid_method/assigned profiles don't exist on VPS_1."""
+    reads `roles` (a list), so wrap it. Team/assigned profiles don't exist on VPS_1."""
     role = str(u.get("role", "") or "").strip()
     return {
         "id": f"vps1:{u.get('id', '')}",

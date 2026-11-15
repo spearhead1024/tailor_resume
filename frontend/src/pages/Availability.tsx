@@ -13,6 +13,7 @@ import { api } from '../api/client';
 import { useToast } from '../lib/toast';
 import { useAuth, loadCurrentUser } from '../lib/auth';
 import { gmtLabel } from '../lib/TimezonePicker';
+import { dateKeyAt } from '../lib/availability';
 
 type DayKey = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat';
 type Slot = { on: boolean; start: string; end: string };
@@ -36,7 +37,12 @@ const DEFAULT_AVAIL: Availability = DAYS.reduce((a, d) => {
   return a;
 }, {} as Availability);
 
-const todayISO = () => new Date().toISOString().slice(0, 10);
+// "Today" in the person's own zone (Account time zone, else the browser's). toISOString() is the UTC
+// date: a US user after ~7pm couldn't pick today, and an Asian user before 9am could pick yesterday.
+const todayISO = (tz: string) => {
+  try { return dateKeyAt(Date.now(), tz || Intl.DateTimeFormat().resolvedOptions().timeZone); }
+  catch { return dateKeyAt(Date.now(), Intl.DateTimeFormat().resolvedOptions().timeZone); }
+};
 const prettyDate = (iso: string) => {
   const d = new Date(`${iso}T00:00:00`);
   return isNaN(d.getTime()) ? iso
@@ -130,7 +136,7 @@ export default function AvailabilityPage() {
             <strong>{gmtLabel(tz)}</strong> — <Link to="/account" className="link">change on Account</Link>
           </p>
         ) : (
-          <p style={{ color: '#f59e0b', fontSize: '0.8rem', margin: 0 }}>
+          <p style={{ color: 'var(--warning)', fontSize: '0.8rem', margin: 0 }}>
             ⚠ No time zone set — your hours mean nothing without one, and you will not appear on the
             calendar. <Link to="/account" className="link">Set it on Account</Link>.
           </p>
@@ -159,7 +165,7 @@ export default function AvailabilityPage() {
                     <input type="time" value={s.start} onChange={(e) => setDay(d.key, { start: e.target.value })} style={{ width: 120 }} />
                     <span className="muted">to</span>
                     <input type="time" value={s.end} onChange={(e) => setDay(d.key, { end: e.target.value })} style={{ width: 120 }} />
-                    {invalid && <span style={{ color: '#ef4444', fontSize: '0.78rem' }}>end must be after start</span>}
+                    {invalid && <span style={{ color: 'var(--danger)', fontSize: '0.78rem' }}>end must be after start</span>}
                   </>
                 ) : (
                   <span className="muted" style={{ fontSize: '0.82rem' }}>Not working</span>
@@ -189,9 +195,9 @@ export default function AvailabilityPage() {
             const clash = clashes.has(i);
             return (
               <div key={i} className="av-meeting" style={{
-                border: `1px solid ${bad || clash ? '#ef444455' : '#243355'}`,
+                border: `1px solid ${bad || clash ? '#ef444455' : 'var(--border-soft)'}`,
                 borderRadius: 10, padding: '10px 12px',
-                background: m.on ? '#141e35' : '#0f1629', opacity: m.on ? 1 : 0.6,
+                background: m.on ? 'var(--panel-2)' : 'var(--panel)', opacity: m.on ? 1 : 0.6,
               }}>
                 <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                   <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', textTransform: 'none', margin: 0 }}
@@ -232,8 +238,8 @@ export default function AvailabilityPage() {
                   </span>
                 </div>
 
-                {bad && <p style={{ color: '#ef4444', fontSize: '0.78rem', marginTop: 6 }}>End must be after start.</p>}
-                {clash && !bad && <p style={{ color: '#ef4444', fontSize: '0.78rem', marginTop: 6 }}>
+                {bad && <p style={{ color: 'var(--danger)', fontSize: '0.78rem', marginTop: 6 }}>End must be after start.</p>}
+                {clash && !bad && <p style={{ color: 'var(--danger)', fontSize: '0.78rem', marginTop: 6 }}>
                   This overlaps another meeting on the same day.
                 </p>}
               </div>
@@ -257,7 +263,7 @@ export default function AvailabilityPage() {
           One-off dates that override the week above — holidays, appointments, anything.
         </p>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <input type="date" min={todayISO()} value={newDayOff}
+          <input type="date" min={todayISO(tz)} value={newDayOff}
             onChange={(e) => setNewDayOff(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addDayOff(); } }}
             style={{ width: 180 }} />

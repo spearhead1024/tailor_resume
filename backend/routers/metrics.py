@@ -20,6 +20,7 @@ Response shape::
           "username":    "...",
           "profile_id":  "...",
           "profile_name":"...",
+          "assigned":    true,       # false = not their profile; shown for applies they made this week
           "daily":       [{applied, total}, ... 7 entries],
           "week":        {applied, total},
           "lifetime":    {applied, total}
@@ -40,11 +41,12 @@ from fastapi import APIRouter, Depends
 from auth import get_current_user, storage
 from core.storage import tech_stacks_match
 
-try:
-    from zoneinfo import ZoneInfo
-    _ET = ZoneInfo("America/New_York")
-except Exception:  # pragma: no cover
-    _ET = timezone(timedelta(hours=-5))  # type: ignore[arg-type]
+# The Metrics day starts at 5pm JST (UTC+9, no daylight saving) and runs to 5pm JST the next
+# day — i.e. 08:00 UTC, which is 3am EST / 4am EDT, so a US working day sits wholly inside one
+# Metrics day. A day is labelled by the JST date it STARTS on: "Mon" = Mon 5pm → Tue 5pm JST.
+# Every bucket on this tab (applications, job uploads, "this week") uses this boundary.
+_JST = timezone(timedelta(hours=9))
+_DAY_START = timedelta(hours=17)        # 5pm JST
 
 router = APIRouter(prefix="/api/metrics", tags=["metrics"])
 
@@ -60,18 +62,21 @@ def _monday_of(d: date) -> date:
     return d - timedelta(days=d.weekday())
 
 
-def _today_et() -> date:
-    """Today's date in US Eastern — the calendar the whole app keys on."""
-    return datetime.now(timezone.utc).astimezone(_ET).date()
+def _metrics_day(ts: datetime) -> date:
+    """The Metrics day an instant falls in (see _DAY_START)."""
+    return (ts.astimezone(_JST) - _DAY_START).date()
 
 
-def _et_date_str(iso_ts: str) -> str:
-    """The ET calendar date ('YYYY-MM-DD') of a UTC ISO timestamp.
+def _today() -> date:
+    """The Metrics day it is right now."""
+    return _metrics_day(datetime.now(timezone.utc))
 
-    Bucketing by the raw UTC date (a naive `iso[:10]`) misplaces anything from
-    the late-evening ET hours (early-morning UTC) onto the next day — e.g. a
-    job added 9pm Mon ET is 1am Tue UTC. Convert to ET first.
-    """
+
+def _day_str(iso_ts: str) -> str:
+    """The Metrics day ('YYYY-MM-DD') of a UTC ISO timestamp — "" if there is none.
+
+    Never bucket by the raw date text (`iso[:10]`): that is the UTC calendar day, which
+    does not line up with the 5pm JST boundary."""
     raw = str(iso_ts or "").strip()
     if not raw:
         return ""
@@ -81,7 +86,7 @@ def _et_date_str(iso_ts: str) -> str:
         return raw[:10]
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
-    return ts.astimezone(_ET).date().isoformat()
+    return _metrics_day(ts).isoformat()
 
 
 @router.get("")
@@ -91,7 +96,7 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
 
     # Workweek = Mon..Fri only (the team doesn't work weekends).
     requested = _parse_iso_date(week_start) if week_start else None
-    monday = _monday_of(requested or _today_et())
+    monday = _monday_of(requested or _today())
     friday = monday + timedelta(days=4)
     days = [monday + timedelta(days=i) for i in range(5)]
     day_strs = [d.isoformat() for d in days]
@@ -142,7 +147,7 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
     # actually marked it applied (applied_by_user_id), so a profile shared by
     # two bidders never leaks one bidder's applies onto the other.
     #
-    # The day bucket is the day the JOB was added (submitted_at, in ET) — NOT
+    # The day bucket is the day the JOB was added (submitted_at, by the 5pm-JST day) — NOT
     # the day the bidder clicked "applied". Each column is therefore "of the
     # jobs that arrived that day, how many has this bidder applied" — coverage
     # of the day's intake, which is how the team reads the grid (e.g. Tuesday
@@ -175,7 +180,7 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
         prof = profile_by_id.get(pid)
         if prof is None or not _job_eligible(job, prof):
             continue  # job no longer matches the profile's region/tech stacks
-        job_added = _et_date_str(job.get("submitted_at"))
+        job_added = _day_str(job.get("submitted_at"))
         if not job_added:
             continue
         for b in (applies[(applier, pid)], applies_by_profile[pid]):
@@ -185,7 +190,13 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
             if monday.isoformat() <= job_added <= friday.isoformat():
                 b["week_jobs"].add(job_id)
 
-    # Compose rows. For each user, emit one row per assigned profile.
+    # Compose rows. For each user, one row per assigned profile — plus one per profile they
+    # applied on THIS WEEK without being assigned to it. Admins work jobs on any profile, never
+    # assigned, so without these rows an admin's applies counted nowhere but the grand total.
+    applied_this_week: dict[str, list[str]] = defaultdict(list)
+    for (applier, pid), b in applies.items():
+        if b["week_jobs"]:
+            applied_this_week[applier].append(pid)
     rows: list[dict] = []
     # Per-profile to-do denominators, captured once per profile for the grand
     # total (and to de-duplicate profiles shared by several bidders).
@@ -193,12 +204,11 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
     for u in users:
         uid = u.get("id") or ""
         uname = u.get("username") or u.get("email") or uid
-        assigned = u.get("assigned_profile_ids") or []
-        if is_admin and not assigned:
-            # In the admin view, only show users who actually have profiles
-            # assigned. (Otherwise the table fills with empty rows.)
-            continue
-        for pid in assigned:
+        assigned = list(u.get("assigned_profile_ids") or [])
+        extra = sorted(set(applied_this_week.get(uid, ())) - set(assigned))
+        # A user with neither assigned profiles nor applies this week gets no rows (the table
+        # would fill with empty ones).
+        for pid in assigned + extra:
             prof = profile_by_id.get(pid)
             if not prof:
                 continue
@@ -208,7 +218,7 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
             p_added_per_day: dict[str, int] = defaultdict(int)
             p_added_in_week = 0
             for j in profile_jobs:
-                submitted = _et_date_str(j.get("submitted_at"))
+                submitted = _day_str(j.get("submitted_at"))
                 if not submitted:
                     continue
                 if submitted in day_strs:
@@ -221,6 +231,7 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
                 "username": uname,
                 "profile_id": pid,
                 "profile_name": prof.get("name", ""),
+                "assigned": pid in assigned,
                 "daily": [
                     {"applied": len(b["daily"].get(d, ())), "total": p_added_per_day.get(d, 0)}
                     for d in day_strs
@@ -235,8 +246,8 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
                 "lifetime": p_added_lifetime,
             }
 
-    # Stable sort: by username, then profile name.
-    rows.sort(key=lambda r: (r["username"].lower(), r["profile_name"].lower()))
+    # Stable sort: by username, then assigned profiles before the extra ones, then profile name.
+    rows.sort(key=lambda r: (r["username"].lower(), not r["assigned"], r["profile_name"].lower()))
 
     payload: dict = {
         "week_start": monday.isoformat(),
@@ -271,10 +282,11 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
             "lifetime": totals_lifetime,
         }
 
-    # ── Job-upload metrics (for job_adders) ────────────────────────────────
+    # ── Job-upload metrics ─────────────────────────────────────────────────
     # Per uploader: how many jobs they added, broken down by approved/rejected,
-    # bucketed by the upload date (submitted_at). Synced jobs have no uploader,
-    # so they're excluded; deleted jobs don't count as an "upload".
+    # bucketed by the upload date (submitted_at). Synced jobs have no local uploader
+    # (their adder is a VPS1 account), so they're excluded; deleted jobs don't count
+    # as an "upload".
     def _zero_job() -> dict:
         return {"uploaded": 0, "approved": 0, "rejected": 0}
 
@@ -296,7 +308,7 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
         st = str(j.get("status") or "")
         if st == "deleted":
             continue
-        added = _et_date_str(j.get("submitted_at"))
+        added = _day_str(j.get("submitted_at"))
         if not added:
             continue
         b = job_buckets[uid]
@@ -306,13 +318,15 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
         if monday.isoformat() <= added <= friday.isoformat():
             _bump(b["week"], st)
 
-    # One row per job_adder (admins see all; a bidder/job_adder sees themselves
-    # because `users` was already filtered above for non-admins).
+    # One row per job_adder, and per anyone else who added a job THIS WEEK (an admin adding jobs
+    # by hand used to count nowhere). Admins see all; everyone else sees themselves, because
+    # `users` was already filtered above for non-admins.
     job_rows: list[dict] = []
     for u in users:
-        if "job_adder" not in set(u.get("roles") or []):
-            continue
         uid = u.get("id") or ""
+        added_this_week = uid in job_buckets and job_buckets[uid]["week"]["uploaded"] > 0
+        if "job_adder" not in set(u.get("roles") or []) and not added_this_week:
+            continue
         uname = u.get("username") or u.get("email") or uid
         b = job_buckets.get(uid) or {"daily": {}, "week": _zero_job(), "lifetime": _zero_job()}
         job_rows.append({

@@ -6,13 +6,12 @@ Per interview (times shown on each RECIPIENT's own timezone):
     in Settings → Notifications — no per-user override for this one.
   • CREATER — a heads-up before the call to whoever booked it, at EVERY lead time THAT PERSON has
     configured on their own Account page (a list — e.g. a 90-min AND a 30-min heads-up can both fire);
-    names the caller. Only fires once the row's Approved cell is exactly "Confirmed". Whether the
-    feature runs at all is a global admin switch (Settings → Notifications); WHEN it fires is each
+    names the caller. Whether the feature runs at all is a global admin switch (Settings → Notifications); WHEN it fires is each
     creater's own choice — a shared app-wide time used to mean one admin's preference silently became
     every other admin's too.
   • CALL BOARD MANAGER — the same shape as the creater's heads-up (EACH manager's own configured list
     of lead times, on their own Account page) to EVERY user holding the 'call_board_manager' role, for
-    every scheduled call they aren't already personally on. Also gated on Approved: Confirmed.
+    every scheduled call they aren't already personally on.
 
 Board edits (assignment, reassignment, status/content changes, chat/feedback replies) notify
 separately — see core/live.py — and never ring.
@@ -26,17 +25,15 @@ schedule-relative ones.
 The 7pm / 8am caller digests need the caller's profile timezone; without one, only the lead / creater
 / board-manager reminders (which are absolute — a fixed offset from the call) can fire.
 
-Creater/CBM reminders additionally require Approved == "Confirmed" — a call still Pending or Rejected
-isn't settled enough to be worth a heads-up to whoever booked it or oversees the board. This gate is
-scoped to creater/CBM ONLY: the caller's own lead reminder and the daily digests are unaffected and
-still fire on Status == "Scheduled" alone (see NOTIFY_STATUS) — a caller/team-manager hears about a
-call the moment it's booked, same as always.
+Every reminder — caller, creater and CBM alike — is gated on Status == "Scheduled" alone (see
+NOTIFY_STATUS): the moment a call becomes anything else it goes silent.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -103,10 +100,17 @@ def snooze_add(user_id: str, payload: dict, minutes: int = 5) -> None:
     """Re-send this alarm in `minutes`. Persisted, so a server restart doesn't lose it."""
     minutes = min(max(int(minutes or 5), 1), 120)
     due = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    uid = str(user_id)
     with _lock:
         items = _read_snooze()
-        items.append({"at": due.isoformat(), "user_id": str(user_id), "payload": payload})
-        _write_snooze(items[-500:])
+        # Cap PER PERSON (a ticket can be replayed): one user hammering Snooze must only crowd out
+        # their own pending alarms — the old global [-500:] cut could evict everyone else's.
+        mine = [it for it in items if it.get("user_id") == uid]
+        if len(mine) >= 20:
+            drop = mine[0]
+            items = [it for it in items if it is not drop]
+        items.append({"at": due.isoformat(), "user_id": uid, "payload": payload})
+        _write_snooze(items[-2000:])
 
 
 def run_due_snoozes() -> int:
@@ -114,21 +118,27 @@ def run_due_snoozes() -> int:
     now = datetime.now(timezone.utc)
     with _lock:
         items = _read_snooze()
-    due, keep = [], []
+    due, keep, junk = [], [], []
     for it in items:
         try:
             when = datetime.fromisoformat(str(it.get("at", "")).replace("Z", "+00:00"))
         except Exception:
-            continue                     # unparseable → drop it rather than retry forever
+            junk.append(it)              # unparseable → drop it rather than retry forever
+            continue
         (due if when <= now else keep).append(it)
     for it in due:
         try:
             push.send_push(it["user_id"], it["payload"])
         except Exception:
             log.exception("snoozed alarm failed")
-    if due:
+    if due or junk:
+        # Re-read at write time and remove only what was sent (and the junk): a Snooze tapped while the
+        # pushes above were in flight was appended meanwhile, and writing back `keep` would drop it.
+        sent_ids = {id(it) for it in due + junk}
+        sent = [it for it in items if id(it) in sent_ids]
         with _lock:
-            _write_snooze(keep)
+            current = _read_snooze()
+            _write_snooze([it for it in current if it not in sent])
     return len(due)
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
@@ -278,9 +288,6 @@ def _upcoming(now: datetime) -> list[dict]:
             "creater": _resolve_person(creater_name) if creater_name else None,
             "creater_name": creater_name,                              # raw cell text — shown to the CBM,
                                                                         # independent of whether it resolved
-            # Whether the call is actually agreed — the creater/CBM heads-up requires this to be
-            # exactly "Confirmed" (see run_due_reminders); the caller/team-manager lead does not.
-            "approved": str(cells.get("c_approved", "") or "").strip(),
         })
     return out
 
@@ -521,15 +528,12 @@ def run_due_reminders() -> int:
     #      caller so they know who's covering it. Times are shown on the CREATER's clock, since it's
     #      their reminder. The CREATER configures their OWN several lead times (their Account page,
     #      creator_lead_minutes_list — e.g. a 90-min AND a 30-min heads-up), each firing independently;
-    #      creator_enabled here is just the whole-feature admin switch. Only fires once the row is
-    #      Approved: Confirmed. Scoped to creater/CBM only; the caller's lead above is unaffected.
+    #      creator_enabled here is just the whole-feature admin switch.
     if cfg.get("creator_enabled", True):
         for c in calls:
             creater = c.get("creater")
             if not creater:
                 continue                       # nobody in the Creater cell (or it matched no user)
-            if str(c.get("approved", "")).strip().lower() != "confirmed":
-                continue                        # not yet Approved: Confirmed → too soon to remind
             for lead in _person_lead_minutes(creater, "creator_lead_minutes_list", [90]):
                 # Keyed on row + lead + scheduled time, so moving the call re-arms it: a reschedule
                 # sends a fresh heads-up for the NEW time. It fires at most once per (row, lead, time),
@@ -553,14 +557,12 @@ def run_due_reminders() -> int:
     # (1c) the CALL-BOARD MANAGER's heads-up, shaped like the creater's: each manager's OWN configured
     #      list of lead times (their Account page), independent of every other CBM's and the creater's.
     #      A call-board manager oversees the WHOLE board, so — unlike the creater, who is one person
-    #      per call — every user holding the role gets it before EVERY scheduled call. Same Approved:
-    #      Confirmed gate as the creater's. Skipped for a call this manager is already personally on
-    #      (its caller or creater): they get a call-specific reminder already.
+    #      per call — every user holding the role gets it before EVERY scheduled call. Skipped for a
+    #      call this manager is already personally on (its caller or creater): they get a
+    #      call-specific reminder already.
     if cfg.get("cbm_enabled", True):
         managers = _call_board_managers()
         for c in calls:
-            if str(c.get("approved", "")).strip().lower() != "confirmed":
-                continue                        # not yet Approved: Confirmed → too soon to remind
             caller_uid = str(c["user"]["id"])
             creater_uid = str((c.get("creater") or {}).get("id", ""))
             for mgr in managers:
@@ -641,9 +643,22 @@ def run_due_reminders() -> int:
     if dirty:
         with _lock:
             state = _read_state()
-            state["sent"] = sorted(set(state.get("sent", [])) | sent)[-5000:]   # cap growth
+            state["sent"] = _prune_sent(set(state.get("sent", [])) | sent)
             _write_state(state)
     return fired
+
+
+def _prune_sent(keys: set[str]) -> list[str]:
+    """Bound the "already sent" set by AGE: every key embeds the call's date/time (or the digest day),
+    and a reminder more than 3 days past can never fire again. (The old cap kept the alphabetically
+    last 5000 keys, which would evict live rows' keys at random and let them re-fire.)"""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=3)).date().isoformat()
+    out = set()
+    for k in keys:
+        m = re.search(r"\d{4}-\d{2}-\d{2}", k)
+        if not m or m.group(0) >= cutoff:
+            out.add(k)
+    return sorted(out)
 
 
 _sched_lock_handle = None   # kept open for the process's lifetime, so the OS lock is held

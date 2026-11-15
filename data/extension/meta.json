@@ -1,6 +1,6 @@
 {
-  "version": "0.4.2",
+  "version": "1.3.1",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "v0.4.2 \u2014 fixes 'repeated N times' screenshots: removed the scroll-and-stitch entirely. Full-page capture is now a single DevTools pass (no tiling); if the debugger permission isn't active it cleanly saves the visible area and tells you to enable it.",
-  "built_at": "2026-06-16T16:44:42Z"
+  "changelog": "v1.3.1 \u2014 ChatGPT chats are deleted, not just closed: every chat the extension opens is recorded on the server the moment it opens and deleted from your ChatGPT account as soon as it is no longer needed \u2014 job applied / skipped / reported, a failed or re-written CV, a browser closed mid-write, 2 hours unused, or Disconnect (which deletes every chat it kept; the CVs and answers stay). Deleting carries on in the background after Disconnect. The panel shows how many chats are waiting to be deleted.",
+  "built_at": "2026-11-13T08:59:52Z"
 }

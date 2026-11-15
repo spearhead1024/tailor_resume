@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useToast } from '../lib/toast';
+import { useUrlState } from '../lib/urlState';
+import CompanyBadge, { type CompanyInfo } from '../lib/CompanyBadge';
 
 type Edu = { university: string; degree: string; duration: string; location: string };
 type Work = { company_name: string; duration: string; location: string; legacy_role: string };
@@ -13,6 +15,7 @@ type BidProfile = {
 type BidJob = {
   id: string; company: string; job_title: string; region: string;
   link: string; submitted_at: string; resume_id: string;
+  company_info?: CompanyInfo | null;
 };
 type JobDetail = BidJob & { description: string };
 type StepState = 'active' | 'done' | 'todo';
@@ -147,7 +150,7 @@ function ResumePreview({ resumeId, profileName }: { resumeId: string; profileNam
             ⭳ Download PDF
           </button>
         </div>
-        <div style={{ flex: 1, minHeight: 0, background: '#262626' }}>
+        <div style={{ flex: 1, minHeight: 0, background: 'var(--preview-bg)' }}>
           {!resumeId && (
             <div className="muted" style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '2rem' }}>
               Generate a resume to preview it here.
@@ -192,7 +195,7 @@ function BidJobView({ job, profile, onAdvance }: { job: BidJob; profile: BidProf
   const [resumeId, setResumeId] = useState(job.resume_id || '');
   const [jsonText, setJsonText] = useState('');
   const [downloaded, setDownloaded] = useState(false);
-  const [busy, setBusy] = useState<'' | 'prompt' | 'gen' | 'dl' | 'apply' | 'report'>('');
+  const [busy, setBusy] = useState<'' | 'prompt' | 'gen' | 'dl' | 'apply' | 'report' | 'skip'>('');
 
   const [descOpen, setDescOpen] = useState(false);
   const [detail, setDetail] = useState<JobDetail | null>(null);
@@ -259,7 +262,7 @@ function BidJobView({ job, profile, onAdvance }: { job: BidJob; profile: BidProf
     setBusy('gen');
     try {
       const res = await api.post<{ ok: boolean; saved_resume_id: string }>(
-        '/api/resumes/generate-from-json', { json_text: text, profile_id: profile.id },
+        '/api/resumes/generate-from-json', { json_text: text, profile_id: profile.id, job_id: job.id },
       );
       setResumeId(res.saved_resume_id);
       track('generate');
@@ -323,6 +326,27 @@ function BidJobView({ job, profile, onAdvance }: { job: BidJob; profile: BidProf
     }
   };
 
+  // Skip: this job isn't right for this profile (e.g. its location doesn't suit the
+  // profile's region) — it leaves this profile's queue only; other profiles keep it.
+  const skipJob = async () => {
+    if (busy) return;
+    // Same as Report: confirm + a reason in one step; Cancel aborts.
+    const reason = window.prompt(`Are you sure skip this job?\n"${job.company} · ${job.job_title}" — why doesn't it suit ${profile.name}? (e.g. location / region, tech stack)`);
+    if (reason === null) return;
+    const trimmed = reason.trim();
+    if (!trimmed) { toast('A reason is required', 'error'); return; }
+    setBusy('skip');
+    try {
+      await api.post('/api/resumes/bid/skip', { profile_id: profile.id, job_id: job.id, reason: trimmed });
+      track('skip');
+      toast(`Skipped — ${job.company}`, 'success');
+      refresh();
+    } catch (e: any) {
+      toast(e?.response?.data?.detail || 'Failed to skip job', 'error');
+      setBusy('');
+    }
+  };
+
   const innerBox: CSSProperties = { border: '1px solid var(--border, #2a3344)', borderRadius: 12, padding: '0.85rem 0.95rem', marginTop: 12 };
 
   return (
@@ -336,6 +360,7 @@ function BidJobView({ job, profile, onAdvance }: { job: BidJob; profile: BidProf
               <span style={{ fontSize: '0.68rem', marginLeft: 8, background: 'var(--border,#334155)', borderRadius: 4, padding: '1px 6px' }}>{job.region}</span>
             </div>
             <div className="muted" style={{ fontSize: '0.82rem' }}>{job.job_title || '—'}</div>
+            <div style={{ marginTop: 4 }}><CompanyBadge info={job.company_info} /></div>
           </div>
           <button className="secondary" onClick={viewDescription} style={{ flex: '0 0 auto' }}>View JD</button>
         </div>
@@ -374,13 +399,16 @@ function BidJobView({ job, profile, onAdvance }: { job: BidJob; profile: BidProf
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
             <StepBadge n={3} state={s3} /><strong>Finish</strong>
           </div>
-          <div className="muted" style={{ fontSize: '0.8rem', marginLeft: 36, marginBottom: 10 }}>Mark as applied or report this job.</div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          <div className="muted" style={{ fontSize: '0.8rem', marginLeft: 36, marginBottom: 10 }}>Mark as applied, report this job, or skip it for this profile.</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
             <button onClick={markApplied} title="Mark this job as applied">
               {busy === 'apply' ? <span className="spinner" /> : 'Mark as Applied'}
             </button>
             <button className="danger" onClick={reportJob}>
               {busy === 'report' ? <span className="spinner" /> : 'Report Job'}
+            </button>
+            <button className="secondary" onClick={skipJob} title="Not for this profile — removes the job from this profile's queue only">
+              {busy === 'skip' ? <span className="spinner" /> : 'Skip Job'}
             </button>
           </div>
         </div>
@@ -411,6 +439,61 @@ function BidJobView({ job, profile, onAdvance }: { job: BidJob; profile: BidProf
   );
 }
 
+/* ---- Searchable job picker (same combobox pattern as the timezone picker) ---- */
+function JobPicker({ jobs, value, onChange }: { jobs: BidJob[]; value: string; onChange: (id: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState('');
+  const [hl, setHl] = useState(0);
+  const ref = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+  useEffect(() => { if (open) { setQ(''); setHl(0); setTimeout(() => inputRef.current?.focus(), 0); } }, [open]);
+
+  const label = (j: BidJob) => `${j.company} · ${j.job_title}${j.region && j.region !== 'ANY' ? ` · ${j.region}` : ''}`;
+  const terms = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const filtered = terms.length
+    ? jobs.filter((j) => { const s = `${j.company} ${j.job_title} ${j.region}`.toLowerCase(); return terms.every((t) => s.includes(t)); })
+    : jobs;
+  const selected = jobs.find((j) => j.id === value);
+  const pick = (id: string) => { onChange(id); setOpen(false); };
+
+  return (
+    <div ref={ref} className="tz-picker">
+      <button type="button" className="tz-btn" onClick={() => setOpen((o) => !o)}>
+        <span className={selected ? '' : 'muted'} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {selected ? label(selected) : '— Select job —'}
+        </span>
+        <span style={{ opacity: 0.6 }}>▾</span>
+      </button>
+      {open && (
+        <div className="card tz-menu">
+          <input ref={inputRef} className="tz-search" value={q} placeholder="Search company or title…"
+            onChange={(e) => { setQ(e.target.value); setHl(0); }}
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowDown') { e.preventDefault(); setHl((h) => Math.min(filtered.length - 1, h + 1)); }
+              else if (e.key === 'ArrowUp') { e.preventDefault(); setHl((h) => Math.max(0, h - 1)); }
+              else if (e.key === 'Enter') { e.preventDefault(); if (filtered[hl]) pick(filtered[hl].id); }
+              else if (e.key === 'Escape') { e.preventDefault(); setOpen(false); }
+            }} />
+          <div className="tz-list">
+            {filtered.length === 0 && <div className="muted" style={{ padding: 8, fontSize: '0.82rem' }}>No matches</div>}
+            {filtered.map((j, i) => (
+              <div key={j.id} className={'tz-opt' + (i === hl ? ' tz-opt--hl' : '') + (j.id === value ? ' tz-opt--sel' : '')}
+                onMouseEnter={() => setHl(i)} onClick={() => pick(j.id)}>{label(j)}</div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ------------------------------- Page ---------------------------------- */
 
 export default function Bid() {
@@ -420,7 +503,8 @@ export default function Bid() {
     queryFn: () => api.get<{ role: string; profiles: BidProfile[] }>('/api/resumes/bid/profiles'),
   });
   const profiles: BidProfile[] = data?.profiles || [];
-  const [profileId, setProfileId] = useState('');
+  // The selected profile and job live in the URL (lib/urlState) — a refresh keeps them.
+  const [profileId, setProfileId] = useUrlState('profile', '');
 
   useEffect(() => {
     if (profiles.length === 0) return;
@@ -439,9 +523,23 @@ export default function Bid() {
     queryFn: () => api.get<BidJob[]>(`/api/resumes/bid?profile_id=${encodeURIComponent(profileId)}`),
     enabled: !!profileId,
   });
-  const currentJob = queue[0];
+
+  // Which job in the queue is being worked on. Defaults to the latest (top of the
+  // queue — it's already deadline-filtered and sorted newest-first); the search
+  // picker can override it. Reset to the top whenever the queue changes (profile
+  // switch, or a job leaves the queue after apply) unless the current pick is still
+  // present.
+  const [selectedJobId, setSelectedJobId] = useUrlState('job', '');
+  useEffect(() => {
+    if (queueLoading || !profileId) return;   // don't drop the job restored from the URL before the queue arrives
+    if (queue.length === 0) { setSelectedJobId(''); return; }
+    if (!queue.find((j) => j.id === selectedJobId)) setSelectedJobId(queue[0].id);
+  }, [queue, queueLoading, profileId, selectedJobId, setSelectedJobId]);
+  const currentJob = queue.find((j) => j.id === selectedJobId) || queue[0];
 
   const advance = () => {
+    // The applied job drops out of the queue; fall back to the latest in queue.
+    setSelectedJobId('');
     qc.invalidateQueries({ queryKey: ['bid', 'queue', profileId] });
     qc.invalidateQueries({ queryKey: ['bid', 'profiles'] });
     qc.invalidateQueries({ queryKey: ['metrics'] });
@@ -469,15 +567,23 @@ export default function Bid() {
         </div>
       </div>
 
-      <div style={{ margin: '1rem 0' }}>
-        <div className="muted" style={{ fontSize: '0.66rem', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>Select profile</div>
-        <select value={profileId} onChange={(e) => setProfileId(e.target.value)} style={{ width: '100%' }}>
-          {profiles.map((p) => (
-            <option key={p.id} value={p.id}>
-              {`${p.name} · ${p.status === 'restricted' ? 'Restricted' : 'Active'} · ${p.bid_count} to bid`}
-            </option>
-          ))}
-        </select>
+      <div style={{ display: 'flex', gap: 12, margin: '1rem 0', flexWrap: 'wrap' }}>
+        <div style={{ flex: '1 1 260px', minWidth: 220 }}>
+          <div className="muted" style={{ fontSize: '0.66rem', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>Select profile</div>
+          <select value={profileId} onChange={(e) => { setProfileId(e.target.value); setSelectedJobId(''); }} style={{ width: '100%' }}>
+            {profiles.map((p) => (
+              <option key={p.id} value={p.id}>
+                {`${p.name} · ${p.status === 'restricted' ? 'Restricted' : 'Active'} · ${p.bid_count} to bid`}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div style={{ flex: '1 1 320px', minWidth: 260 }}>
+          <div className="muted" style={{ fontSize: '0.66rem', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>
+            Select job {queue.length > 0 && <span style={{ textTransform: 'none', letterSpacing: 0 }}>({queue.length} in queue)</span>}
+          </div>
+          <JobPicker jobs={queue} value={currentJob?.id || ''} onChange={setSelectedJobId} />
+        </div>
       </div>
 
       {queueLoading ? (
