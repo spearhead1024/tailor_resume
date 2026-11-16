@@ -71,6 +71,10 @@ have (e.g. Segoe Print → DejaVu Sans). Templates use Windows fonts, so copy `C
 from a licensed Windows PC into `Fonts/` on the server (kept out of git: the repo is public and
 Microsoft's licence forbids publishing them), then run `sudo ops/install_fonts.sh`.
 
+Lora is installed **italic-only on purpose** (upright files sit in `Fonts/not-installed/`, which the
+script skips). Farhan's template asks for upright "Lora", but the PC it is designed on has only
+the italic face, so Word shows it italic — and the CVs must look like that.
+
 ## Migration notes
 
 - Copied `core/` modules unchanged from `/var/@Resume-Generator/core/`.
