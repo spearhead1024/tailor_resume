@@ -76,5 +76,19 @@ module.exports = {
       autorestart: true,
       restart_delay: 5000,
     },
+    {
+      // CI/CD: GitHub Actions calls https://<site>/deploy-hook after CI passes on main; this starts
+      // ops/deploy.sh (pull, build, restart, health check, rollback). Standard-library Python and
+      // separate from the API, so a broken API never blocks deploying its fix. See ops/deploy_hook.py.
+      name: 'deploy-hook',
+      cwd: '/var/@TailorResume',
+      script: '/usr/bin/python3',
+      args: 'ops/deploy_hook.py',
+      interpreter: 'none',
+      env: { PYTHONUNBUFFERED: '1' },
+      max_memory_restart: '128M',
+      autorestart: true,
+      restart_delay: 5000,
+    },
   ],
 };

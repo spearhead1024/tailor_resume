@@ -32,6 +32,16 @@ server {
         client_max_body_size 25M;
     }
 
+    # CI/CD deploy hook (ops/deploy_hook.py, pm2 "deploy-hook") — see README "CI/CD".
+    location ^~ /deploy-hook {
+        proxy_pass http://127.0.0.1:8510;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        client_max_body_size 8k;
+        proxy_read_timeout 30;
+        add_header Cache-Control "no-store" always;
+    }
+
     # SPA fallback — all other routes serve index.html
     # index.html (and every SPA route that falls back to it) and sw.js must never be cached:
     # with no Cache-Control a browser guesses a lifetime from Last-Modified, and after a quiet

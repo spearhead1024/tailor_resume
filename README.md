@@ -64,6 +64,38 @@ pm2 start /var/@TailorResume/ecosystem.config.js
 
 nginx config: see `nginx.conf.example`.
 
+### CI/CD — push to `main` and it goes live
+
+```
+git push ──► GitHub Actions (.github/workflows/ci-cd.yml)
+              ├─ backend:   pip install, compile, import the app
+              ├─ frontend:  npm ci, npm run build (type-check)
+              ├─ extension: every script parses
+              └─ deploy (main only, after all 3 pass)
+                   └─► POST https://tailorresume.duckdns.org/deploy-hook   (HMAC-signed)
+                         └─► server: ops/deploy.sh <sha>
+                               fetch → fast-forward pull → rebuild/restart only what changed
+                               → /api/health → done, or roll back to the previous commit
+```
+
+- **Every branch and pull request** gets the CI checks; only `main` deploys. Work on a branch, open a
+  PR, merge when it's green — the merge deploys.
+- **What a deploy does** (only for what the push changed): `backend/requirements.txt` → pip install;
+  `frontend/` → build into `dist.new` and swap (the site is never half-built); `backend/` → restart
+  `tailorresume-v2 job-sync company-intel vps1-sync` and wait for `/api/health`; `ecosystem.config.js`
+  → `pm2 startOrRestart`. New DB columns are added by the API itself at start (additive only).
+- **Any failure rolls back** to the previous commit and frontend; the Actions run shows
+  `rolled_back` / `failed` with the step, and GitHub emails whoever pushed.
+- **The server never overwrites work**: it only fast-forwards. If someone edited tracked files on
+  the server, or committed there without pushing, the deploy stops and says so — push those
+  commits (or discard the edits) and re-run the workflow.
+- **Not automatic**: publishing the browser extension (`python ops/build_extension.py …`, after
+  bumping its version) and nginx changes.
+- **Logs** on the server: `data/deploy/logs/` (last 50 runs), state in `data/deploy/runs/<sha>.json`;
+  the hook itself: `pm2 logs deploy-hook`. Deploy by hand: `ops/deploy.sh <full sha>`.
+- **Secret**: `/etc/tailorresume/deploy.secret` on the server = repo secret `DEPLOY_SECRET`. To
+  rotate: write a new value to both (`gh secret set DEPLOY_SECRET < /etc/tailorresume/deploy.secret`).
+
 ### Fonts for CV PDFs
 
 PDFs are made from each profile's uploaded DOCX by LibreOffice, which swaps any font it doesn't

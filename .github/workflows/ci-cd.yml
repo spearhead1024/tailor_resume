@@ -1,0 +1,102 @@
+# CI on every push and pull request; on `main`, once CI passes, deploy to the server.
+#
+# Deploy = a signed request to https://tailorresume.duckdns.org/deploy-hook (ops/deploy_hook.py),
+# which runs ops/deploy.sh on the server: fast-forward pull, rebuild/restart only what changed,
+# health check, automatic rollback on failure. This job waits for the result, so a failed deploy
+# fails the run (and GitHub emails whoever pushed). Needs the repo secret DEPLOY_SECRET — the same
+# value as /etc/tailorresume/deploy.secret on the server.
+name: CI/CD
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (compile + import)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: pip install -r backend/requirements.txt
+      - name: Compile every module
+        run: python -m compileall -q backend
+      - name: Import the app (catches missing imports / names at load time)
+        working-directory: backend
+        run: timeout 120 python -c "import main; print(len(main.app.routes), 'routes')"
+
+  frontend:
+    name: Frontend (type-check + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+
+  extension:
+    name: Extension (syntax)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - name: Parse every script (ES modules checked as modules)
+        run: |
+          status=0
+          for f in $(git ls-files 'extension/*.js' 'extension-dev/*.js'); do
+            node --check "$f" 2>/dev/null && continue
+            cp "$f" "$RUNNER_TEMP/check.mjs"
+            node --check "$RUNNER_TEMP/check.mjs" || { echo "::error file=$f::syntax error"; status=1; }
+          done
+          exit $status
+
+  deploy:
+    name: Deploy to tailorresume.duckdns.org
+    needs: [backend, frontend, extension]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false     # every push deploys, one after another, in order
+    steps:
+      - name: Deploy and wait for the result
+        env:
+          DEPLOY_SECRET: ${{ secrets.DEPLOY_SECRET }}
+          SHA: ${{ github.sha }}
+          HOOK: https://tailorresume.duckdns.org/deploy-hook
+        run: |
+          if [ -z "$DEPLOY_SECRET" ]; then echo "::error::repo secret DEPLOY_SECRET is not set"; exit 1; fi
+          body=$(printf '{"sha":"%s","ts":%s}' "$SHA" "$(date +%s)")
+          sig=$(printf '%s' "$body" | openssl dgst -sha256 -hmac "$DEPLOY_SECRET" -r | cut -d' ' -f1)
+          curl -fsS -X POST -H 'Content-Type: application/json' -H "X-Deploy-Signature: sha256=$sig" \
+               --data "$body" "$HOOK"
+          echo
+          last=""
+          for i in $(seq 1 90); do        # up to 15 minutes
+            sleep 10
+            s=$(curl -sS "$HOOK/status/$SHA" || true)
+            state=$(jq -r '.state // "unknown"' <<<"$s" 2>/dev/null || echo unknown)
+            line="$state — $(jq -r '.step // ""' <<<"$s" 2>/dev/null): $(jq -r '.message // ""' <<<"$s" 2>/dev/null)"
+            [ "$line" != "$last" ] && echo "$line" && last="$line"
+            case "$state" in
+              success) exit 0 ;;
+              failed|rolled_back) echo "::error::deploy $state: $(jq -r .message <<<"$s")"; exit 1 ;;
+            esac
+          done
+          echo "::error::no result after 15 minutes — check data/deploy/logs on the server"; exit 1

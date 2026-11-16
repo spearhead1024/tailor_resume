@@ -54,3 +54,6 @@ data/extension/previous/
 
 # Windows fonts copied from a licensed PC (ops/install_fonts.sh) — never publish them
 Fonts/
+
+# CI/CD deploy state + logs (ops/deploy.sh)
+data/deploy/
