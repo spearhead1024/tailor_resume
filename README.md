@@ -27,6 +27,11 @@ Full-stack rewrite of the Streamlit Resume Generator. FastAPI backend + React (V
 
 ## Local development
 
+**New here?** Clone, run the backend + frontend below, work on a branch, open a pull request.
+Merging to `main` runs CI and puts it live on https://tailorresume.duckdns.org within a few
+minutes — see [CI/CD](#cicd--push-to-main-and-it-goes-live). Install Python packages from
+`backend/requirements.lock` (the exact versions production runs), not `requirements.txt`.
+
 ```bash
 # Backend
 cd backend

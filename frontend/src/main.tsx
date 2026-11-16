@@ -1,3 +1,4 @@
+// Entry point. Pushing to main deploys this app (README "CI/CD"): built on the server, then swapped live.
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
