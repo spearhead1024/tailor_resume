@@ -24,6 +24,18 @@ if [ -d "$SRC" ]; then
   mkdir -p "$DEST"
   find "$SRC" -maxdepth 1 -type f \( -iname '*.ttf' -o -iname '*.ttc' -o -iname '*.otf' \) -exec cp -p {} "$DEST"/ \;
   chmod 644 "$DEST"/*
+  # A variable font (one file, every weight) is skipped when the same family also has static
+  # files: LibreOffice embeds a variable font's bold/italic in the PDF as Type 3 glyph drawings,
+  # which some ATS parsers can't read; static files embed as normal TrueType.
+  is_variable() { fc-query -f '%{variable}\n' "$1" 2>/dev/null | grep -q True; }
+  family_of() { fc-query -f '%{family[0]}\n' "$1" 2>/dev/null | head -1; }
+  declare -A static_family=()
+  for f in "$DEST"/*; do is_variable "$f" || static_family["$(family_of "$f")"]=1; done
+  for f in "$DEST"/*; do
+    if is_variable "$f" && [ -n "${static_family["$(family_of "$f")"]:-}" ]; then
+      rm -f "$f"; echo "Skipped variable $(basename "$f") — static files of $(family_of "$SRC/$(basename "$f")") are installed"
+    fi
+  done
   echo "Installed $(ls "$DEST" | wc -l) Windows fonts into $DEST"
   # The Windows set has newer copies of the old "core fonts" package: keep one copy of each.
   apt-get purge -y -q ttf-mscorefonts-installer >/dev/null 2>&1 || true
