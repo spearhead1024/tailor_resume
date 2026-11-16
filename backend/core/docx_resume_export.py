@@ -19,6 +19,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
+from lxml import etree
 
 from core.resume_engine import KNOWN_TECH_TERMS
 
@@ -152,6 +153,11 @@ def _all_story_paragraphs(doc: Document) -> list[Paragraph]:
             section.even_page_footer,
         ):
             try:
+                # Skip a header/footer the template doesn't define: reading .part / ._element of one
+                # makes python-docx CREATE it, and those new empty headers pushed the whole CV down
+                # (LibreOffice reserves the header distance, larger than many templates' top margin).
+                if container.is_linked_to_previous:
+                    continue
                 part_id = id(container.part)
             except Exception:
                 continue
@@ -177,6 +183,93 @@ def _first_meaningful_run_or_none(paragraph: Paragraph):
     return _first_run_or_none(paragraph)
 
 
+def _text_runs(paragraph: Paragraph) -> list:
+    return [run for run in paragraph.runs if str(run.text or "").strip()]
+
+
+def _run_is_bold(run) -> bool:
+    """Bold directly (<w:b/>) or through its character style (e.g. a "Strong" style, whatever its
+    id — templates use "13", "16", …), following the style's based-on chain."""
+    try:
+        if run.bold is not None:
+            return bool(run.bold)
+        style = run.style
+        for _ in range(10):
+            if style is None:
+                break
+            if style.font.bold is not None:
+                return bool(style.font.bold)
+            style = style.base_style
+    except Exception:
+        pass
+    return False
+
+
+def _body_run(paragraph: Paragraph):
+    """The run that carries the paragraph's plain body text: the longest non-bold run.
+
+    Generated text copies this run's formatting (font, size, colour, italic, …). The first run is
+    a poor sample when a line opens with an emphasised word ("**Led** a team…"); its colour or
+    italic would spread over the whole line.
+    """
+    runs = _text_runs(paragraph)
+    plain = [run for run in runs if not _run_is_bold(run)]
+    if plain:
+        return max(plain, key=lambda run: len(run.text or ""))
+    return _first_meaningful_run_or_none(paragraph)
+
+
+def _emphasis_run(paragraph: Paragraph):
+    """A bold run inside body text ("…by **35%**"), so generated emphasis copies its look — bold
+    plus whatever colour/italic/underline the template gives emphasis. None when there is none."""
+    runs = _text_runs(paragraph)
+    flags = [_run_is_bold(run) for run in runs]
+    if all(flags):
+        return None              # an all-bold line (a heading, a meta row) is not body emphasis
+    first_plain = flags.index(False)
+    # Bold INSIDE the text first; a bold word the line opens with is a lead-in label
+    # ("Led …", "Languages:"), often styled differently — use it only when there is nothing else.
+    inline = [run for run, bold in zip(runs[first_plain:], flags[first_plain:]) if bold]
+    bold = inline or [run for run, bold in zip(runs, flags) if bold]
+    return max(bold, key=lambda run: len(run.text or "")) if bold else None
+
+
+# Formatting remembered from the ORIGINAL template, before any text is replaced — kept on the
+# document part, so every helper that writes text reaches it from the paragraph it writes to.
+def _template_memo(paragraph: Paragraph) -> dict:
+    try:
+        part = paragraph.part
+    except Exception:
+        return {}
+    memo = getattr(part, "_tailor_template_memo", None)
+    if memo is None:
+        memo = {}
+        try:
+            setattr(part, "_tailor_template_memo", memo)
+        except Exception:
+            pass
+    return memo
+
+
+def _dominant_body_run(doc: Document):
+    """The template's most-used plain-text run format (by characters) — the fallback format for
+    text written where the template gives no sample, instead of the document default font (often
+    Times New Roman in templates that set their fonts run by run)."""
+    totals: dict[bytes, int] = {}
+    sample: dict[bytes, object] = {}
+    for paragraph in _all_body_paragraphs(doc):
+        for run in _text_runs(paragraph):
+            rpr = run._r.rPr
+            if rpr is None or _run_is_bold(run):
+                continue
+            key = etree.tostring(rpr)
+            totals[key] = totals.get(key, 0) + len(run.text or "")
+            sample.setdefault(key, run)
+    if not totals:
+        return None
+    return sample[max(totals, key=lambda key: totals[key])]
+
+
 def _clear_paragraph_keep_ppr(paragraph: Paragraph) -> None:
     for child in list(paragraph._p):  # type: ignore[arg-type]
         if child.tag != qn("w:pPr"):
@@ -184,10 +277,15 @@ def _clear_paragraph_keep_ppr(paragraph: Paragraph) -> None:
 
 
 def _copy_run_format(source_run, target_run) -> None:
+    """Give target_run all of source_run's character formatting (fonts for every script, size,
+    colour, italic, underline, caps, spacing, highlight, …) — replacing any it had."""
     if source_run is None:
         return
     try:
         if source_run._r.rPr is not None:
+            old = target_run._r.rPr
+            if old is not None:
+                target_run._r.remove(old)
             target_run._r.insert(0, deepcopy(source_run._r.rPr))
     except Exception:
         pass
@@ -207,8 +305,8 @@ def _force_run_not_bold(run) -> None:
         rstyle = rpr.find(qn("w:rStyle"))
         if rstyle is not None:
             style_id = str(rstyle.get(qn("w:val"), "")).strip().lower()
-            if style_id in {"strong", "bold", "13"}:
-                rpr.remove(rstyle)
+            if style_id in {"strong", "bold", "13"} or _run_is_bold(run):
+                rpr.remove(rstyle)     # a character style that makes the run bold
     except Exception:
         pass
 
@@ -350,6 +448,10 @@ def _add_run(
     force_bold: bool = False,
 ):
     run = paragraph.add_run(text)
+    if source_run is None:
+        # No sample in this paragraph: use the template's own body text format rather than the
+        # document default (often Times New Roman when a template sets fonts run by run).
+        source_run = _template_memo(paragraph).get("base_run")
     _copy_run_format(source_run, run)
     if force_no_bold:
         _force_run_not_bold(run)
@@ -397,11 +499,14 @@ def _add_text_with_keyword_bold(
     keywords: list[str] | None = None,
     *,
     base_no_bold: bool = True,
+    emphasis_run=None,
 ) -> None:
     # First honor EXPLICIT **bold** markers from the model, then keyword-bold the
     # remaining plain segments. A segment the model bolded is emitted bold as-is;
     # plain segments still get tech-keyword auto-bolding on top.
+    # Bold text copies emphasis_run (the template's own bold-in-body format) when there is one.
     keywords = keywords or []
+    bold_source = emphasis_run if emphasis_run is not None else source_run
     pattern = _keyword_pattern(keywords) if keywords else None
     emitted = False
 
@@ -416,7 +521,7 @@ def _add_text_with_keyword_bold(
             continue
         emitted = True
         if is_bold:
-            _add_run(paragraph, seg, source_run, force_no_bold=False, force_bold=True)
+            _add_run(paragraph, seg, bold_source, force_no_bold=False, force_bold=True)
             continue
         if pattern is None:
             _add_run(paragraph, seg, source_run, force_no_bold=base_no_bold)
@@ -425,7 +530,7 @@ def _add_text_with_keyword_bold(
         for match in pattern.finditer(seg):
             if match.start() > pos:
                 _add_run(paragraph, seg[pos:match.start()], source_run, force_no_bold=base_no_bold)
-            _add_run(paragraph, match.group(0), source_run, force_no_bold=True, force_bold=True)
+            _add_run(paragraph, match.group(0), bold_source, force_no_bold=True, force_bold=True)
             pos = match.end()
         if pos < len(seg):
             _add_run(paragraph, seg[pos:], source_run, force_no_bold=base_no_bold)
@@ -441,11 +546,16 @@ def _set_paragraph_text(
     *,
     keywords: list[str] | None = None,
     force_no_bold: bool = False,
+    emphasis_run=None,
 ) -> None:
-    source_run = source_run if source_run is not None else _first_run_or_none(paragraph)
+    # Samples are taken before the paragraph is cleared (the runs stay usable once detached).
+    if emphasis_run is None and source_run is None:
+        emphasis_run = _emphasis_run(paragraph)
+    source_run = source_run if source_run is not None else _body_run(paragraph)
     _clear_paragraph_keep_ppr(paragraph)
     if keywords:
-        _add_text_with_keyword_bold(paragraph, text, source_run, keywords, base_no_bold=True)
+        _add_text_with_keyword_bold(paragraph, text, source_run, keywords, base_no_bold=True,
+                                    emphasis_run=emphasis_run)
     else:
         _add_run(paragraph, _plain_resume_text(text), source_run, force_no_bold=force_no_bold)
 
@@ -457,6 +567,7 @@ def _insert_paragraph_after(
     *,
     keywords: list[str] | None = None,
     force_no_bold: bool = False,
+    emphasis_run=None,
 ) -> Paragraph:
     like_paragraph = like_paragraph or paragraph
     new_p = OxmlElement("w:p")
@@ -464,9 +575,12 @@ def _insert_paragraph_after(
         new_p.append(deepcopy(like_paragraph._p.pPr))
     paragraph._p.addnext(new_p)
     new_paragraph = Paragraph(new_p, paragraph._parent)  # type: ignore[arg-type]
-    source_run = _first_meaningful_run_or_none(like_paragraph)
+    source_run = _body_run(like_paragraph)
+    if emphasis_run is None:
+        emphasis_run = _emphasis_run(like_paragraph)
     if keywords:
-        _add_text_with_keyword_bold(new_paragraph, text, source_run, keywords, base_no_bold=True)
+        _add_text_with_keyword_bold(new_paragraph, text, source_run, keywords, base_no_bold=True,
+                                    emphasis_run=emphasis_run)
     else:
         _add_run(new_paragraph, _plain_resume_text(text), source_run, force_no_bold=force_no_bold)
     return new_paragraph
@@ -512,11 +626,14 @@ def _replace_paragraph_with_lines(
     if not lines:
         _set_paragraph_text(paragraph, "", force_no_bold=force_no_bold)
         return
-    source_run = _first_meaningful_run_or_none(paragraph)
-    _set_paragraph_text(paragraph, lines[0], source_run, keywords=keywords, force_no_bold=force_no_bold)
+    source_run = _body_run(paragraph)
+    emphasis_run = _emphasis_run(paragraph)
+    _set_paragraph_text(paragraph, lines[0], source_run, keywords=keywords, force_no_bold=force_no_bold,
+                        emphasis_run=emphasis_run)
     cursor = paragraph
     for line in lines[1:]:
-        cursor = _insert_paragraph_after(cursor, line, like_paragraph=paragraph, keywords=keywords, force_no_bold=force_no_bold)
+        cursor = _insert_paragraph_after(cursor, line, like_paragraph=paragraph, keywords=keywords,
+                                         force_no_bold=force_no_bold, emphasis_run=emphasis_run)
 
 
 def _normalized_heading_text(paragraph: Paragraph) -> str:
@@ -967,25 +1084,37 @@ def _write_skill_groups_bold_categories(
     if not groups:
         return anchor_paragraph
 
-    source_run = source_run or _first_meaningful_run_or_none(anchor_paragraph)
+    # The template's own skill-line format (e.g. bold "AI / LLM: " + plain items), read from the
+    # ORIGINAL template before any skills were written — see _skill_line_format.
+    fmt = _template_memo(anchor_paragraph).get("skill_line")
+    source_run = source_run or _first_meaningful_run_or_none(anchor_paragraph) \
+        or _template_memo(anchor_paragraph).get("base_run")
+    label_run = fmt["label_run"] if fmt else source_run
+    items_run = fmt["items_run"] if fmt else source_run
+    label_sep, items_sep = (fmt["label_sep"], fmt["items_sep"]) if fmt else ("", "   ")
+    # With the template's label/items runs, copy their whole format. Without (no bold label in the
+    # template), the only sample may be a label run — take just its font and size, as before.
+    copy = _copy_run_style if fmt else _copy_font_and_size
 
     def _write_group_to_paragraph(paragraph: Paragraph, group: dict) -> None:
         _clear_paragraph_keep_ppr(paragraph)
         category = group["category"]
         items_text = ", ".join(group["items"])
         if category:
-            bold_run = paragraph.add_run(category)
-            if source_run is not None:
-                _copy_run_style(bold_run, source_run)
+            if fmt:
+                category = category.rstrip().rstrip(":").rstrip()
+            bold_run = paragraph.add_run(category + label_sep)
+            if label_run is not None:
+                copy(bold_run, label_run)
             _force_run_bold(bold_run)
-            sep_run = paragraph.add_run(f"   {items_text}")
-            if source_run is not None:
-                _copy_run_style(sep_run, source_run)
+            sep_run = paragraph.add_run(f"{items_sep}{items_text}")
+            if items_run is not None:
+                copy(sep_run, items_run)
             _force_run_not_bold(sep_run)
         else:
             plain_run = paragraph.add_run(items_text)
-            if source_run is not None:
-                _copy_run_style(plain_run, source_run)
+            if items_run is not None:
+                copy(plain_run, items_run)
             _force_run_not_bold(plain_run)
 
     _write_group_to_paragraph(anchor_paragraph, groups[0])
@@ -1002,7 +1131,13 @@ def _write_skill_groups_bold_categories(
 
 
 def _copy_run_style(target_run, source_run) -> None:
-    """Copy font name and size from source_run to target_run without changing bold state."""
+    """Copy all of source_run's character formatting to target_run (fonts for every script, size,
+    colour, italic, underline, …). Callers set bold themselves afterwards. This used to copy only
+    the font name and size, so a template's colour/italic/eastAsia font were lost on skill lines."""
+    _copy_run_format(source_run, target_run)
+
+
+def _copy_font_and_size(target_run, source_run) -> None:
     try:
         if source_run.font.name:
             target_run.font.name = source_run.font.name
@@ -1010,6 +1145,46 @@ def _copy_run_style(target_run, source_run) -> None:
             target_run.font.size = source_run.font.size
     except Exception:
         pass
+
+
+_SKILL_SEP_TAIL = re.compile(r"[\s:\-–—|]*$")
+_SKILL_SEP_HEAD = re.compile(r"^[\s:\-–—|]*")
+
+
+def _skill_line_format(paragraph: Paragraph) -> dict | None:
+    """How a template skill line is laid out: a bold category label then plain items, e.g.
+    [bold "AI / LLM: "][plain "LLMs, RAG, …"]. Returns the two runs to copy and the separator
+    text on each side of the label/items boundary, or None when the line has no bold label."""
+    runs = _text_runs(paragraph)
+    lead = []
+    for run in runs:
+        if not _run_is_bold(run):
+            break
+        lead.append(run)
+    if not lead or len(lead) == len(runs):
+        return None
+    label = "".join(run.text or "" for run in lead)
+    label_sep = _SKILL_SEP_TAIL.search(label).group(0)
+    if not label[: len(label) - len(label_sep)].strip():
+        return None
+    rest = "".join(run.text or "" for run in runs[len(lead):])
+    items_sep = _SKILL_SEP_HEAD.match(rest).group(0)
+    if not label_sep and not items_sep:
+        items_sep = " "
+    return {"label_run": lead[0], "items_run": runs[len(lead)], "label_sep": label_sep, "items_sep": items_sep}
+
+
+def _template_skill_line_format(doc: Document) -> dict | None:
+    paragraphs = _all_body_paragraphs(doc)
+    section_range = _find_section_range(paragraphs, "skills")
+    if not section_range:
+        return None
+    start, end = section_range
+    for paragraph in paragraphs[start + 1:end]:
+        fmt = _skill_line_format(paragraph)
+        if fmt:
+            return fmt
+    return None
 
 
 def _insert_page_break_after(paragraph: Paragraph) -> Paragraph:
@@ -1165,6 +1340,9 @@ def _replace_experience_bullets_and_titles(doc: Document, resume: dict) -> bool:
             continue
 
         first = group[0]
+        # The template's emphasis format (bold metrics like "35%") from any bullet of this
+        # company, taken before the bullets are rewritten — every new bullet's bold words use it.
+        emphasis = next((run for run in (_emphasis_run(p) for p in group) if run is not None), None)
         # Delete extra old bullets only inside this real bullet group; company,
         # role, duration, and location rows are not in this group.
         for old_paragraph in group[len(bullets):]:
@@ -1179,12 +1357,13 @@ def _replace_experience_bullets_and_titles(doc: Document, resume: dict) -> bool:
         for paragraph in active_group[1:]:
             _copy_paragraph_format_from(paragraph, first)
         for paragraph, bullet in zip(active_group, bullets[:len(active_group)]):
-            _set_paragraph_text(paragraph, bullet, keywords=keywords)
+            _set_paragraph_text(paragraph, bullet, keywords=keywords, emphasis_run=emphasis)
             changed = True
 
         cursor = active_group[-1] if active_group else first
         for bullet in bullets[len(active_group):]:
-            cursor = _insert_paragraph_after(cursor, bullet, like_paragraph=first, keywords=keywords)
+            cursor = _insert_paragraph_after(cursor, bullet, like_paragraph=first, keywords=keywords,
+                                             emphasis_run=emphasis)
             changed = True
 
     return changed
@@ -1532,6 +1711,10 @@ def apply_resume_to_docx(docx_path: Path, resume: dict, resume_template: str = '
     # renders those phrases bold. (Headline stays plain: it is never bolded.)
     summary = _preserve_bold_line_text(resume.get("summary", ""))
     tech_keywords = _technical_skill_keywords(resume)
+    # Remember the template's own formats before any text is replaced (see _template_memo).
+    memo = _template_memo(doc.paragraphs[0]) if doc.paragraphs else {}
+    memo["base_run"] = _dominant_body_run(doc)
+    memo["skill_line"] = _template_skill_line_format(doc)
     template_borders = _capture_template_borders(doc)
     _strip_paragraph_borders(doc)
 
