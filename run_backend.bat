@@ -16,9 +16,9 @@ if not exist ".venv\Scripts\python.exe" (
 call ".venv\Scripts\activate.bat"
 
 if defined VENV_CREATED (
-    echo [backend] Installing dependencies from requirements.txt...
+    echo [backend] Installing the production package versions ^(requirements.lock^)...
     python -m pip install --upgrade pip
-    python -m pip install -r requirements.txt
+    python -m pip install -r requirements.lock
     echo [backend] Installing Windows PDF-export extras ^(requirements-windows.txt^)...
     python -m pip install -r requirements-windows.txt
 )

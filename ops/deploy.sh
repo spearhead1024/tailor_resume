@@ -7,7 +7,7 @@
 #   2. fast-forward only: the server's tracked files must be unchanged and it must have no commits
 #      GitHub doesn't have — the deploy never overwrites work done on the server.
 #   3. only what changed is rebuilt/restarted:
-#        backend/requirements.txt → pip install        frontend/ → build beside the live one, swap
+#        backend/requirements.lock → pip install        frontend/ → build beside the live one, swap
 #        backend/                 → restart the backend processes, then /api/health must answer
 #        ecosystem.config.js      → pm2 startOrRestart (picks up new/changed apps)
 #   4. any failure → reset to the previous commit, put the previous frontend back, restart again.
@@ -93,9 +93,9 @@ sys.exit(1 if bad else 0)" "$BACKEND_APPS"
 }
 
 apply() {    # build/restart what CHANGED touches, for the commit now checked out
-  if has '^backend/requirements\.txt$'; then
+  if has '^backend/requirements\.lock$'; then
     step "install backend packages"
-    backend/.venv/bin/pip install -q -r backend/requirements.txt || return 1
+    backend/.venv/bin/pip install -q -r backend/requirements.lock || return 1
   fi
   if has '^backend/'; then
     step "check backend"
@@ -140,7 +140,7 @@ if [ "$SWAPPED" = 1 ] && [ -d frontend/dist.old ]; then
   rm -rf frontend/dist && mv frontend/dist.old frontend/dist
 fi
 rm -rf frontend/dist.new
-if has '^backend/requirements\.txt$'; then backend/.venv/bin/pip install -q -r backend/requirements.txt || true; fi
+if has '^backend/requirements\.lock$'; then backend/.venv/bin/pip install -q -r backend/requirements.lock || true; fi
 if has '^ecosystem\.config\.js$'; then pm2 startOrRestart ecosystem.config.js --update-env >/dev/null; pm2 save >/dev/null
 elif has '^backend/'; then pm2 restart $BACKEND_APPS --update-env >/dev/null; fi
 if has '^backend/|^ecosystem\.config\.js$'; then health || { STEP="$FAILED_STEP"; fail "step '$FAILED_STEP' failed AND the rollback is unhealthy — check the server (log: $(basename "$LOG"))"; }; fi

@@ -78,9 +78,12 @@ git push ──► GitHub Actions (.github/workflows/ci-cd.yml)
                                → /api/health → done, or roll back to the previous commit
 ```
 
+- **Python packages**: CI, the server and local dev all install `backend/requirements.lock` (exact
+  production versions — `requirements.txt` alone lets pip pick newer releases than production runs).
+  Adding/upgrading a package: edit `requirements.txt`, install it, regenerate the lock (see its header).
 - **Every branch and pull request** gets the CI checks; only `main` deploys. Work on a branch, open a
   PR, merge when it's green — the merge deploys.
-- **What a deploy does** (only for what the push changed): `backend/requirements.txt` → pip install;
+- **What a deploy does** (only for what the push changed): `backend/requirements.lock` → pip install;
   `frontend/` → build into `dist.new` and swap (the site is never half-built); `backend/` → restart
   `tailorresume-v2 job-sync company-intel vps1-sync` and wait for `/api/health`; `ecosystem.config.js`
   → `pm2 startOrRestart`. New DB columns are added by the API itself at start (additive only).

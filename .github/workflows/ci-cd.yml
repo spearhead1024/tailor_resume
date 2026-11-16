@@ -25,8 +25,9 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
-          cache-dependency-path: backend/requirements.txt
-      - run: pip install -r backend/requirements.txt
+          cache-dependency-path: backend/requirements.lock
+      - name: Install the exact versions production runs
+        run: pip install -r backend/requirements.lock
       - name: Compile every module
         run: python -m compileall -q backend
       - name: Import the app (catches missing imports / names at load time)
