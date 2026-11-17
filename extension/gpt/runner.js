@@ -42,6 +42,7 @@ const CHECK_LIMIT_MS = 90_000;          // the account check
 const DRIVER_ID = 'tr-gpt-driver';
 const FRAMES = 'gptFrames';
 const OUR_TABS = 'gptTabs';             // session storage: the ids of the ChatGPT tabs this extension opened
+const KEPT = 'gptKept';                 // session storage: { "<profile>:<job>": { tabId, conversation } } — see keepTab
 
 const now = () => Date.now();
 const read = async (key, fallback) => (await chrome.storage.local.get(key))[key] ?? fallback;
@@ -116,6 +117,43 @@ async function tabConversation(id) {
   const tab = await chrome.tabs.get(tabOfFrame(id)).catch(() => null);
   return /\/c\/[A-Za-z0-9][A-Za-z0-9_-]{7,}/.test(tab?.url || '') ? tab.url : '';
 }
+// ---------- kept tabs: a CV's chat stays open for the bidder ----------
+// When a CV (or answers) is done, its tab is NOT closed: the bidder can ask ChatGPT more (tech
+// questions…) in that very chat. It is closed — and the chat deleted by the server — once the job is
+// done for that profile (Mark as Applied / Report / Skip), left idle 2 hours, or ChatGPT is
+// disconnected: syncMirror closes every kept tab whose conversation the server no longer holds.
+const convId = (url) => (String(url || '').match(/\/c\/([A-Za-z0-9][A-Za-z0-9_-]{7,})/) || [])[1] || '';
+const keptTabs = async () => (await chrome.storage.session.get(KEPT).catch(() => ({})))[KEPT] || {};
+let keptLock = Promise.resolve();
+const withKept = (fn) => { const run = keptLock.then(async () => { const all = await keptTabs(); const out = await fn(all); await chrome.storage.session.set({ [KEPT]: all }).catch(() => {}); return out; }); keptLock = run.catch(() => {}); return run; };
+async function keepTab(frame, key, conversation) {
+  const tabId = tabOfFrame(frame);
+  await withTabs(async (set) => { set.delete(tabId); });       // not a work tab any more: the driver is done
+  const old = await withKept(async (all) => { const prev = all[key]; all[key] = { tabId, conversation }; return prev; });
+  if (old && old.tabId !== tabId) await chrome.tabs.remove(old.tabId).catch(() => {});
+}
+async function closeKept(test) {
+  const gone = await withKept(async (all) => { const out = []; for (const [k, v] of Object.entries(all)) if (test(k, v)) { out.push(v.tabId); delete all[k]; } return out; });
+  for (const tabId of gone) await chrome.tabs.remove(tabId).catch(() => {});
+}
+// The panel's "Open Chat": the job's kept tab, or its conversation opened again (and kept).
+async function openChat(key) {
+  const kept = (await keptTabs())[key];
+  if (kept && await chrome.tabs.get(kept.tabId).catch(() => null)) {
+    const tab = await chrome.tabs.update(kept.tabId, { active: true });
+    await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+    return { ok: true };
+  }
+  const thread = (await read(K.threads, {}))[key];
+  if (!/\/c\//.test(thread?.conversation || '')) return { ok: false, error: 'This CV has no ChatGPT chat any more.' };
+  const tab = await chrome.tabs.create({ url: thread.conversation, active: true });
+  await withKept(async (all) => { all[key] = { tabId: tab.id, conversation: thread.conversation }; });
+  return { ok: true };
+}
+chrome.tabs.onRemoved.addListener((tabId) => {   // the bidder closed a kept tab: just forget it
+  withKept(async (all) => { for (const [k, v] of Object.entries(all)) if (v.tabId === tabId) delete all[k]; }).catch(() => {});
+});
+
 // Our tabs that are still open (a tab the bidder closed is gone: its work goes back to the queue).
 async function liveFrames() {
   const set = await ourTabs();
@@ -146,6 +184,9 @@ export async function syncMirror() {
     const { threads = [], to_delete: toDelete = 0 } = await request('/api/gpt/threads');
     await chrome.storage.local.set({ [K.threads]: Object.fromEntries(threads.map((r) => [r.key, toThread(r)])) });
     await noteToDelete(toDelete);
+    // A kept chat is done once the server no longer holds that conversation for the job.
+    const held = new Map(threads.filter((r) => r.stage !== 'closing').map((r) => [r.key, convId(r.conversation)]));
+    await closeKept((key, v) => !held.get(key) || held.get(key) !== convId(v.conversation));
   } catch (e) { if (e?.status === 401) await chrome.storage.local.set({ [K.threads]: {} }); }
 }
 async function noteToDelete(n) { if (typeof n === 'number' && (await state()).toDelete !== n) await setState({ toDelete: n }); }
@@ -259,6 +300,7 @@ function frameTask(lease) {
 async function startWork(lease) {
   // Answers go to the CV's own conversation; a CV built by hand has none — a new chat (with the job as context).
   const url = lease.work === 'answer' && /\/c\//.test(lease.conversation || '') ? lease.conversation : CHAT_URL;
+  if (lease.work === 'answer' && lease.key) await closeKept((key) => key === lease.key);   // one tab per chat
   const id = await openFrame(url);
   await frames(async (all) => { all[id] = { lease, task: frameTask(lease), startedAt: now(), aliveAt: now() }; });
 }
@@ -297,12 +339,14 @@ async function reportFailure(f, error) {
 async function finish(frame, res) {
   if ((await state()).checkFrame === frame) { await finishCheck(frame, res); return; }
   const f = await frames(async (all) => { const x = all[frame]; delete all[frame]; return x; });
-  await closeFrame(frame);
-  if (!f) return;   // stale: stopped meanwhile
+  if (!f) { await closeFrame(frame); return; }   // stale: stopped meanwhile
   const { lease } = f;
   f.conversation = res?.conversation || f.conversation || '';
   const device = await deviceId();
   const kind = res?.ok ? '' : (res?.kind || 'error');
+  // A written CV / answers: the chat stays open for the bidder (keepTab). Anything else: closed.
+  if (!kind && (lease.work === 'write' || lease.work === 'answer') && lease.key && /\/c\//.test(f.conversation)) await keepTab(frame, lease.key, f.conversation);
+  else await closeFrame(frame);
   if (res?.ok && res.plan) await setState({ plan: res.plan });
   if (lease.work === 'delete' && kind === 'needs_login' && !(await state()).enabled) {
     // Disconnected and ChatGPT signed out: try the deletes again later.
@@ -353,6 +397,7 @@ async function handle(msg) {
       // Work in progress goes back to the server queue; built CVs and their answers stay. Every
       // ChatGPT chat the queue still keeps is deleted now (a question asked later gets a new chat).
       await stopAllWork();
+      await closeKept(() => true);
       const c = (await state()).checkFrame; if (c) await closeFrame(c);
       await setState({ enabled: false, status: 'off', notice: '', checkFrame: '', cooldownUntil: 0 });
       const r = await api('/api/gpt/cleanup', { device: await deviceId() }).catch(() => null);
@@ -361,6 +406,7 @@ async function handle(msg) {
     }
     case 'continue': await setState({ status: 'checking', notice: '', checkFrame: '' }); tick(); return { ok: true };   // check the account again
     case 'sync': await syncMirror(); tick(); return { ok: true };   // the panel changed the queue on the server
+    case 'openChat': return openChat(String(msg.key || ''));
     default: return { ok: false, error: `Unknown action ${msg.action}` };
   }
 }

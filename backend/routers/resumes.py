@@ -632,7 +632,6 @@ def bid_skip(body: dict, user: dict = Depends(get_current_user)):
 # ── Easy Bids: the LinkedIn Easy Apply job open in the bidder's tab ──────────────
 # One lock: two bidders opening the same new posting at once must not both add it.
 _easy_lock = threading.Lock()
-_EASY_REGIONS = {"US", "EU", "LATAM", "ANY"}
 
 
 def _easy_item(job: dict) -> dict:
@@ -685,15 +684,16 @@ def bid_easy(body: dict, user: dict = Depends(get_current_user)):
 
     Body: {profile_id, link | linkedin_job_id, company, job_title, description, add (default true)}.
     Duplicates are looked for first — the same LinkedIn posting (by its job id, however its link was
-    saved), then the same company + title. Found → that job. Otherwise the SAME rules as the Jobs
-    tab's Add job (required fields, one job per company per region per month, blacklist); a job
-    that passes is added (approved, the profile's region, link https://www.linkedin.com/jobs/view/<id>/)
-    — or, with add=false, only reported as one that would be.
+    saved), then the same company + title. Found → that job. Then the company NAME: a job of the
+    same company (any region; "Acme, Inc." == "Acme") added within storage.COMPANY_DEDUP_DAYS →
+    blocked as a duplicate. Then the Jobs tab's other rules (required fields, blacklist); a job that
+    passes is added (approved, the profile's market — easy_apply.profile_market: its region, or its
+    country — link https://www.linkedin.com/jobs/view/<id>/) — or, with add=false, only reported.
 
     Returns {state, match, job, profile, conflicts, message}:
       existing | added | new → job (a Bid-queue item; id '' for `new`; this profile's CV if any)
                          and profile {applied, applied_at, skipped, problem} — problem: why no CV
-      blocked          → conflicts (same company this month / blacklist), nothing added
+      blocked          → conflicts (same company recently / blacklist), nothing added
       invalid          → message (e.g. the description is too short), nothing added"""
     if not has_role(user, "admin", "bidder"):
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -719,19 +719,25 @@ def bid_easy(body: dict, user: dict = Depends(get_current_user)):
             item = _easy_item(job)
             return {"state": "existing", "match": match, "job": item, "profile": _easy_profile_state(profile, job, item)}
 
-        region = str(profile.get("region") or "ANY").strip().upper()
         payload = {"company": company, "job_title": title, "link": easy_apply.canonical_link(lid),
-                   "region": region if region in _EASY_REGIONS else "ANY",
+                   "region": easy_apply.profile_market(profile),
                    "description": str(body.get("description") or "").strip(), "note": ""}
         try:
             payload = J._clean_job_fields(payload)
         except HTTPException as exc:
             return {"state": "invalid", "message": str(exc.detail)}
         conflicts: list[dict] = []
-        try:
-            J._check_company_week(payload)
-        except HTTPException as exc:
-            conflicts.append(exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)})
+        # The company name, in ANY region (stricter than the Jobs tab's per-region rule): one job
+        # per company within the window, however LinkedIn spells the company.
+        same = storage.find_recent_company_job_any_region(company)
+        if same:
+            conflicts.append({
+                "kind": "company",
+                "message": f"{same.get('company', '')} already has a job: {same.get('job_title', '')} "
+                           f"({same.get('region') or 'ANY'}, added {str(same.get('submitted_at') or '')[:10]}).",
+                "existing_id": same.get("id", ""), "existing_company": same.get("company", ""),
+                "existing_title": same.get("job_title", ""),
+            })
         reason = storage.job_block_reason(payload)
         if reason is not None:
             conflicts.append({"kind": "blacklist", "message": f"Blocked — {reason} (Settings → Blacklist)."})

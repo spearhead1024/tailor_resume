@@ -48,3 +48,60 @@ def is_easy_apply(link: str) -> bool:
 def canonical_link(job_id: str) -> str:
     """The one link stored for an Easy Apply job — the same posting always maps to the same link."""
     return f"https://www.linkedin.com/jobs/view/{job_id}/"
+
+
+# ---- a profile's market (the region its Easy Bids jobs are added with) ----
+_US_STATES = {
+    "alabama", "alaska", "arizona", "arkansas", "california", "colorado", "connecticut", "delaware", "florida",
+    "georgia", "hawaii", "idaho", "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana", "maine",
+    "maryland", "massachusetts", "michigan", "minnesota", "mississippi", "missouri", "montana", "nebraska",
+    "nevada", "new hampshire", "new jersey", "new mexico", "new york", "north carolina", "north dakota", "ohio",
+    "oklahoma", "oregon", "pennsylvania", "rhode island", "south carolina", "south dakota", "tennessee", "texas",
+    "utah", "vermont", "virginia", "washington", "west virginia", "wisconsin", "wyoming", "district of columbia",
+}
+_US_CODES = {
+    "al", "ak", "az", "ar", "ca", "co", "ct", "de", "fl", "ga", "hi", "id", "il", "in", "ia", "ks", "ky", "la", "me",
+    "md", "ma", "mi", "mn", "ms", "mo", "mt", "ne", "nv", "nh", "nj", "nm", "ny", "nc", "nd", "oh", "ok", "or", "pa",
+    "ri", "sc", "sd", "tn", "tx", "ut", "vt", "va", "wa", "wv", "wi", "wy", "dc", "us", "usa",
+}
+_EUROPE = {
+    "albania", "andorra", "austria", "belarus", "belgium", "bosnia", "bulgaria", "croatia", "cyprus", "czech",
+    "czechia", "denmark", "estonia", "finland", "france", "germany", "greece", "hungary", "iceland", "ireland",
+    "italy", "kosovo", "latvia", "liechtenstein", "lithuania", "luxembourg", "malta", "moldova", "monaco",
+    "montenegro", "netherlands", "north macedonia", "macedonia", "norway", "poland", "portugal", "romania",
+    "san marino", "serbia", "slovakia", "slovenia", "spain", "sweden", "switzerland", "ukraine", "united kingdom",
+    "uk", "england", "scotland", "wales", "europe", "european union", "eu",
+}
+_LATAM = {
+    "argentina", "bolivia", "brazil", "brasil", "chile", "colombia", "costa rica", "cuba", "dominican republic",
+    "ecuador", "el salvador", "guatemala", "honduras", "mexico", "méxico", "nicaragua", "panama", "panamá",
+    "paraguay", "peru", "perú", "puerto rico", "uruguay", "venezuela", "latam", "latin america",
+}
+MARKETS = ("US", "EU", "LATAM", "ANY")
+
+
+def market_of_location(location: str) -> str:
+    """'Romania' → EU, 'Duncanville, Texas' → US, 'São Paulo, Brazil' → LATAM; '' when unknown."""
+    text = str(location or "").lower()
+    parts = [p.strip() for p in re.split(r"[,;/|·-]", text) if p.strip()]
+    if not parts:
+        return ""
+    if "united states" in text or "u.s." in text or any(p in _US_STATES for p in parts):
+        return "US"
+    if any(p in _LATAM for p in parts) or any(c in text for c in ("latin america", "latam")):
+        return "LATAM"
+    if any(p in _EUROPE for p in parts):
+        return "EU"
+    # Two-letter state codes last: "DE" is Delaware but also Germany's code, so a country name wins.
+    if any(p in _US_CODES for p in parts):
+        return "US"
+    return ""
+
+
+def profile_market(profile: dict) -> str:
+    """The region a profile bids in: its own region field when it is US / EU / LATAM, else inferred
+    from its location (country / state), else ANY (open to every job)."""
+    region = str((profile or {}).get("region") or "").strip().upper()
+    if region in ("US", "EU", "LATAM"):
+        return region
+    return market_of_location((profile or {}).get("location", "")) or "ANY"

@@ -306,9 +306,25 @@ button.dl-btn:hover:not(:disabled) { background: #059669; box-shadow: 0 2px 8px 
 .easy-link a { color: var(--muted); }
 #easyCard button[data-action="genCv"] svg { width: 14px; height: 14px; }
 
-/* LinkedIn classic job search (panel.js patchClassic) */
-.classic-row { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border-soft); }
-.classic-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
-.classic-switch { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; flex: 1 1 auto; min-width: 0; }
-.classic-switch input { margin: 0; width: 14px; height: 14px; flex: none; padding: 0; accent-color: var(--accent); box-shadow: none; }
-.classic-saved { margin-top: 3px; overflow-wrap: anywhere; }
+
+/* Cards each bid tab shows (⚙ Settings → "Show on …") */
+#bidView.hide-details #copyCard, #bidView.hide-jobs #jobCard, #bidView.hide-questions #qaCard,
+#bidView.hide-preview #previewCard { display: none !important; }
+
+/* Easy Apply job: one label */
+.easy-pill { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; }
+.easy-pill.ok { background: var(--success-bg); color: var(--success); }
+.easy-pill.warn { background: var(--warning-bg); color: var(--warning); }
+.easy-pill.error { background: var(--danger-bg); color: var(--danger); }
+.easy-pill.muted { background: var(--panel-2); color: var(--text-soft); }
+.easy-pill .spinner { width: 10px; height: 10px; }
+#easyCard .easy-job { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 0; }
+.easy-line.row-line { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+
+/* ⚙ Settings */
+#settingsBtn.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.settings { gap: 8px; }
+.settings .card { display: grid; gap: 6px; }
+.set-switch { display: flex; align-items: center; gap: 6px; font-size: 12.5px; cursor: pointer; }
+.set-switch input { margin: 0; width: 14px; height: 14px; flex: none; padding: 0; accent-color: var(--accent); box-shadow: none; }
+.set-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; }

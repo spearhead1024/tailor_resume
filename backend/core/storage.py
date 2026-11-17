@@ -2330,6 +2330,27 @@ class Storage:
             row = session.scalar(stmt.limit(1))
             return _normalize_job(dict(row.data or {})) if row else None
 
+    def find_recent_company_job_any_region(self, company: str, within_days: int = COMPANY_DEDUP_DAYS) -> dict | None:
+        """The newest ACTIVE job of the same company in ANY region within `within_days` — Easy Bids'
+        company-name duplicate check. Names match loosely: legal suffixes dropped ("Acme, Inc." ==
+        "Acme") and confusable characters folded ('Jorie AI' == 'Jorie Al')."""
+        def key(name: str) -> str:
+            return _company_fold_key(company_key_for(name))
+        want = key(company)
+        if not want:
+            return None
+        cutoff = datetime.utcnow() - timedelta(days=max(1, int(within_days or COMPANY_DEDUP_DAYS)))
+        with session_scope(self.db_path) as session:
+            stmt = (select(JobRow.id, JobRow.company)
+                    .where(JobRow.status.in_(('approved', 'pending')), JobRow.submitted_at.is_not(None),
+                           JobRow.submitted_at >= cutoff)
+                    .order_by(JobRow.submitted_at.desc()))
+            match_id = next((jid for jid, comp in session.execute(stmt) if key(comp or '') == want), None)
+            if not match_id:
+                return None
+            row = session.get(JobRow, match_id)
+            return _normalize_job(dict(row.data or {})) if row else None
+
     def find_job_by_linkedin_id(self, linkedin_id: str) -> dict | None:
         """The job whose link points at this LinkedIn posting, whatever form the link was saved in
         (/jobs/view/<id>, a slug-<id> view link, or a search page with ?currentJobId=<id>). SQL

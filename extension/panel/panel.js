@@ -22,7 +22,7 @@ import { request, getConfig, setSession, clearSession } from '../lib/api.js';
 import { requestSiteAccess } from '../lib/access.js';
 import { createAdder } from './adder.js';
 import { linkedinJobId, readLinkedInJob } from './linkedin.js';
-import { CLASSIC_ON, CLASSIC_SEARCH, classicTabKey, classicUrl, isAiSearch, describeSearch, applicationOpen } from '../lib/classic.js';
+import { CLASSIC_ON, CLASSIC_SEARCH, classicTabKey, classicUrl, isAiSearch, isClassicSearch, describeSearch, applicationOpen } from '../lib/classic.js';
 import { gpt, gptSnapshot, onGptChange, requestChatAccess, threadKey } from '../gpt/client.js';
 import { UPDATE_KEY, diskVersion } from '../lib/self-update.js';
 
@@ -59,6 +59,7 @@ const I = {
   refresh: svg('<polyline points="23 4 23 10 17 10"/><path d="M20.5 15a9 9 0 1 1-2.1-9.4L23 10"/>'),
   sparkle: svg('<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/>'),
   copy: svg('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'),
+  gear: svg('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>'),
   logout: svg('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>'),
 };
 
@@ -70,6 +71,8 @@ const S = {
   bidView: '',         // which of bid / easy the shared bid view holds now ('' = not loaded yet)
   easy: freshEasy(),   // Easy Bids: the LinkedIn job on the tab — see easyCheck()
   extraJob: null,      // Easy Bids: the current job when it is not in the queue (e.g. a stack the queue filters out)
+  settingsOpen: false, // the ⚙ Settings view is on screen (instead of the tab's own view)
+  show: {},            // which cards each bid tab shows: { bid: {details, jobs, questions, preview}, easy: {…} }
   gen: new Map(),      // Easy Bids: jobs Gen CV was pressed for → their CV is saved to Downloads once built
   genBusy: false,      // Easy Bids: Gen CV is adding the job
   gptSnap: null,       // the ChatGPT connection's state + threads, mirrored from chrome.storage
@@ -671,6 +674,7 @@ onGptChange(async () => {
   adoptBuiltCvs();
   patchGptLine();
   patchEasy();
+  patchSettingsGpt();
   // Answers landed (the thread's pending questions shrank): read them again.
   const t = currentThread(), want = JSON.stringify(t?.want || []);
   if (want !== lastWant && S.resumeId) { lastWant = want; loadAnswers(); }
@@ -707,16 +711,12 @@ function patchGptLine() {
     const ahead = Object.values(S.gptSnap.threads).filter((x) => x.work && x.key !== t.key).length;
     text = `Waiting for a free ChatGPT tab${ahead ? ` (${ahead} working)` : ''}…`;
   }
-  const mine = Object.values(S.gptSnap?.threads || {}).filter((x) => x.profileId === S.profileId && x.stage !== 'closing');
-  const ready = mine.filter((x) => x.stage === 'ready').length;
-  const plan = st.plan && st.status !== 'needs_plan' ? `ChatGPT ${esc(planLabel(st.plan))} · ` : '';
-  // Chats this extension opened that are no longer needed are deleted from the ChatGPT account.
-  const del = st.toDelete ? `${st.toDelete} ChatGPT chat${st.toDelete === 1 ? '' : 's'} to delete` : '';
-  const meta = st.enabled
-    ? `<span class="gpt-meta">${plan}${ready}/${mine.length} ready${del ? ` · ${del}` : ''} · <a href="#" data-action="gptDisconnect" title="Stop writing CVs with ChatGPT and delete its chats">Disconnect</a></span>`
-    : (del ? `<span class="gpt-meta">Deleting: ${del}</span>` : '');
+  // (Plan, CVs ready, chats to delete and Disconnect are in ⚙ Settings.)
+  // The CV's own ChatGPT chat stays open after the CV (gpt/runner.js keepTab): ask it more there.
+  const chat = /\/c\//.test(t?.conversation || '') && t.stage !== 'writing'
+    ? '<button class="secondary sm" data-action="openChat" title="Open this CV\'s ChatGPT chat to ask it more (tech questions…). It is closed and deleted when the job is done.">Open Chat</button>' : '';
   el.className = `gpt-line ${cls}`;
-  el.innerHTML = `<span class="txt">${text.startsWith('<span') ? text : esc(text)}</span>${btn}${meta}`;
+  el.innerHTML = `<span class="txt">${text.startsWith('<span') ? text : esc(text)}</span>${btn}${chat}`;
 }
 
 // ---------- application questions (shared per job) + this CV's answers ----------
@@ -913,6 +913,8 @@ async function allowLinkedIn() {
   scheduleEasyCheck(true);
 }
 
+// The Easy Apply job card: the job on the LinkedIn tab, ONE label (New Job / Duplicate / Can't add /
+// Not Easy Apply), one short reason line, Gen CV. Everything else lives in ⚙ Settings.
 function patchEasy() {
   const el = $('#easyBody'); if (!el) return;
   const E = S.easy, page = E.page, res = E.res, p = res?.profile || {};
@@ -920,82 +922,94 @@ function patchEasy() {
   const spin = '<span class="spinner"></span>';
   const line = (cls, html) => `<div class="easy-line ${cls}">${html}</div>`;
   const job = res?.job;
-  const what = page?.title ? `<div class="easy-job"><strong>${esc(page.company)}</strong> — ${esc(page.title)}${page.location ? ` <span class="muted">· ${esc(page.location)}</span>` : ''}
-    <div class="easy-link"><a href="${esc(jobViewLink(E.lid))}" data-action="easyCopyLink" title="The job link stored in TailorResume — click to copy">${esc(jobViewLink(E.lid))}</a></div></div>` : '';
-  let body = '';
+  const pill = (cls, text) => `<span class="easy-pill ${cls}">${text}</span>`;
+  const what = page?.title ? `<div class="easy-job" title="${esc(`${page.company} — ${page.title}${page.location ? ` · ${page.location}` : ''}`)}">
+      <strong>${esc(page.company)}</strong> — ${esc(page.title)}${page.location ? ` <span class="muted">· ${esc(page.location)}</span>` : ''}</div>
+    <div class="easy-link"><a href="${esc(jobViewLink(E.lid))}" data-action="easyCopyLink" title="The job link stored in TailorResume — click to copy">${esc(jobViewLink(E.lid))}</a></div>` : '';
+  let badge = '', body = '', gen = false;
   switch (E.state) {
-    case 'idle': body = line('muted', `${spin} Looking at the tab…`); break;
-    case 'nolinkedin': body = line('muted', 'Open LinkedIn Jobs in this tab and click an <b>Easy Apply</b> job — it is checked here, then <b>Gen CV</b> adds it and makes its CV.')
-      + '<div class="row"><button class="secondary sm" data-action="easyOpenLinkedIn">Open LinkedIn Easy Apply jobs</button></div>'; break;
-    case 'nojob': body = line('muted', 'Click a job in LinkedIn\'s list — the job on the right is checked here.'); break;
-    case 'access': body = line('warn', 'Easy Bids reads the job open on your LinkedIn tab. Allow it once:')
-      + '<div class="row"><button class="sm" data-action="easyAllow">Allow reading LinkedIn</button></div>'; break;
-    case 'reading': body = line('muted', `${spin} Reading the job on LinkedIn…`); break;
-    case 'unreadable': body = line('warn', 'Couldn\'t read this job from the page yet — let it finish loading, then Retry.')
+    case 'idle': case 'reading': case 'checking':
+      badge = pill('muted', `${spin} Checking`); body = what; break;
+    case 'nolinkedin': body = line('muted', 'Open LinkedIn Jobs in this tab and click an <b>Easy Apply</b> job.')
+      + '<div class="row"><button class="secondary sm" data-action="easyOpenLinkedIn">Open LinkedIn Jobs</button></div>'; break;
+    case 'nojob': body = line('muted', 'Click a job in LinkedIn\'s list.'); break;
+    case 'access': body = line('warn', 'Easy Bids reads the job on your LinkedIn tab — allow it once.')
+      + '<div class="row"><button class="sm" data-action="easyAllow">Allow Reading LinkedIn</button></div>'; break;
+    case 'unreadable': body = line('warn', 'Couldn\'t read this job yet — let the page load, then Retry.')
       + '<div class="row"><button class="secondary sm" data-action="easyRetry">Retry</button></div>'; break;
-    case 'noteasy': body = what + line('warn', {
-      external: 'Not an Easy Apply job — it applies on the company\'s own site. Easy Bids is for Easy Apply only.',
-      closed: 'LinkedIn says this job is no longer accepting applications.',
-      none: 'No Easy Apply button on this job.',
-    }[page?.apply] || 'Not an Easy Apply job.'); break;
-    case 'checking': body = what + line('muted', `${spin} Checking TailorResume for duplicates…`); break;
-    case 'error': body = what + line('error', `Couldn't check this job — ${esc(E.error)}`)
+    case 'error': body = what + line('error', esc(E.error))
       + '<div class="row"><button class="secondary sm" data-action="easyRetry">Retry</button></div>'; break;
-    case 'invalid': body = what + line('error', `Can't be added — ${esc(res?.message || 'the job is incomplete')}`); break;
-    case 'blocked': body = what + line('error', `<strong>Duplicate — can't be added:</strong><ul>${(res?.conflicts || []).map((c) => `<li>${esc(c.message || c.kind)}</li>`).join('')}</ul>`); break;
+    case 'noteasy':
+      badge = pill('warn', page?.apply === 'closed' ? 'Closed' : 'Not Easy Apply');
+      body = what; break;
+    case 'invalid':
+      badge = pill('error', 'Can\'t Add'); body = what + line('error', esc(res?.message || 'The job is incomplete.')); break;
+    case 'blocked': {
+      const c = (res?.conflicts || [])[0] || {};
+      badge = c.kind === 'blacklist' ? pill('error', 'Blocked') : pill('error', 'Duplicate');
+      body = what + line('muted', esc(c.message || c.kind || ''));
+      break;
+    }
     case 'new': case 'added': case 'existing': {
-      const head = E.state === 'new'
-        ? (page?.apply === 'applied'
-          ? line('warn', 'You already applied to this job on LinkedIn — it is not in TailorResume.')
-          : line('ok', `✓ No duplicate — not in TailorResume yet. Gen CV adds it (${esc(job?.region || 'ANY')}) and makes the CV.`))
-        : E.state === 'added' ? line('ok', `✓ Added to TailorResume · ${esc(job?.region || 'ANY')}`)
-        : line('muted', `Already in TailorResume${res.match === 'company_title' ? ' (same company + title)' : ''} — not added again.`);
-      let st = '';
-      if (p.applied) st = line('ok', `Applied with ${name}${p.applied_at ? ` on ${esc(String(p.applied_at).slice(0, 10))}` : ''} — nothing more to do.`);
-      else if (p.skipped) st = line('warn', `Skipped for ${name}.`);
-      else if (p.problem) st = line('warn', `${esc(p.problem)} No CV is made for ${name}.`);
-      else if (E.state !== 'new' && page?.apply === 'applied') st = line('warn', 'LinkedIn shows this job as applied — Mark as Applied below.');
-      else if (S.gen.has(job?.id) && !S.resumeId) st = line('muted', gptOn()
-        ? `${spin} ChatGPT is writing ${name}'s CV — it is saved to Downloads when ready.`
-        : 'Connect ChatGPT to write the CV automatically — or write it by hand below.');
-      else if (job?.id && job.id === S.jobId && S.resumeId) st = line('muted', `${name} has a CV for this job — Gen CV saves it to Downloads.`);
-      body = what + head + st;
-      if (easyCanGen()) {
-        const busy = S.genBusy || (S.gen.has(job?.id) && !S.resumeId && gptOn());
-        body += `<div class="row"><button class="grow" data-action="genCv" ${S.genBusy || S.busy ? 'disabled' : ''}
-          title="Add the job if it is new, write the CV with ChatGPT and save it to Downloads">${busy ? spin : I.sparkle} Gen CV</button></div>`;
+      const region = esc(job?.region || 'ANY');
+      if (E.state === 'existing') {
+        badge = pill('warn', 'Duplicate');
+        body = what + line('muted', res.match === 'linkedin' ? 'This posting is already in TailorResume.' : 'Same company + title already in TailorResume.');
+      } else {
+        badge = pill('ok', `New Job · ${region}`);
+        body = what;
       }
+      if (p.applied) body += line('ok', `Applied with ${name}${p.applied_at ? ` on ${esc(String(p.applied_at).slice(0, 10))}` : ''}.`);
+      else if (p.skipped) body += line('warn', `Skipped for ${name}.`);
+      else if (p.problem) body += line('warn', esc(p.problem));
+      else if (page?.apply === 'applied') body += line('warn', E.state === 'new' ? 'You applied on LinkedIn — it is not in TailorResume.' : 'LinkedIn shows it applied — Mark as Applied below.');
+      else if (S.gen.has(job?.id) && !S.resumeId && gptOn()) body += line('muted', `${spin} ChatGPT is writing the CV — saved to Downloads when ready.`);
+      gen = easyCanGen();
       break;
     }
   }
-  // CVs are written automatically only through ChatGPT — offer to connect even before the first job.
-  const st = S.gptSnap?.state || {};
-  const connect = !st.enabled
-    ? `<div class="easy-line warn">Gen CV writes the CV with ChatGPT (a paid plan) — connect it once.</div>
-       <div class="row"><button class="sm" data-action="gptConnect">Connect ChatGPT</button></div>` : '';
-  el.innerHTML = `<div class="card-head"><span class="card-title">Easy Apply job</span><span class="muted small">checked · Gen CV</span></div>${body}${connect}`;
+  if (gen) {
+    body += `<div class="row"><button class="grow" data-action="genCv" ${S.genBusy || S.busy ? 'disabled' : ''}
+      title="Add the job if it is new, write the CV with ChatGPT and save it to Downloads">${S.genBusy ? spin : I.sparkle} Gen CV</button></div>`;
+  }
+  // CVs are written by ChatGPT: one compact line while it is not connected (details in ⚙ Settings).
+  if (!gptOn()) body += `<div class="easy-line warn row-line">ChatGPT is off. <button class="sm" data-action="gptConnect">Connect ChatGPT</button></div>`;
+  el.innerHTML = `<div class="card-head"><span class="card-title">Easy Apply Job</span>${badge}</div>${body}`;
 }
 
 // ---------- LinkedIn classic job search (lib/classic.js does the work in the service worker) ----------
 // One switch, the remembered search, "Open saved search", and a note when LinkedIn forced AI search
 // back on the tab often enough that it is left alone for a while.
 async function patchClassic() {
-  const el = $('#classicRow'); if (!el) return;
+  const el = $('#settingsClassic'); if (!el) return;
   const got = await chrome.storage.local.get([CLASSIC_ON, CLASSIC_SEARCH]).catch(() => ({}));
   const on = got[CLASSIC_ON] !== false, saved = got[CLASSIC_SEARCH] || '';
   const tab = await activeTab();
   const key = tab?.id != null ? classicTabKey(tab.id) : '';
   const st = key ? (await chrome.storage.session.get(key).catch(() => ({})))[key] : null;
   const blocked = on && (st?.blockedUntil || 0) > Date.now();
+  const typing = document.activeElement?.id === 'classicUrl';   // never overwrite what is being edited
   el.innerHTML = `
-    <div class="classic-head">
-      <label class="classic-switch" title="When LinkedIn opens its AI job search, go back to the classic search with your last filters">
-        <input type="checkbox" data-action="classicToggle" ${on ? 'checked' : ''}> Keep LinkedIn's classic job search</label>
-      ${saved ? '<button class="secondary sm" data-action="classicOpen" title="Open your last classic search (in a new tab if an application is open)">Open saved search</button>' : ''}
+    <label class="set-switch"><input type="checkbox" data-action="classicToggle" ${on ? 'checked' : ''}> Keep LinkedIn's classic job search</label>
+    <div class="muted small">When LinkedIn opens its AI search, the tab goes back to the classic search with your filters.</div>
+    <label class="fld"><span class="fld-l">Saved search URL ${saved ? `<span class="muted">· ${esc(describeSearch(saved))}</span>` : ''}</span>
+      <input id="classicUrl" type="url" spellcheck="false" placeholder="https://www.linkedin.com/jobs/search/?keywords=…" value="${esc(typing ? $('#classicUrl')?.value || '' : saved)}"></label>
+    <div class="easy-line error" id="classicErr" hidden></div>
+    <div class="row">
+      <button class="secondary sm" data-action="classicSave">Save URL</button>
+      ${saved ? '<button class="secondary sm" data-action="classicOpen">Open Saved Search</button>' : ''}
     </div>
-    <div class="muted small classic-saved">${saved ? `Saved: ${esc(describeSearch(saved))}` : 'Your last classic search with filters is remembered here.'}</div>
-    ${blocked ? `<div class="easy-line warn">LinkedIn keeps sending this tab back to AI search — left alone until ${esc(new Date(st.blockedUntil).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}.
-      <a href="#" data-action="classicRetry">Try again</a></div>` : ''}`;
+    ${blocked ? `<div class="easy-line warn">LinkedIn keeps sending the current tab back to AI search — left alone until ${esc(new Date(st.blockedUntil).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}.
+      <a href="#" data-action="classicRetry">Try Again</a></div>` : ''}`;
+}
+async function saveClassicUrl() {
+  const raw = ($('#classicUrl')?.value || '').trim();
+  const url = isClassicSearch(raw) ? classicUrl(raw) : null;
+  const err = $('#classicErr');
+  if (!url) { if (err) { err.textContent = 'Paste a LinkedIn job search URL (https://www.linkedin.com/jobs/search/?…).'; err.hidden = false; } return; }
+  $('#classicUrl')?.blur();
+  await chrome.storage.local.set({ [CLASSIC_SEARCH]: url });
+  toast('Saved search updated');
 }
 chrome.storage.onChanged.addListener((ch, area) => {
   if ((area === 'local' && (CLASSIC_ON in ch || CLASSIC_SEARCH in ch)) || (area === 'session' && Object.keys(ch).some((k) => k.startsWith('classic:tab:')))) patchClassic();
@@ -1019,6 +1033,59 @@ async function retryClassic() {
     const { [CLASSIC_SEARCH]: saved } = await chrome.storage.local.get(CLASSIC_SEARCH);
     await chrome.tabs.update(tab.id, { url: classicUrl(saved || '') || classicUrl(tab.url) });
   }
+}
+
+// ---------- ⚙ Settings: ChatGPT, what each bid tab shows, classic job search ----------
+// The tabs keep only what is needed on screen; everything you set up once lives here.
+const SHOW_KEY = 'panelShow';
+const SHOW_ITEMS = [['details', 'Details'], ['jobs', 'Job list'], ['questions', 'Application questions'], ['preview', 'CV preview']];
+// Out Bids shows everything; Easy Bids fits on one screen: profile, Details, the Easy Apply job, Resume.
+const SHOW_DEFAULTS = { bid: { details: true, jobs: true, questions: true, preview: true }, easy: { details: true, jobs: false, questions: false, preview: false } };
+const shownFor = (mode) => ({ ...(SHOW_DEFAULTS[mode] || {}), ...((S.show || {})[mode] || {}) });
+async function loadShow() { S.show = (await chrome.storage.local.get(SHOW_KEY).catch(() => ({})))[SHOW_KEY] || {}; }
+function applyShow() {
+  const view = $('#bidView'); if (!view || !SHOW_DEFAULTS[S.mode]) return;
+  const v = shownFor(S.mode);
+  for (const [k] of SHOW_ITEMS) view.classList.toggle(`hide-${k}`, !v[k]);
+}
+function showViews() {
+  const bidLike = S.mode === 'bid' || S.mode === 'easy';
+  $('#settingsView').hidden = !S.settingsOpen;
+  $('#bidView').hidden = S.settingsOpen || !bidLike;
+  $('#addView').hidden = S.settingsOpen || S.mode !== 'add';
+  $('#settingsBtn')?.classList.toggle('on', S.settingsOpen);
+}
+function renderSettings() {
+  const el = $('#settingsView'); if (!el) return;
+  const bidLike = S.mode === 'bid' || S.mode === 'easy';
+  const tabName = esc(MODES.find((m) => m.id === S.mode)?.label || '');
+  const v = shownFor(S.mode);
+  el.innerHTML = `
+    <main class="main settings">
+      <div class="card-head"><span class="card-title">Settings</span><button class="secondary sm" data-action="settings">Done</button></div>
+      ${bidLike ? `<section class="card"><div class="card-head"><span class="card-title">ChatGPT</span></div><div id="settingsGpt"></div></section>
+      <section class="card"><div class="card-head"><span class="card-title">Show on ${tabName}</span></div>
+        <div class="set-grid">${SHOW_ITEMS.map(([k, label]) => `<label class="set-switch"><input type="checkbox" data-action="showToggle" data-k="${k}" ${v[k] ? 'checked' : ''}> ${esc(label)}</label>`).join('')}</div>
+      </section>` : ''}
+      <section class="card"><div class="card-head"><span class="card-title">Classic job search</span></div><div id="settingsClassic"></div></section>
+    </main>`;
+  patchSettingsGpt(); patchClassic();
+}
+// The ChatGPT connection: state, plan, CVs ready, chats waiting to be deleted, Connect / Disconnect.
+function patchSettingsGpt() {
+  const el = $('#settingsGpt'); if (!el) return;
+  const st = S.gptSnap?.state || {};
+  const mine = Object.values(S.gptSnap?.threads || {}).filter((x) => x.profileId === S.profileId && x.stage !== 'closing');
+  const ready = mine.filter((x) => x.stage === 'ready').length;
+  const status = !st.enabled ? 'Not connected — CVs are written by hand (copy prompt / paste JSON).'
+    : st.status === 'checking' ? 'Checking your ChatGPT account…'
+    : st.notice || `Connected${st.plan ? ` · ChatGPT ${esc(planLabel(st.plan))}` : ''} · ${ready}/${mine.length} CVs ready for this profile`;
+  const del = st.toDelete ? ` · ${st.toDelete} chat${st.toDelete === 1 ? '' : 's'} to delete` : '';
+  el.innerHTML = `<div class="muted small">${esc(status)}${del}</div>
+    <div class="muted small">CVs are written in ChatGPT tabs opened in the background; a CV's chat stays open until the job is applied, reported or skipped.</div>
+    <div class="row">${!st.enabled ? '<button class="sm" data-action="gptConnect">Connect ChatGPT</button>'
+      : `${['needs_login', 'needs_plan'].includes(st.status) ? '<button class="secondary sm" data-action="gptSignIn">Open ChatGPT</button><button class="sm" data-action="gptContinue">Continue</button>' : ''}
+         <button class="secondary sm" data-action="gptDisconnect" title="Stop writing CVs with ChatGPT and delete its chats">Disconnect</button>`}</div>`;
 }
 
 // ---------- a newer version is on disk (the updater put it there) ----------
@@ -1062,6 +1129,7 @@ async function startMain() {
   }
   const modes = availableModes();
   if (!modes.length) { renderNoAccess(); return; }
+  await loadShow();
   renderFrame(modes);
   patchUpdateBar();
   const { [MODE_KEY]: saved } = await chrome.storage.local.get(MODE_KEY).catch(() => ({}));
@@ -1080,9 +1148,11 @@ function renderFrame(modes) {
     <header class="topbar">
       ${tabs}
       <span class="who ellipsis" title="${esc(u.full_name || u.username || '')} · TailorResume Assistant v${esc(chrome.runtime.getManifest().version)}">${esc(u.username || '')}</span>
+      <button class="icon secondary" id="settingsBtn" data-action="settings" title="Settings — ChatGPT, what to show, classic job search">${I.gear}</button>
       <button class="icon secondary" data-action="logout" title="Sign out">${I.logout}</button>
     </header>
     <div class="update-bar" id="updateBar" hidden></div>
+    <div id="settingsView" hidden></div>
     <div id="bidView" role="tabpanel" hidden></div>
     <div id="addView" role="tabpanel" hidden></div>`;
   $('#app').onclick = onClick;
@@ -1100,8 +1170,8 @@ async function setMode(mode) {
   chrome.storage.local.set({ [MODE_KEY]: mode }).catch(() => {});
   document.querySelectorAll('.modes .mode').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.mode === mode)));
   const bidLike = mode === 'bid' || mode === 'easy';
-  $('#bidView').hidden = !bidLike;
-  $('#addView').hidden = mode !== 'add';
+  showViews();
+  if (S.settingsOpen) renderSettings();
   if (mode !== 'add') adder?.hide();   // its tab-URL checks run only while it is on screen
   if (bidLike && S.bidView !== mode) {
     S.bidView = mode;
@@ -1141,7 +1211,7 @@ function renderMain() {
           <button class="icon secondary" id="refreshBtn" data-action="refresh" title="Refresh profiles and jobs">${I.refresh}</button>
         </div>
         <section class="card" id="copyCard"></section>
-        ${S.mode === 'easy' ? '<section class="card" id="easyCard"><div id="easyBody"></div><div id="classicRow" class="classic-row"></div></section>' : ''}
+        ${S.mode === 'easy' ? '<section class="card" id="easyCard"><div id="easyBody"></div></section>' : ''}
       </div>
       <div class="col">
         <section class="card" id="jobCard">
@@ -1158,7 +1228,8 @@ function renderMain() {
     </main>`;
   $('#profileSelect').addEventListener('change', (e) => { setError(''); setMessage(''); selectProfile(e.target.value); });
   wireCombo();
-  patchAlerts(); patchProfile(); patchJob(); patchBuild(); patchCopy(); patchQA(); patchEasy(); patchClassic();
+  patchAlerts(); patchProfile(); patchJob(); patchBuild(); patchCopy(); patchQA(); patchEasy();
+  applyShow();
 }
 
 // The job box shows the current job ("Company — Title") until you click into it;
@@ -1399,7 +1470,7 @@ async function onClick(e) {
       case 'gptContinue': await gpt('continue'); break;
       case 'restartExt': chrome.runtime.reload(); break;
       case 'gptSignIn': await chrome.tabs.create({ url: 'https://chatgpt.com/auth/login' }); break;   // the user's own tab, to sign in
-      case 'gptDisconnect': e.preventDefault(); await gpt('disconnect'); toast('ChatGPT disconnected — deleting its chats'); break;
+      case 'gptDisconnect': e.preventDefault(); await gpt('disconnect'); S.gptSnap = await gptSnapshot(); patchSettingsGpt(); toast('ChatGPT disconnected — deleting its chats'); break;
       case 'gptRetry': await api('/api/gpt/retry', { method: 'POST', body: { profile_id: S.profileId, job_id: S.jobId } }); await gpt('sync'); break;
       case 'manual': e.preventDefault(); S.manual = !S.manual; patchBuild(); break;
       case 'saveQuestions': await saveQuestions(); break;
@@ -1428,6 +1499,13 @@ async function onClick(e) {
       case 'easyAllow': await allowLinkedIn(); break;
       case 'easyRetry': scheduleEasyCheck(true); break;
       case 'genCv': await genCv(); break;
+      case 'settings': S.settingsOpen = !S.settingsOpen; if (S.settingsOpen) renderSettings(); showViews(); break;
+      case 'showToggle': {
+        const m = S.mode; S.show = { ...S.show, [m]: { ...shownFor(m), [t.dataset.k]: t.checked } };
+        await chrome.storage.local.set({ [SHOW_KEY]: S.show }); applyShow(); break;
+      }
+      case 'classicSave': await saveClassicUrl(); break;
+      case 'openChat': await gpt('openChat', { key: threadKey(S.profileId, S.jobId) }); break;
       case 'classicToggle': await chrome.storage.local.set({ [CLASSIC_ON]: t.checked }); break;
       case 'classicOpen': await openClassicSearch(); break;
       case 'classicRetry': e.preventDefault(); await retryClassic(); break;
