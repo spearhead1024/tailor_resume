@@ -84,7 +84,13 @@
     windows: {
       getCurrent: (a, b) => { const [, cb] = optsCb(a, b); return call(Promise.resolve({ id: 1, focused: true, type: 'normal' }), cb); },
     },
-    scripting: { executeScript: (inj, cb) => call(H.executeScript(inj), cb) },
+    scripting: {
+      executeScript: (inj, cb) => call(H.executeScript(inj), cb),
+      // Content scripts registered at run time (the ChatGPT driver): injected when a matching tab loads.
+      registerContentScripts: (list, cb) => call(Promise.resolve(H.registerContentScripts(list)), cb),
+      getRegisteredContentScripts: (filter, cb) => call(Promise.resolve(H.registeredContentScripts(filter)), cb),
+      unregisterContentScripts: (filter, cb) => call(Promise.resolve(H.unregisterContentScripts(filter)), cb),
+    },
     permissions: {
       contains: (_p, cb) => call(Promise.resolve(true), cb),
       request: (_p, cb) => call(Promise.resolve(true), cb),
@@ -99,16 +105,6 @@
       download: (opts, cb) => call(H.download(opts, me), cb),
       search: (_q, cb) => call(Promise.resolve([{ id: 1, state: 'complete' }]), cb),
       onChanged: ev('download'),
-    },
-    commands: {
-      getAll: (cb) => call(Promise.resolve([{ name: 'autofill', description: 'Autofill the application form on this tab', shortcut: 'Alt+Shift+F' }]), cb),
-      onCommand: ev('command'),
-    },
-    debugger: {
-      attach: (_t, _v, cb) => call(Promise.reject(new Error('Not available in the dev harness — React dropdowns are typed into only in the real extension.')), cb),
-      detach: (_t, cb) => call(Promise.resolve(), cb),
-      sendCommand: (_t, _m, _p, cb) => call(Promise.reject(new Error('Not available in the dev harness.')), cb),
-      onDetach: ev('debuggerDetach'),
     },
     sidePanel: {
       setPanelBehavior: () => Promise.resolve(),

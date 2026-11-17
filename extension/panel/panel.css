@@ -141,18 +141,12 @@ textarea.json { min-height: 96px; font-family: ui-monospace, SFMono-Regular, Men
 .login .hero img { width: 40px; height: 40px; border-radius: 10px; }
 .login label { display: grid; gap: 4px; font-size: 12px; font-weight: 500; color: var(--muted); }
 
-/* Autofill */
 button.sm { padding: 5px 9px; font-size: 12px; }
-.fill-report { display: grid; gap: 5px; padding: 8px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--border-soft); font-size: 12px; }
-.kw .todo { background: var(--warning-bg); color: var(--warning); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* Profile picker on top; "{Name} Details" card; equal Autofill / Remember */
+/* Profile picker on top; the "Details" card */
 select.profile-select { font-weight: 600; font-size: 13px; padding: 8px 10px; background: var(--panel); border-color: var(--border); }
 .card-head .card-title { min-width: 0; }
 .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; flex: 0 0 auto; }
-.pair button { width: 92px; height: 28px; padding: 0 8px; font-size: 12px; }
-.pair button svg { width: 14px; height: 14px; }
 #jobSearch { font-size: 13.5px; font-weight: 500; }
 
 /* ── Responsive ─────────────────────────────────────────────────────────────
@@ -171,8 +165,6 @@ select.profile-select { font-weight: 600; font-size: 13px; padding: 8px 10px; ba
 @container (max-width: 300px) {
   .card-head { flex-wrap: wrap; }
   .card-head .card-title { flex: 1 1 100%; }
-  .card-head .pair { flex: 1 1 100%; }
-  .pair button { width: auto; }
   .copy-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
   .build-row { grid-template-columns: minmax(0, 1fr) 32px; }
   .build-row [data-action="copyPrompt"] { grid-column: 1 / -1; }
@@ -222,15 +214,6 @@ button.icon, .profile-row .icon { width: var(--btn-h); height: var(--btn-h); min
 .copy-btn { width: 28px; height: 28px; }
 @container (min-width: 420px) { .copy-btn { width: 32px; height: 32px; } }
 .ats-badge { height: auto; }
-
-/* Autofill and Remember: identical boxes; the shortcut sits under Autofill */
-.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 3px 6px; width: 184px; }
-.pair button { width: 100%; height: var(--btn-h); padding: 0 6px; }
-.kbd-hint { grid-column: 1; text-align: center; font-size: 10.5px; color: var(--muted); line-height: 1.3; }
-.kbd-hint:empty { display: none; }
-.kbd-hint a { color: var(--muted); text-decoration: underline dotted; }
-kbd { font-family: inherit; font-size: 10.5px; padding: 0 5px; border: 1px solid var(--border-soft); border-radius: 4px; background: var(--panel-2); color: var(--text-soft); }
-@container (max-width: 300px) { .pair { width: 100%; } }
 
 /* Alerts: dismissible */
 .alert { display: flex; gap: 8px; align-items: flex-start; }

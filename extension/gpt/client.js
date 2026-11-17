@@ -1,11 +1,11 @@
 // The side panel's handle on the ChatGPT connection (gpt/runner.js runs in the service
-// worker; ChatGPT itself runs hidden in its offscreen document). Reads come straight from
+// worker; ChatGPT itself runs in real background tabs it opens). Reads come straight from
 // chrome.storage; every change is a message to the worker, which is the only writer.
 
 export const GPT_KEYS = { threads: 'gptThreads', state: 'gptState' };
 export const CHAT_ORIGINS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
 export const CHAT_URL = 'https://chatgpt.com/';
-export const PARALLEL = 3;   // hidden ChatGPT frames at once = jobs prepared ahead (the job on screen + 2)
+export const PARALLEL = 3;   // ChatGPT tabs at once = jobs prepared ahead (the job on screen + 2)
 export const threadKey = (profileId, jobId) => `${profileId}:${jobId}`;
 
 export async function gptSnapshot() {

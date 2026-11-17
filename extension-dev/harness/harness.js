@@ -8,7 +8,6 @@
  *   tabs.sendMessage to content scripts. Alarms run as timers.
  * - chatgpt.com tabs show pages/chatgpt.html, a stand-in with the same composer, send /
  *   stop buttons and a streamed reply — so the GPT helper's real driver runs against it.
- * - the Autofill shortcut Alt+Shift+F goes to the worker, like Chrome's commands.
  * - Dry run: API writes are answered here instead of reaching the server. */
 'use strict';
 
@@ -20,7 +19,7 @@ const SAMPLES = [
   { label: 'Lever posting (page only)', url: 'https://jobs.lever.co/contoso/7c1e5a2b-3d4f-4e6a-9b8c-1d2e3f4a5b6c', file: 'lever.html' },
   { label: 'LinkedIn job view', url: 'https://www.linkedin.com/jobs/view/4123456789', file: 'linkedin.html' },
   { label: 'Company careers page (generic)', url: 'https://careers.fabrikam.example/jobs/platform-engineer', file: 'generic.html' },
-  { label: 'Application form (for Autofill)', url: 'https://boards.greenhouse.io/northwindlabs/jobs/4012345/apply', file: 'apply-form.html' },
+  { label: 'Application form', url: 'https://boards.greenhouse.io/northwindlabs/jobs/4012345/apply', file: 'apply-form.html' },
 ];
 const clone = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
 
@@ -127,6 +126,20 @@ function onFrameLoad(t) {
   t.markReady?.();
   emit('tabUpdated', t.id, { status: 'complete', title: t.title }, info(t));
   renderTabs();
+  injectRegistered(t);
+}
+
+// chrome.scripting.registerContentScripts: kept here, injected (document_idle) into tabs whose URL matches.
+let registered = [];
+const matchGlob = (pattern, url) => new RegExp('^' + pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$').test(url);
+function registerContentScripts(list) { registered = [...registered.filter((r) => !list.some((x) => x.id === r.id)), ...list]; }
+function registeredContentScripts(filter) { return registered.filter((r) => !filter?.ids || filter.ids.includes(r.id)); }
+function unregisterContentScripts(filter) { registered = registered.filter((r) => filter?.ids && !filter.ids.includes(r.id)); }
+function injectRegistered(t) {
+  for (const r of registered) {
+    if (!(r.matches || []).some((m) => matchGlob(m, t.url))) continue;
+    executeScript({ target: { tabId: t.id }, files: r.js }).catch((e) => console.error('[harness] content script', r.id, e));
+  }
 }
 
 // Links in a page navigate the TAB (through srcFor), so the panel sees real URLs.
@@ -310,15 +323,12 @@ async function download(opts, win) {
   return id;
 }
 
-// The Autofill shortcut, as background.js does it.
+
+// Ctrl+Shift+R reloads the panel (anywhere in the harness).
 function hookKeys(win) {
   win.addEventListener('keydown', (e) => {
-    if (e.altKey && e.shiftKey && e.code === 'KeyF') { e.preventDefault(); autofillCommand(); }
     if (e.ctrlKey && e.shiftKey && e.code === 'KeyR') { e.preventDefault(); reloadPanel(); }
   }, true);
-}
-function autofillCommand() {
-  emit('command', 'autofill', info(tabById(activeId)));   // background.js handles it, as in Chrome
 }
 
 // ---------- dry run + request log ----------
@@ -468,6 +478,7 @@ window.__harness = {
   },
   tabs: tabsApi,
   executeScript, download, sendMessage, tabMessage, dryRunAnswer, dryRunPatch, log,
+  registerContentScripts, registeredContentScripts, unregisterContentScripts,
   alarmCreate, alarmGet, alarmClear, pushUrl,
 };
 

@@ -1,9 +1,9 @@
-/* chatgpt.com driver — runs inside the HIDDEN ChatGPT frames of the extension's offscreen
- * document (gpt/offscreen.js); registered as a content script for chatgpt.com once ChatGPT
- * is connected. In the user's own ChatGPT tabs it does nothing.
+/* chatgpt.com driver — runs in the ChatGPT TABS the extension opens (gpt/runner.js: real tabs, in
+ * the background); registered as a content script for chatgpt.com once ChatGPT is connected. In
+ * the user's own ChatGPT tabs it does nothing (the worker doesn't know those tabs).
  *
- * A frame is named "trgpt-<work id>". On load the driver asks the service worker for that
- * frame's task (gpt_ready → task), does it, and reports back (gpt_done) — a fresh message,
+ * On load the driver asks the service worker for its tab's task (gpt_ready → { ours, task }; the
+ * worker tells tabs apart by their id), does it, and reports back (gpt_done) — a fresh message,
  * so a service worker suspended meanwhile wakes up for it. While working it sends a
  * heartbeat (gpt_alive), which also keeps the service worker running. The conversation is
  * reported the moment ChatGPT opens it (gpt_alive with its URL), so the server can delete it
@@ -21,13 +21,13 @@
  * failure:   { ok: false, kind: needs_login | free_plan | plan_unknown | rate_limited | timeout | invalid_json | no_composer | error, error }
  * The DOM selectors are the fragile part; each lookup tries several known variants. */
 (() => {
-  const FRAME = String(window.name || '');
-  if (window.top === window || !FRAME.startsWith('trgpt-') || window.__trGptDriver) return;   // not our hidden frame
+  if (window.top !== window || window.__trGptDriver) return;   // the tab's page only (not ChatGPT's own frames)
   window.__trGptDriver = true;
+  let FRAME = '';                                                 // this tab's work id, from the worker
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const q = (sels, root = document) => { for (const s of sels) { try { const el = root.querySelector(s); if (el) return el; } catch { /* bad selector */ } } return null; };
-  // This page lives in a hidden frame that may never be laid out or painted: "visible" and
+  // This page lives in a background tab that may not be laid out or painted: "visible" and
   // "text" must not depend on layout. Visible = in the document and not hidden by CSS;
   // text = the text content without <script>/<style> (innerText of an unrendered element
   // falls back to the raw source, scripts included).
@@ -307,14 +307,17 @@
     return res;
   }
 
-  // Ask for this frame's task, do it, report. (Pull — a hidden frame has no tab id to send to.)
+  // Ask for this tab's task, do it, report. (Pull: a fresh message wakes a suspended worker.)
   (async () => {
     let task = null;
     for (let i = 0; i < 5 && !task; i++) {
-      task = await chrome.runtime.sendMessage({ type: 'gpt_ready', frame: FRAME }).then((r) => r?.task || null).catch(() => null);
-      if (!task) await sleep(1500);
+      const r = await chrome.runtime.sendMessage({ type: 'gpt_ready' }).catch(() => null);
+      if (r && r.ours === false) return;          // the bidder's own ChatGPT tab: nothing to do here
+      task = r?.task || null;
+      if (!task) await sleep(1500);               // just opened: the worker is still recording its task
     }
     if (!task) return;
+    FRAME = task.id;
     const beat = (conversation = openConversation()) => chrome.runtime.sendMessage({ type: 'gpt_alive', frame: FRAME, conversation }).catch(() => {});
     const alive = setInterval(beat, 20_000);
     // ChatGPT opens the conversation (/c/<id>) right after the prompt is sent: report it at once.

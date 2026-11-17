@@ -463,10 +463,10 @@ export default function Jobs() {
         <span className="muted">/ {counts.total ?? 0} match{(counts.total ?? 0) === 1 ? '' : 'es'} filters</span>
       </div>
 
-      {/* Add job form */}
+      {/* Add Job form */}
       {showForm && (
         <div className="card" style={{ marginBottom: '1rem' }}>
-          <h2 style={{ marginTop: 0 }}>Add job</h2>
+          <h2 style={{ marginTop: 0 }}>Add Job</h2>
           <div className="row">
             <div className="field"><label>Company{REQ}</label><input value={newJob.company} onChange={(e) => setNewJob({ ...newJob, company: e.target.value })} /></div>
             <div className="field"><label>Job title{REQ}</label><input value={newJob.job_title} onChange={(e) => setNewJob({ ...newJob, job_title: e.target.value })} /></div>

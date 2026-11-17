@@ -15,12 +15,11 @@
  * opening a queued job in a tab yourself selects it here.
  * By hand: copy the ChatGPT prompt → paste the JSON → Generate CV (saved to Downloads) →
  * Mark as Applied / Report / Skip, which moves on to the next job.
- * Autofill fills the application form (and attaches the CV) from the profile
- * plus answers learned per profile via Remember answers.
+ * The profile's details are click-to-copy (Autofill / Remember were removed in 1.6).
  * Vanilla JS, no deps (extension CSP forbids remote code). */
 
 import { request, getConfig, setSession, clearSession } from '../lib/api.js';
-import { requestSiteAccess, hasSiteAccess, autofillTab, collectAnswers } from './autofill-runner.js';
+import { requestSiteAccess } from '../lib/access.js';
 import { createAdder } from './adder.js';
 import { linkedinJobId, readLinkedInJob } from './linkedin.js';
 import { CLASSIC_ON, CLASSIC_SEARCH, classicTabKey, classicUrl, isAiSearch, describeSearch, applicationOpen } from '../lib/classic.js';
@@ -58,7 +57,6 @@ const I = {
   // Actions
   download: svg('<path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/>'),
   refresh: svg('<polyline points="23 4 23 10 17 10"/><path d="M20.5 15a9 9 0 1 1-2.1-9.4L23 10"/>'),
-  wand: svg('<path d="M15 4V2M15 10V8M11 6h2M17 6h2"/><path d="M3 21l11-11"/><path d="M12.5 8.5l3 3"/>'),
   sparkle: svg('<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/>'),
   copy: svg('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'),
   logout: svg('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>'),
@@ -88,9 +86,7 @@ const S = {
   refreshing: false,
   netDown: false,
   previewOpen: (() => { try { return localStorage.getItem('panelPreviewOpen') !== '0'; } catch { return true; } })(),
-  shortcut: null,      // the Autofill shortcut as Chrome reports it ('' = not set)
   confirm: '',         // '' | report | skip
-  fill: { busy: '', report: null },   // autofill: busy '' | fill | learn
   error: '', message: '',
 };
 
@@ -261,7 +257,7 @@ async function activeTab() {
 let panelWindowId = null;
 chrome.windows.getCurrent().then((w) => { panelWindowId = w.id; }).catch(() => {});
 async function followTab(tabId, url) {
-  if (S.screen !== 'main' || S.mode !== 'bid' || S.busy || S.fill.busy || !url) return;
+  if (S.screen !== 'main' || S.mode !== 'bid' || S.busy || !url) return;
   const job = jobForUrl(url);
   if (!job) return;
   setJobTab(tabId);                     // a tab showing a queued job is the job tab now
@@ -279,18 +275,8 @@ chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
   else if (change.url) followTab(tabId, change.url);
 });
 
-// ---------- autofill ----------
-const SITE_ACCESS_HELP = 'Autofill needs access to job sites and it was not allowed. Click Autofill again and choose '
-  + '"Allow" — or open chrome://extensions → TailorResume Assistant → Details → Site access → "On all sites".';
-
-async function activeTabId() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id || !/^https?:/.test(tab.url || '')) throw new Error('Open the job application in this tab first.');
-  return tab.id;
-}
-
-// The current CV's PDF, fetched once per resume and shared by the preview, Download
-// and Autofill (which attaches it). The object URL lives as long as that resume is
+// ---------- the CV file ----------
+// The current CV's PDF, fetched once per resume and shared by the preview and Download. The object URL lives as long as that resume is
 // current; switching resumes revokes it.
 let pdfCache = { id: '', promise: null, url: '' };
 function cvBlob(id) {
@@ -317,67 +303,6 @@ const cvFilename = () => {
     .trim().replace(/^[.\s]+|[.\s]+$/g, '').slice(0, 120);
   return `${name || 'Resume'} resume.pdf`;
 };
-
-async function cvPayload() {
-  if (!S.resumeId) return null;
-  const blob = await cvBlob(S.resumeId);
-  const base64 = await new Promise((resolve, reject) => {
-    const fr = new FileReader();
-    fr.onload = () => resolve(String(fr.result).split(',')[1] || '');
-    fr.onerror = reject;
-    fr.readAsDataURL(blob);
-  });
-  return { base64, filename: cvFilename() };
-}
-
-async function autofill({ fromShortcut = false } = {}) {
-  if (S.fill.busy) return;                       // one run at a time (double click / shortcut)
-  if (fromShortcut) {
-    // Chrome only shows the site-access prompt for a click, not a key press.
-    if (!(await hasSiteAccess())) { setError('Click Autofill once to allow access to job sites — after that the shortcut works too.', 10000); return; }
-  } else if (!(await requestSiteAccess())) { setError(SITE_ACCESS_HELP); return; }
-  if (S.fill.busy) return;                       // a second click got here while the first awaited
-  S.fill = { busy: 'fill', report: null }; patchCopy();
-  try {
-    const tabId = await activeTabId();
-    const [data, cv] = await Promise.all([
-      api(`/api/autofill/data?profile_id=${encodeURIComponent(S.profileId)}`),
-      cvPayload().catch(() => null),
-    ]);
-    const report = await autofillTab(tabId, { ...data, cv }, {
-      onProgress: (r) => { S.fill.report = r; patchCopy(); },   // plain fields done; dropdowns next
-    });
-    S.fill.report = report;
-    if (!report.fields && report.cv === 'none') setError('No application form found on this page — open the application, then Autofill.');
-    else { setError(''); track('autofill'); }
-  } finally { S.fill.busy = ''; patchCopy(); }
-}
-
-// Learn what the bidder filled by hand, so the same question fills itself next time.
-async function rememberAnswers({ silent = false } = {}) {
-  if (!silent && S.fill.busy) return;
-  if (silent ? !(await hasSiteAccess()) : !(await requestSiteAccess())) {
-    if (!silent) setError(SITE_ACCESS_HELP);
-    return;
-  }
-  if (!silent) {
-    if (S.fill.busy) return;
-    S.fill.busy = 'learn'; patchCopy();
-  }
-  try {
-    const tabId = await activeTabId();
-    const fields = await collectAnswers(tabId);
-    if (!fields.length) { if (!silent) setError('No filled-in form fields on this page — answer the questions on the form, then click Remember.', 8000); return; }
-    const res = await api('/api/autofill/learn', { method: 'POST', body: { profile_id: S.profileId, fields } });
-    if (silent) return;
-    // The autofill report's "answer these" list is now stale — clear it; the alert says what happened.
-    S.fill.report = null;
-    const n = (res.answers || 0) + (res.labels || 0);
-    setMessage(n ? `Remembered ${n} answer${n === 1 ? '' : 's'} for ${selectedProfile()?.name || 'this profile'} — next time they fill in by themselves.`
-      : 'Nothing new to remember — every answer on this form is already known.');
-  } catch (e) { if (!silent) throw e; }
-  finally { if (!silent) { S.fill.busy = ''; patchCopy(); } }
-}
 
 // ---------- alerts ----------
 // Success notes fade after 6s. A network error fades after 10s, or the moment the
@@ -475,10 +400,9 @@ function patchRefresh() {
 
 async function selectProfile(id) {
   S.profileId = id;
-  // Nothing of the previous profile may survive: its CV would otherwise be attached by Autofill
-  // to a form being filled with the new profile's details.
+  // Nothing of the previous profile may survive (its job, CV and state).
   Object.assign(S, { queue: [], jobId: '', job: null, extraJob: null, resumeId: '', ats: null, atsScore: 0,
-    atsOpen: false, confirm: '', fill: { busy: '', report: null }, gen: new Map(), genBusy: false, easy: freshEasy() });
+    atsOpen: false, confirm: '', gen: new Map(), genBusy: false, easy: freshEasy() });
   easySeq++;
   patchCopy(); patchBuild(); patchEasy();
   await chrome.storage.local.set({ [PROFILE_KEY]: id });
@@ -519,7 +443,7 @@ async function selectJob(id, { open = true, item: given = null } = {}) {
   const item = S.queue.find((j) => j.id === id) || (given?.id === id ? given : null);
   S.extraJob = item && !S.queue.includes(item) ? item : null;
   Object.assign(S, {
-    jobId: item ? id : '', job: null, confirm: '', atsOpen: false, fill: { busy: S.fill.busy, report: null },
+    jobId: item ? id : '', job: null, confirm: '', atsOpen: false,
     resumeId: item?.resume_id || '', ats: item?.ats || null, atsScore: item?.ats_score || 0,
   });
   const ta = $('#jsonInput'); if (ta) ta.value = '';
@@ -654,8 +578,6 @@ const markApplied = () => {
   const rid = S.resumeId;                // read before any await — it's THIS job's CV
   if (!rid) { setError('Generate the CV before marking applied.'); return; }
   return finish('apply', async (job) => {
-    // Learn from the form before the tab moves on to the next job (Out Bids — Easy Bids has no Autofill).
-    if (S.mode === 'bid') await rememberAnswers({ silent: true });
     track('mark_applied', job);
     await api(`/api/resumes/${encodeURIComponent(rid)}/apply`, { method: 'POST' });
   }, (job) => `Applied — ${job.company}.`);
@@ -1143,11 +1065,7 @@ async function startMain() {
   renderFrame(modes);
   patchUpdateBar();
   const { [MODE_KEY]: saved } = await chrome.storage.local.get(MODE_KEY).catch(() => ({}));
-  // The Autofill shortcut was pressed on a job page: that is Out Bids' job.
-  const { [AUTOFILL_REQ]: req } = await chrome.storage.session.get(AUTOFILL_REQ).catch(() => ({}));
-  const mode = req && modes.includes('bid') ? 'bid' : (modes.includes(saved) ? saved : modes[0]);
-  await setMode(mode);
-  if (mode === 'bid' && await takeAutofillRequest()) autofill({ fromShortcut: true }).catch(showError);
+  await setMode(modes.includes(saved) ? saved : modes[0]);
 }
 
 function renderFrame(modes) {
@@ -1186,15 +1104,13 @@ async function setMode(mode) {
   $('#addView').hidden = mode !== 'add';
   if (mode !== 'add') adder?.hide();   // its tab-URL checks run only while it is on screen
   if (bidLike && S.bidView !== mode) {
-    const first = !S.bidView;
     S.bidView = mode;
     Object.assign(S, { queue: [], jobId: '', job: null, extraJob: null, resumeId: '', ats: null, atsScore: 0, atsOpen: false,
-      confirm: '', fill: { busy: '', report: null }, questions: [], answers: [], qaDraft: null, manual: false,
+      confirm: '', questions: [], answers: [], qaDraft: null, manual: false,
       gen: new Map(), genBusy: false, easy: freshEasy() });
     easySeq++;
     pdfCache = { id: '', promise: null, url: '' };
     renderMain();
-    if (first) loadShortcut();
     await loadProfiles();
   } else if (mode === 'add') {
     await getAdder().show($('#addView'));
@@ -1426,7 +1342,7 @@ function patchBuild() {
 }
 
 // The generated CV, previewed at the bottom of the panel (Chrome's PDF viewer, from
-// the same fetched PDF that Download and Autofill use). Hide/Show is remembered.
+// the same fetched PDF that Download uses). Hide/Show is remembered.
 let previewKey = '';
 function patchPreview() {
   const el = $('#previewCard'); if (!el) return;
@@ -1452,78 +1368,22 @@ function patchPreview() {
   }
 }
 
-// ---------- Autofill shortcut (manifest "commands": autofill) ----------
-// Chrome owns the binding (users can change it at chrome://extensions/shortcuts);
-// read it so the hint under the Autofill button is always the real key.
-async function loadShortcut() {
-  try {
-    const cmd = (await chrome.commands.getAll()).find((c) => c.name === 'autofill');
-    S.shortcut = cmd?.shortcut || '';
-  } catch { S.shortcut = ''; }
-  patchCopy();
-}
-// The shortcut, pressed on a job page: the worker opens the panel if needed and
-// asks it to autofill (see background.js). A message reaches an open panel; a panel
-// it just opened finds the request in session storage when it boots.
-const AUTOFILL_REQ = 'pendingAutofill';
-async function takeAutofillRequest() {
-  const { [AUTOFILL_REQ]: req } = await chrome.storage.session.get(AUTOFILL_REQ).catch(() => ({}));
-  if (!req) return false;
-  // With several windows open, only the panel of the window the key was pressed in acts.
-  if (req.windowId != null && panelWindowId != null && req.windowId !== panelWindowId) return false;
-  await chrome.storage.session.remove(AUTOFILL_REQ).catch(() => {});
-  return Date.now() - req.at < 15000;
-}
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg?.type === 'autofill' && S.screen === 'main' && availableModes().includes('bid')) {
-    (async () => {
-      if (S.mode !== 'bid') await setMode('bid');   // Autofill belongs to the Out Bids tab
-      if (await takeAutofillRequest() && !S.fill.busy) await autofill({ fromShortcut: true });
-    })().catch(showError);
-  }
-});
-
+// The profile's details, click-to-copy. (The card is just "Details" — the profile is picked right above.)
 function patchCopy() {
   const el = $('#copyCard'); if (!el) return;
   const p = selectedProfile();
   el.hidden = !p;
   if (!p) return;
-  const { busy, report } = S.fill, spin = '<span class="spinner"></span>';
-  const grid = `<div class="copy-grid">${copyFields(p).map(([label, value, icon], i) => `
+  el.innerHTML = `<div class="card-head"><span class="card-title">Details</span></div>
+    <div class="copy-grid">${copyFields(p).map(([label, value, icon], i) => `
       <span class="copy-cell"><button class="copy-btn" data-action="copyField" data-i="${i}" ${value ? '' : 'disabled'} title="${esc(label)}${value ? ': ' + esc(value) : ' — not set'}" aria-label="Copy ${esc(label)}">${icon}</button><span class="lbl">${esc(label)}</span></span>`).join('')}</div>`;
-  if (S.mode === 'easy') {   // Easy Apply is filled on LinkedIn: click-to-copy details only, no Autofill / Remember
-    el.innerHTML = `<div class="card-head"><span class="card-title ellipsis" title="${esc(p.name)} Details">${esc(p.name)} Details</span></div>${grid}`;
-    patchLocks();
-    return;
-  }
-  const CV_NOTE = { attached: 'CV attached', already: 'CV already attached', missing: 'generate the CV to attach it', failed: 'attach the CV by hand' };
-  const required = (report?.unfilled || []).filter((u) => u.required);
-  const optional = (report?.unfilled || []).length - required.length;
-  el.innerHTML = `
-    <div class="card-head"><span class="card-title ellipsis" title="${esc(p.name)} Details">${esc(p.name)} Details</span>
-      <div class="pair">
-        <button data-action="autofill" ${busy ? 'disabled' : ''} title="Fill this page's application form from the profile${S.resumeId ? ' and attach the CV' : ''}">${busy === 'fill' ? spin : I.wand} Autofill</button>
-        <button class="secondary" data-action="remember" ${busy ? 'disabled' : ''} title="Save the answers you filled by hand — the same questions fill themselves next time for this profile">${busy === 'learn' ? spin : 'Remember'}</button>
-        <span class="kbd-hint">${S.shortcut === null ? '' : S.shortcut
-          ? `<kbd title="Autofill shortcut — change it at chrome://extensions/shortcuts">${esc(S.shortcut)}</kbd>`
-          : '<a href="#" data-action="setShortcut" title="Choose a key for Autofill">Set shortcut</a>'}</span>
-      </div></div>
-    ${report ? `
-      <div class="fill-report">
-        <div><strong>Filled ${report.filled.length}</strong>${CV_NOTE[report.cv] ? ` · ${CV_NOTE[report.cv]}` : ''}${report.typing ? ` · <span class="spinner"></span> ${report.typing} dropdown${report.typing === 1 ? '' : 's'}…` : ''}</div>
-        ${required.length ? `<div class="muted small">Required — answer these, then click Remember:</div>
-          <div class="kw">${required.slice(0, 10).map((u) => `<span class="todo" title="${esc(u.label)}">${esc(u.label.length > 44 ? u.label.slice(0, 42) + '…' : u.label)}</span>`).join('')}${required.length > 10 ? `<span class="todo">+${required.length - 10} more</span>` : ''}</div>` : ''}
-        ${optional ? `<div class="muted small">${optional} optional field${optional === 1 ? '' : 's'} left empty</div>` : ''}
-        ${report.note ? `<div class="small" style="color:var(--warning)">${esc(report.note)}</div>` : ''}
-      </div>` : ''}
-    ${grid}`;
   patchLocks();
 }
 
-// While a request for the current job is in flight (Generate, Mark as Applied, …) or Autofill /
-// Remember runs, the job and profile can't change — the answer must land on the job it was for.
+// While a request for the current job is in flight (Generate, Mark as Applied, …) the job and
+// profile can't change — the answer must land on the job it was for.
 function patchLocks() {
-  const locked = !!(S.busy || S.fill.busy);
+  const locked = !!S.busy;
   const js = $('#jobSearch'); if (js) js.disabled = !S.queue.length || locked;
   const ps = $('#profileSelect'); if (ps) ps.disabled = !S.profiles.length || locked;
 }
@@ -1564,9 +1424,7 @@ async function onClick(e) {
         S.previewOpen = !S.previewOpen;
         try { localStorage.setItem('panelPreviewOpen', S.previewOpen ? '1' : '0'); } catch { /* storage blocked */ }
         patchPreview(); break;
-      case 'setShortcut': e.preventDefault(); await chrome.tabs.create({ url: 'chrome://extensions/shortcuts' }); break;
       case 'skipReason': { const ta = $('#skipReason'); if (ta) { ta.value = t.dataset.r; ta.focus(); } break; }
-      case 'autofill': await autofill(); break;
       case 'easyAllow': await allowLinkedIn(); break;
       case 'easyRetry': scheduleEasyCheck(true); break;
       case 'genCv': await genCv(); break;
@@ -1575,7 +1433,6 @@ async function onClick(e) {
       case 'classicRetry': e.preventDefault(); await retryClassic(); break;
       case 'easyCopyLink': e.preventDefault(); await copyText(jobViewLink(S.easy.lid), 'Job link'); break;
       case 'easyOpenLinkedIn': await chrome.tabs.create({ url: 'https://www.linkedin.com/jobs/search/?f_AL=true' }); break;
-      case 'remember': await rememberAnswers(); break;
       case 'copyField': {
         const f = copyFields(selectedProfile())[Number(t.dataset.i)];
         if (f && await copyText(f[1], f[0])) { t.classList.add('copied'); setTimeout(() => t.classList.remove('copied'), 900); }

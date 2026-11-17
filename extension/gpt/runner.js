@@ -5,10 +5,12 @@
  * delete. Nothing finished is lost when the browser closes — the server builds the CV the moment
  * ChatGPT's JSON arrives, and a lease that runs out (a closed browser) puts unfinished work back
  * in the queue. This worker only:
- *   claim     leases work for its free hidden frames (PARALLEL)
- *   run       one hidden chatgpt.com frame per task in the offscreen document (no tab, no window;
- *             gpt/offscreen.*), a session declarativeNetRequest rule lets chatgpt.com load there,
- *             gpt/driver.js does the work inside and reports back
+ *   claim     leases work for its free ChatGPT tabs (PARALLEL)
+ *   run       one REAL chatgpt.com tab per task — opened in the background (it doesn't take the
+ *             bidder's focus) but visible in the tab strip, where the bidder can watch it; it is
+ *             closed when its work is done. gpt/driver.js does the work inside and reports back.
+ *             (Up to 1.4 ChatGPT ran in hidden frames of an offscreen document, which needed
+ *             chatgpt.com's anti-framing headers stripped — real tabs need no such trick.)
  *   report    started (a conversation ChatGPT just opened) / result (→ the server builds the CV) /
  *             answers / fail / release / deleted
  *   mirror    the bidder's queue rows into chrome.storage (gptThreads), so the panel redraws
@@ -18,14 +20,14 @@
  * a failed or re-written CV, a closed browser, Disconnect, 2 hours idle). Deleting goes on while
  * disconnected too — then that is the only thing it does.
  *
- * Paid ChatGPT only. Connecting (and Continue) first checks the account in a hidden frame
+ * Paid ChatGPT only. Connecting (and Continue) first checks the account in a ChatGPT tab
  * (status 'checking'); the Free plan — or a plan that can't be confirmed — stops all work
  * (status 'needs_plan'). The driver checks again before every CV / answers.
  * status: off | checking | ok | needs_login | needs_plan | limited
  *
  * Local state (chrome.storage.local): gptState (connection; toDelete = chats waiting to be
- * deleted), gptFrames (this browser's frames, their leased tasks and the conversation each one
- * opened), gptDevice (this browser's id), gptThreads (the mirror), gptLegacyChats (chats an
+ * deleted), gptFrames (this browser's ChatGPT tabs — "frames" — their leased tasks and the
+ * conversation each one opened), gptDevice (this browser's id), gptThreads (the mirror), gptLegacyChats (chats an
  * older version left, until the server has them). */
 
 import { request } from '../lib/api.js';
@@ -37,10 +39,9 @@ const TIMEOUT_MIN = 6;                  // ChatGPT's answer to the CV prompt
 const WORK_LIMIT_MS = { write: (TIMEOUT_MIN + 4) * 60_000, answer: 5 * 60_000, delete: 3 * 60_000 };
 const SILENT_LIMIT_MS = 2 * 60_000;     // a frame whose driver stopped reporting (crashed / never started)
 const CHECK_LIMIT_MS = 90_000;          // the account check
-const OFFSCREEN = 'gpt/offscreen.html';
 const DRIVER_ID = 'tr-gpt-driver';
-const FRAME_RULE_ID = 9001;
 const FRAMES = 'gptFrames';
+const OUR_TABS = 'gptTabs';             // session storage: the ids of the ChatGPT tabs this extension opened
 
 const now = () => Date.now();
 const read = async (key, fallback) => (await chrome.storage.local.get(key))[key] ?? fallback;
@@ -74,37 +75,19 @@ function frames(fn) {
 }
 export const gptBusy = async () => Object.keys(await read(FRAMES, {})).length > 0;   // a restart now would lose work
 
-// ---------- hidden ChatGPT frames ----------
-let offscreenBusy = null;
-async function hasOffscreen() {
-  const ctx = await chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] }).catch(() => []);
-  return ctx.length > 0;
-}
-async function ensureOffscreen() {
-  if (await hasOffscreen()) return;
-  offscreenBusy ||= chrome.offscreen.createDocument({
-    url: OFFSCREEN, reasons: ['IFRAME_SCRIPTING'],
-    justification: 'Runs ChatGPT in hidden frames to write CVs and answer application questions without opening tabs.',
-  }).catch((e) => { if (!/single offscreen|already/i.test(e?.message || '')) throw e; }).finally(() => { offscreenBusy = null; });
-  await offscreenBusy;
-}
-const toOffscreen = (msg) => chrome.runtime.sendMessage({ target: 'gpt-offscreen', ...msg });
-// chatgpt.com refuses to be framed (X-Frame-Options / CSP frame-ancestors). Drop those headers —
-// only for frames this extension loads (no tab: TAB_ID_NONE), never in the user's own tabs.
-async function ensureFrameRule() {
-  await chrome.declarativeNetRequest.updateSessionRules({
-    removeRuleIds: [FRAME_RULE_ID],
-    addRules: [{
-      id: FRAME_RULE_ID, priority: 1,
-      action: { type: 'modifyHeaders', responseHeaders: [
-        { header: 'x-frame-options', operation: 'remove' },
-        { header: 'content-security-policy', operation: 'remove' },
-      ] },
-      condition: { requestDomains: ['chatgpt.com', 'chat.openai.com'], resourceTypes: ['sub_frame'], tabIds: [chrome.tabs.TAB_ID_NONE] },
-    }],
-  });
-}
-// The driver is a content script for chatgpt.com — registered only once access was granted.
+// ---------- ChatGPT tabs ----------
+// A work unit is still called a "frame" (its id: trgpt-<tab id>); it is a real, visible tab. Our tab
+// ids are kept in SESSION storage: after a browser restart the old ids are gone, so a new tab that
+// happens to get an old id is never mistaken for ours (its work was handed back meanwhile).
+const frameOfTab = (tabId) => `trgpt-${tabId}`;
+const tabOfFrame = (id) => Number(String(id || '').replace(/^trgpt-/, ''));
+const ourTabs = async () => new Set((await chrome.storage.session.get(OUR_TABS).catch(() => ({})))[OUR_TABS] || []);
+const setOurTabs = (set) => chrome.storage.session.set({ [OUR_TABS]: [...set] }).catch(() => {});
+let tabsLock = Promise.resolve();
+const withTabs = (fn) => { const run = tabsLock.then(async () => { const set = await ourTabs(); const out = await fn(set); await setOurTabs(set); return out; }); tabsLock = run.catch(() => {}); return run; };
+
+// The driver is a content script for chatgpt.com — registered only once access was granted. It
+// does nothing in the bidder's own ChatGPT tabs (the worker doesn't know them).
 export async function ensureDriver() {
   const have = await chrome.scripting.getRegisteredContentScripts({ ids: [DRIVER_ID] }).catch(() => []);
   if (have.length) return;
@@ -113,21 +96,43 @@ export async function ensureDriver() {
   }]);
 }
 async function openFrame(url) {
-  await ensureDriver(); await ensureFrameRule(); await ensureOffscreen();
-  const id = `trgpt-${now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
-  await toOffscreen({ type: 'open', id, url });
-  return id;
+  await ensureDriver();
+  // In the background (the bidder's focus stays where it is), at the end of the window's tab strip.
+  const tab = await chrome.tabs.create({ url, active: false });
+  await withTabs(async (set) => { set.add(tab.id); });
+  // Chrome may discard background tabs to save memory — that would kill a CV half-written.
+  await chrome.tabs.update(tab.id, { autoDiscardable: false }).catch(() => {});
+  return frameOfTab(tab.id);
 }
 async function closeFrame(id) {
-  if (!id || !(await hasOffscreen())) return;
-  const r = await toOffscreen({ type: 'close', id }).catch(() => null);
-  if (r && r.left === 0) await chrome.offscreen.closeDocument().catch(() => {});   // nothing left to run
+  if (!id) return;
+  const tabId = tabOfFrame(id);
+  await withTabs(async (set) => { set.delete(tabId); });
+  await chrome.tabs.remove(tabId).catch(() => {});        // already closed by the bidder: fine
 }
+// The conversation a tab is on right now (https://chatgpt.com/c/<id>), read from the tab itself — so a
+// tab closed the instant ChatGPT opened a chat (before the driver's next report) still has it deleted.
+async function tabConversation(id) {
+  const tab = await chrome.tabs.get(tabOfFrame(id)).catch(() => null);
+  return /\/c\/[A-Za-z0-9][A-Za-z0-9_-]{7,}/.test(tab?.url || '') ? tab.url : '';
+}
+// Our tabs that are still open (a tab the bidder closed is gone: its work goes back to the queue).
 async function liveFrames() {
-  if (!(await hasOffscreen())) return new Set();
-  const r = await toOffscreen({ type: 'list' }).catch(() => null);
-  return new Set(r?.ids || []);
+  const set = await ourTabs();
+  const open = new Set((await chrome.tabs.query({}).catch(() => [])).map((t) => t.id));
+  return new Set([...set].filter((id) => open.has(id)).map(frameOfTab));
 }
+// One of our tabs moved to a conversation (ChatGPT opens /c/<id> as soon as the prompt is sent): record
+// it on the server at once — the worker sees the URL change instantly, while the driver's own report
+// waits for a timer that Chrome slows down in background tabs.
+chrome.tabs.onUpdated.addListener((tabId, change) => {
+  if (!change.url || !/\/c\/[A-Za-z0-9][A-Za-z0-9_-]{7,}/.test(change.url)) return;
+  ourTabs().then((set) => { if (set.has(tabId)) return alive(frameOfTab(tabId), change.url); }).catch((e) => noteError('alive', e));
+});
+// The bidder closed one of our tabs: its work goes back to the queue (and is picked up again).
+chrome.tabs.onRemoved.addListener((tabId) => {
+  withTabs(async (set) => set.delete(tabId)).then((ours) => { if (ours) tick(); }).catch(() => {});
+});
 
 // ---------- the panel's copy of the server queue ----------
 // Server rows → the field names the panel reads.
@@ -173,7 +178,10 @@ async function tickOnce() {
     }
   });
   if (gone.length) await release(gone);
-  for (const s of stuck) { await closeFrame(s.id); await reportFailure(s.f, s.why); }
+  for (const s of stuck) {
+    if (s.f.lease?.work !== 'delete') s.f.conversation = s.f.conversation || await tabConversation(s.id);
+    await closeFrame(s.id); await reportFailure(s.f, s.why);
+  }
   await flushLegacyChats();
 
   // Disconnected: no CVs, no answers — only the chats left behind are deleted.
@@ -255,7 +263,7 @@ async function startWork(lease) {
   await frames(async (all) => { all[id] = { lease, task: frameTask(lease), startedAt: now(), aliveAt: now() }; });
 }
 async function taskFor(frame) {
-  if ((await state()).checkFrame === frame) return { id: 'check', kind: 'check' };
+  if ((await state()).checkFrame === frame) return { id: frame, kind: 'check' };
   const f = (await read(FRAMES, {}))[frame];
   if (!f) return null;
   await frames(async (all) => { if (all[frame]) all[frame].aliveAt = now(); });
@@ -328,7 +336,10 @@ async function finish(frame, res) {
 // handed back to the server queue.
 async function stopAllWork(keep = () => false) {
   const all = await frames(async (a) => { const list = Object.entries(a).filter(([, f]) => !keep(f)); for (const [id] of list) delete a[id]; return list; });
-  for (const [id] of all) await closeFrame(id);
+  for (const [id, f] of all) {
+    if (f.lease?.work !== 'delete') f.conversation = f.conversation || await tabConversation(id);
+    await closeFrame(id);
+  }
   await release(all.map(([, f]) => f));
 }
 
@@ -374,7 +385,17 @@ export function installGptRunner() {
   chrome.alarms.get('gpt-tick').then((a) => { if (!a) alarm(); }).catch(alarm);
   chrome.alarms.onAlarm.addListener((a) => { if (a.name === 'gpt-tick') tick().catch(() => {}); });
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    if (msg?.type === 'gpt_ready' && msg.frame) { taskFor(msg.frame).then((task) => sendResponse({ task }), () => sendResponse({ task: null })); return true; }
+    // The driver in a ChatGPT tab asks for its task: ours (opened by this worker) or not (the
+    // bidder's own ChatGPT tab — it then does nothing). Tabs are told apart by their tab id.
+    if (msg?.type === 'gpt_ready') {
+      const tabId = _sender.tab?.id;
+      if (tabId == null) { sendResponse({ ours: false, task: null }); return; }
+      ourTabs().then(async (set) => {
+        if (!set.has(tabId)) return { ours: false, task: null };
+        return { ours: true, task: await taskFor(frameOfTab(tabId)) };
+      }).then(sendResponse, () => sendResponse({ ours: false, task: null }));
+      return true;
+    }
     if (msg?.type === 'gpt_alive' && msg.frame) { alive(msg.frame, msg.conversation || '').catch((e) => noteError('alive', e)); return; }
     if (msg?.type === 'gpt_done' && msg.frame) { finish(msg.frame, msg.result).then(() => sendResponse({ ok: true }), () => sendResponse({ ok: false })); return true; }
     if (msg?.type === 'gpt') {
