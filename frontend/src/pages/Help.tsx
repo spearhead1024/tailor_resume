@@ -340,9 +340,10 @@ function WindowsAutoUpdate() {
     <div className="card" style={{ marginBottom: '1rem' }}>
       <h2 style={{ marginTop: 0 }}>Automatic updates — Windows (one-time setup, ~2 min)</h2>
       <p className="muted" style={{ fontSize: '0.85rem' }}>
-        After this, new versions install by themselves: the extension folder is checked every 30 minutes and the
-        extension restarts into the new version (if its side panel is open, it shows a <strong>Restart now</strong> button instead).
-        No admin rights needed.
+        After this, new versions install by themselves: a new version is fetched within a minute and the
+        extension restarts into it (if its side panel is open, it shows a <strong>Restart Now</strong> button instead).
+        In a hurry? ⚙ Settings → <strong>Update Now</strong> in the side panel restarts into it as soon as it lands.
+        No admin rights needed. (Set up before 1.8.2? Run the setup file again once — it switches the check to every minute.)
       </p>
       <a href={installer} download style={{ display: 'inline-block', marginBottom: 12 }}>
         <button>⬇ Download the setup file</button>

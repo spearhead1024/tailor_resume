@@ -84,6 +84,12 @@ job pages, and it can also load real job URLs. Edit a file, then click **↻ Rel
 Publish a new version with `python ops/build_extension.py --changelog "…"` after
 bumping `version` in `extension/manifest.json`.
 
+**Updates on bidders' PCs** ("Load unpacked" — Chrome never updates those): the one-time Windows setup
+`/api/extension/install-windows.cmd` adds a scheduled task that fetches a new version into
+`%LOCALAPPDATA%\TailorResume\extension` every minute; the extension restarts into it
+(`extension/lib/self-update.js`). The panel shows "Version X is out" with **Update Now** (also in
+⚙ Settings → Extension): it restarts the moment the new files land, without waiting for the 10-minute self-check.
+
 ## Production deploy
 
 ```bash

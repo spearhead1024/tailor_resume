@@ -156,14 +156,15 @@ def managed_policy_reg():
 # ── Automatic updates for a "Load unpacked" install on Windows ───────────────────
 # Chrome only auto-updates a self-hosted extension on enterprise-managed machines (policy
 # above). On a normal PC this one-time installer keeps %LOCALAPPDATA%\TailorResume\extension
-# at the latest version — a scheduled task (no admin rights) runs updater.ps1 every 30 minutes
-# — and the extension restarts itself into a new version it finds on disk
+# at the latest version — a scheduled task (no admin rights) runs updater.ps1 every minute (a
+# ~300-byte update.xml check; the zip only when the version changed), so the panel's Update Now
+# gets a new version within a minute — and the extension restarts itself into a new version it finds on disk
 # (extension/lib/self-update.js). The bidder loads that folder once with "Load unpacked".
 
 _UPDATER_PS1 = r"""# TailorResume extension updater (Windows).
 # Keeps %LOCALAPPDATA%\TailorResume\extension at the latest published version. Chrome loads
 # that folder ("Load unpacked"); the extension restarts itself into a new version.
-# Run every 30 minutes by the scheduled task "TailorResume extension updater".
+# Run every minute by the scheduled task "TailorResume extension updater".
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $Base = '__BASE__/api/extension'
@@ -194,6 +195,13 @@ try {
   catch { if (Test-Path $Old) { Rename-Item -Path $Old -NewName 'extension' }; throw }
   Remove-Item -Recurse -Force $Old -ErrorAction SilentlyContinue
   Write-Log ("updated " + ($(if ($local) { $local } else { '(none)' })) + " -> " + $remote)
+  # Keep this updater current too, so its fixes reach every PC without running the setup again.
+  try {
+    $self = Join-Path $Root 'updater.ps1'
+    $next = Join-Path $Root 'updater.ps1.new'
+    Invoke-WebRequest -UseBasicParsing -Uri "$Base/updater.ps1" -OutFile $next -TimeoutSec 30
+    if ((Get-Item $next).Length -gt 500) { Move-Item -Force -Path $next -Destination $self } else { Remove-Item -Force $next }
+  } catch { Write-Log ("updater refresh failed: " + $_.Exception.Message) }
 } catch {
   Write-Log ("failed: " + $_.Exception.Message)
   exit 1
@@ -211,17 +219,17 @@ if errorlevel 1 goto fail
 powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\updater.ps1"
 if not exist "%ROOT%\extension\manifest.json" goto fail
 > "%ROOT%\updater.vbs" echo CreateObject("WScript.Shell").Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""%ROOT%\updater.ps1""", 0, False
-schtasks /Create /F /TN "TailorResume extension updater" /SC MINUTE /MO 30 /TR "wscript.exe \"%ROOT%\updater.vbs\"" >nul
+schtasks /Create /F /TN "TailorResume extension updater" /SC MINUTE /MO 1 /TR "wscript.exe \"%ROOT%\updater.vbs\"" >nul
 if errorlevel 1 goto fail
 echo.
 echo Done. The extension is in this folder (it opens now):
 echo    %ROOT%\extension
-echo A new version is fetched automatically - checked every 30 minutes.
+echo A new version is fetched automatically - checked every minute.
 echo.
 echo ONE LAST STEP, only this once:
 echo   1. In Chrome open  chrome://extensions  and Remove any old "TailorResume Assistant".
 echo   2. Turn on "Developer mode" (top right), click "Load unpacked" and choose the folder above.
-echo From then on, new versions install by themselves.
+echo From then on, new versions install by themselves (or click Update Now in the panel's Settings).
 explorer "%ROOT%\extension"
 echo.
 pause

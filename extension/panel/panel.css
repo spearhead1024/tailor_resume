@@ -291,6 +291,9 @@ button.dl-btn:hover:not(:disabled) { background: #059669; box-shadow: 0 2px 8px 
 /* ── A newer version is installed (Load unpacked + the Windows updater) ──────── */
 .update-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 10px 0; padding: 7px 10px;
   border-radius: 10px; background: var(--success-bg); color: var(--success); font-size: 12.5px; font-weight: 500; }
+.update-bar.warn { background: var(--warning-bg); color: var(--warning); }
+.update-bar a { color: inherit; font-weight: 600; }
+#settingsExt .row { align-items: center; gap: 10px; }
 
 /* Easy Bids: the LinkedIn job on the tab (panel.js patchEasy) */
 .easy-job { font-size: 12.5px; line-height: 1.35; margin-bottom: 6px; overflow-wrap: anywhere; }

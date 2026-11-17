@@ -1143,8 +1143,9 @@ function renderSettings() {
         <div class="set-grid">${SHOW_ITEMS.map(([k, label]) => `<label class="set-switch"><input type="checkbox" data-action="showToggle" data-k="${k}" ${v[k] ? 'checked' : ''}> ${esc(label)}</label>`).join('')}</div>
       </section>` : ''}
       <section class="card"><div class="card-head"><span class="card-title">Classic job search</span></div><div id="settingsClassic"></div></section>
+      <section class="card"><div class="card-head"><span class="card-title">Extension</span></div><div id="settingsExt"></div></section>
     </main>`;
-  patchSettingsGpt(); patchClassic();
+  patchSettingsGpt(); patchClassic(); patchSettingsExt();
 }
 // The ChatGPT connection: state, plan, CVs ready, chats waiting to be deleted, Connect / Disconnect.
 function patchSettingsGpt() {
@@ -1163,15 +1164,70 @@ function patchSettingsGpt() {
          <button class="secondary sm" data-action="gptDisconnect" title="Stop writing CVs with ChatGPT and delete its chats">Disconnect</button>`}</div>`;
 }
 
-// ---------- a newer version is on disk (the updater put it there) ----------
+// ---------- updates ----------
+// Chrome never updates a "Load unpacked" install, and an extension can't write its own folder: the
+// Windows updater (/api/extension/install-windows.cmd → a scheduled task, every minute) downloads a new
+// version into the folder, and the extension restarts into it (lib/self-update.js). Here: the bar when
+// a newer version is out or already on disk, and Update Now — it asks the server, then restarts the
+// moment the updater has fetched it (no waiting for the 10-minute self-check).
+const SETUP_URL = 'https://tailorresume.duckdns.org/api/extension/install-windows.cmd';
+const verParts = (v) => String(v || '0').split('.').map((n) => parseInt(n, 10) || 0);
+const isNewer = (a, b) => {   // a > b, as versions
+  const x = verParts(a), y = verParts(b);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+  return false;
+};
+const UPD = { latest: '', changelog: '', checkedAt: 0, state: '' };   // state: '' | checking | waiting | nofetch
+let updTimer = 0;
+async function fetchLatest(force = false) {
+  if (!force && Date.now() - UPD.checkedAt < 5 * 60_000) return;
+  try { const r = await api('/api/extension/version'); Object.assign(UPD, { latest: r.version || '', changelog: r.changelog || '', checkedAt: Date.now() }); } catch { /* offline */ }
+}
 async function patchUpdateBar() {
   const el = $('#updateBar'); if (!el) return;
   const running = chrome.runtime.getManifest().version;
   const disk = await diskVersion();
-  el.hidden = !disk || disk === running;
-  if (!el.hidden) el.innerHTML = `<span>Version ${esc(disk)} is installed — restart to use it.</span><button class="sm" data-action="restartExt">Restart now</button>`;
+  const spin = '<span class="spinner"></span>';
+  let html = '';
+  if (isNewer(disk, running)) html = `<span>Version ${esc(disk)} is installed — restart to use it.</span><button class="sm" data-action="restartExt">Restart Now</button>`;
+  else if (UPD.state === 'waiting') html = `<span>${spin} Getting version ${esc(UPD.latest)}… the extension restarts when it lands (within a minute).</span>`;
+  else if (UPD.state === 'nofetch') html = `<span>This PC didn't fetch version ${esc(UPD.latest)}. <a href="${SETUP_URL}" target="_blank" rel="noopener">Set up automatic updates</a> (once), then Update Now.</span><button class="sm secondary" data-action="updateNow">Retry</button>`;
+  else if (isNewer(UPD.latest, running)) html = `<span title="${esc(UPD.changelog)}">Version ${esc(UPD.latest)} is out (you have ${esc(running)}).</span><button class="sm" data-action="updateNow">Update Now</button>`;
+  el.hidden = !html;
+  el.innerHTML = html;
+  el.classList.toggle('warn', UPD.state === 'nofetch');
+}
+// ⚙ Settings → Extension: the version, what is new, Update Now.
+async function patchSettingsExt() {
+  const el = $('#settingsExt'); if (!el) return;
+  const running = chrome.runtime.getManifest().version;
+  const busy = UPD.state === 'checking' || UPD.state === 'waiting';
+  const status = UPD.state === 'checking' ? 'Checking…'
+    : UPD.state === 'waiting' ? `Getting ${UPD.latest}…`
+    : isNewer(UPD.latest, running) ? `Version ${UPD.latest} is out.` : UPD.latest ? 'Up to date.' : '';
+  el.innerHTML = `<div class="muted small">Version ${esc(running)}${status ? ` · ${esc(status)}` : ''}</div>
+    ${isNewer(UPD.latest, running) && UPD.changelog ? `<div class="muted small">New: ${esc(UPD.changelog)}</div>` : ''}
+    <div class="row"><button class="sm" data-action="updateNow" ${busy ? 'disabled' : ''}>${busy ? '<span class="spinner"></span> ' : ''}Update Now</button>
+      <a class="small" href="${SETUP_URL}" target="_blank" rel="noopener" title="Windows: a one-time setup that keeps this extension up to date (no admin rights)">Set up automatic updates</a></div>`;
+}
+const patchUpdates = () => { patchUpdateBar(); patchSettingsExt(); };
+async function updateNow() {
+  const running = chrome.runtime.getManifest().version;
+  if (isNewer(await diskVersion(), running)) { chrome.runtime.reload(); return; }   // already downloaded
+  clearInterval(updTimer);
+  UPD.state = 'checking'; patchUpdates();
+  await fetchLatest(true);
+  if (!isNewer(UPD.latest, running)) { UPD.state = ''; patchUpdates(); toast(`You have the latest version (${running})`); return; }
+  // The updater checks every minute: wait for the new files on disk, then restart into them.
+  UPD.state = 'waiting'; patchUpdates();
+  const end = Date.now() + 150_000;
+  updTimer = setInterval(async () => {
+    if (isNewer(await diskVersion(), running)) { clearInterval(updTimer); chrome.runtime.reload(); return; }
+    if (Date.now() > end) { clearInterval(updTimer); UPD.state = 'nofetch'; patchUpdates(); }
+  }, 3000);
 }
 chrome.storage.onChanged.addListener((ch, area) => { if (area === 'local' && UPDATE_KEY in ch) patchUpdateBar(); });
+setInterval(() => { if (S.screen === 'main') fetchLatest().then(patchUpdates); }, 10 * 60_000);
 
 // ---------- tabs by role ----------
 // Out Bids / Easy Bids: bidders and admins (the Bid API's own rule). Add Jobs: job_adders and
@@ -1207,6 +1263,7 @@ async function startMain() {
   await loadShow();
   renderFrame(modes);
   patchUpdateBar();
+  fetchLatest(true).then(patchUpdates);
   const { [MODE_KEY]: saved } = await chrome.storage.local.get(MODE_KEY).catch(() => ({}));
   await setMode(modes.includes(saved) ? saved : modes[0]);
 }
@@ -1223,7 +1280,7 @@ function renderFrame(modes) {
     <header class="topbar">
       ${tabs}
       <span class="who ellipsis" title="${esc(u.full_name || u.username || '')} · TailorResume Assistant v${esc(chrome.runtime.getManifest().version)}">${esc(u.username || '')}</span>
-      <button class="icon secondary" id="settingsBtn" data-action="settings" title="Settings — ChatGPT, what to show, classic job search">${I.gear}</button>
+      <button class="icon secondary" id="settingsBtn" data-action="settings" title="Settings — ChatGPT, what to show, classic job search, updates">${I.gear}</button>
       <button class="icon secondary" data-action="logout" title="Sign out">${I.logout}</button>
     </header>
     <div class="update-bar" id="updateBar" hidden></div>
@@ -1544,6 +1601,7 @@ async function onClick(e) {
       case 'gptConnect': await connectGpt(); break;
       case 'gptContinue': await gpt('continue'); break;
       case 'restartExt': chrome.runtime.reload(); break;
+      case 'updateNow': e.preventDefault(); await updateNow(); break;
       case 'gptSignIn': await chrome.tabs.create({ url: 'https://chatgpt.com/auth/login' }); break;   // the user's own tab, to sign in
       case 'gptDisconnect': e.preventDefault(); await gpt('disconnect'); S.gptSnap = await gptSnapshot(); patchSettingsGpt(); toast('ChatGPT disconnected — deleting its chats'); break;
       case 'gptRetry': await api('/api/gpt/retry', { method: 'POST', body: { profile_id: S.profileId, job_id: S.jobId } }); await gpt('sync'); break;
