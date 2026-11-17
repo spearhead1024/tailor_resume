@@ -1,6 +1,6 @@
 {
-  "version": "1.4.0",
+  "version": "1.4.1",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "v1.4.0 \u2014 Easy Bids: a new tab for LinkedIn Easy Apply jobs, between Out Bids (was Bid) and Add Jobs (was Add job). Open a job on LinkedIn: the panel reads its company, title and description, checks TailorResume for it (same posting or same company + title) and adds it when it is new; its CV is written by ChatGPT and saved to Downloads by itself. Jobs a profile can't take (already applied, skipped, another region or tech stack, not Easy Apply, a duplicate company this month) are shown, not added. Out Bids now lists only jobs that apply on the company's site; Easy Bids lists the LinkedIn ones.",
-  "built_at": "2026-11-17T12:30:08Z"
+  "changelog": "v1.4.1 \u2014 Easy Bids checks first, adds on Gen CV: when the LinkedIn tab shows another job it is read and checked for duplicates (same LinkedIn job id, same company + title, same company this month) \u2014 nothing is added and no CV is written just by looking. Easy Apply jobs only. The new Gen CV button adds the job if it is new (stored with its https://www.linkedin.com/jobs/view/<id>/ link), has ChatGPT write the CV and saves it to Downloads by itself \u2014 at once when the job already has a CV.",
+  "built_at": "2026-11-17T13:03:45Z"
 }
