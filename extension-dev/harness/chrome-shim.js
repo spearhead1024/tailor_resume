@@ -79,6 +79,7 @@
       sendMessage: (tabId, msg, a, b) => { const [, cb] = optsCb(a, b); return call(H.tabMessage(tabId, msg), cb); },
       onActivated: ev('tabActivated'),
       onUpdated: ev('tabUpdated'),
+      onCreated: ev('tabCreated'),
       onRemoved: ev('tabRemoved'),
     },
     windows: {
@@ -94,6 +95,8 @@
     permissions: {
       contains: (_p, cb) => call(Promise.resolve(true), cb),
       request: (_p, cb) => call(Promise.resolve(true), cb),
+      onAdded: ev('permAdded'),
+      onRemoved: ev('permRemoved'),
     },
     alarms: {
       create: (name, info) => { H.alarmCreate(typeof name === 'string' ? name : '', typeof name === 'string' ? info : name); return Promise.resolve(); },

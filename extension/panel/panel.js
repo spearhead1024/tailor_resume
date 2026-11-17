@@ -32,9 +32,9 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const PROFILE_KEY = 'panelProfileId';
 
 let toastTimer = null;
-function toast(text) {
+function toast(text, ms = 1800) {
   const el = $('#toast'); el.textContent = text; el.hidden = false;
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => { el.hidden = true; }, 1800);
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { el.hidden = true; }, ms);
 }
 
 // ---------- icons ----------
@@ -320,7 +320,10 @@ function setAlert(kind, msg, ttl = 0) {
   if (msg && ttl) alertTimers[kind] = setTimeout(() => { if (S[kind] === msg) { S[kind] = ''; patchAlerts(); } }, ttl);
   patchAlerts();
 }
-function setError(msg, ttl = 0) { setAlert('error', msg, ttl); }
+function setError(msg, ttl = 0) {
+  setAlert('error', msg, ttl);
+  if (msg && S.settingsOpen) toast(msg, 6000);   // the alerts sit in the (hidden) bid view while ⚙ Settings is open
+}
 function setMessage(msg) { setAlert('message', msg, 6000); }
 function showError(err) {
   if (err?.status === 0) { S.netDown = true; setError(NET_MSG, 10000); }
@@ -453,7 +456,7 @@ async function selectJob(id, { open = true, item: given = null } = {}) {
   patchJob(); patchBuild();
   if (!item) return;
   if (open) showJob(item);
-  S.questions = []; S.answers = []; S.qaDraft = null; S.manual = false;
+  S.questions = []; S.answers = []; S.qaDraft = null; S.qaEditing = false; S.manual = false;
   const card = $('#qaCard'); if (card) card.innerHTML = '';   // a new job: a fresh questions box
   patchQA();
   gptPrepare();
@@ -690,14 +693,14 @@ function patchGptLine() {
   const st = S.gptSnap?.state || {}, t = currentThread();
   let cls = 'muted', text = '', btn = '';
   if (!st.enabled) {
-    text = 'ChatGPT is not connected — the CV is written by hand below. (A paid ChatGPT plan is required.)';
-    btn = '<button class="sm" data-action="gptConnect">Connect ChatGPT</button>';
+    cls = 'warn'; text = 'ChatGPT isn\'t connected — write the CV by hand below, or connect it in Settings.';
+    btn = '<button class="secondary sm" data-action="settings">Settings</button>';
   } else if (st.status === 'checking') {
-    text = '<span class="spinner"></span> Checking your ChatGPT account (a paid plan is required)…';
+    text = '<span class="spinner"></span> Checking your ChatGPT account…';
   } else if (st.status === 'needs_login' || st.status === 'needs_plan') {
     cls = st.status === 'needs_plan' ? 'error' : 'warn';
-    text = st.notice || 'Sign in to chatgpt.com in this browser with a paid account, then press Continue.';
-    btn = '<button class="secondary sm" data-action="gptSignIn">Open ChatGPT</button><button class="sm" data-action="gptContinue">Continue</button>';
+    text = st.notice || 'ChatGPT needs you to sign in — see Settings.';
+    btn = '<button class="secondary sm" data-action="settings">Settings</button>';
   } else if (S.resumeId) {
     cls = 'ok'; text = t?.resumeId === S.resumeId ? 'CV written by ChatGPT and built.' : 'CV built.';
   } else if (!t) {
@@ -749,37 +752,46 @@ async function saveQuestions() {
   try {
     const r = await api(`/api/resumes/bid-job/${encodeURIComponent(jobId)}/questions`, { method: 'PUT', body: { questions: text } });
     if (S.jobId !== jobId) return;
-    S.questions = r.questions || []; S.qaDraft = null;
+    S.questions = r.questions || []; S.qaDraft = null; S.qaEditing = false;
     const box = $('#qaInput'); if (box) box.blur();   // show the saved (cleaned) list
     toast(S.questions.length ? 'Questions saved for every bidder' : 'Questions cleared');
     await askAnswers();
   } finally { S.qaBusy = false; patchQA(); }
 }
-// The textarea is built once per card and never redrawn under the user: what they type is a
-// draft (S.qaDraft) until saved or the job changes; only the answers below update live.
+// Tech questions (the application form's questions), shared by every bidder on the job: the first
+// bidder types them in, ChatGPT answers them in the SAME chat that wrote this CV, answers are
+// click-to-copy. The form shows by itself while the job has none, else behind Edit. Its textarea is
+// built once per card and never redrawn under the user: what they type is a draft (S.qaDraft) until
+// saved or the job changes; only the answers update live.
 function patchQA() {
   const el = $('#qaCard'); if (!el) return;
   el.hidden = !currentJob();
   if (el.hidden) return;
   if (!$('#qaInput', el)) {
     el.innerHTML = `
-      <div class="card-head"><span class="card-title">Application questions</span><span id="qaCopyAll"></span></div>
-      <textarea id="qaInput" rows="3" placeholder="One question per line — e.g.&#10;Briefly explain your recent project&#10;Why are you interested in this role?"></textarea>
-      <div class="row"><button class="grow" id="qaSave" data-action="saveQuestions"></button></div>
-      <div class="muted small">Shared with every bidder on this job. Answered in the ChatGPT conversation that wrote this CV — 2–3 sentences each.</div>
-      <div id="qaErr"></div>
-      <div class="qa-list" id="qaList"></div>`;
+      <div class="card-head"><span class="card-title">Tech Questions</span><span class="row" id="qaHead"></span></div>
+      <div class="qa-list" id="qaList"></div>
+      <div class="fld" id="qaEdit">
+        <textarea id="qaInput" rows="3" placeholder="Paste the application's questions — one per line, e.g.&#10;Describe your experience with Kubernetes&#10;Why are you interested in this role?"></textarea>
+        <div class="btn-row"><button id="qaSave" data-action="saveQuestions"></button><button class="secondary" id="qaCancel" data-action="qaCancel">Cancel</button></div>
+        <div class="muted small">Shared with every bidder on this job. ChatGPT answers them in this CV's chat — 2–3 sentences each.</div>
+      </div>
+      <div id="qaErr"></div>`;
     $('#qaInput', el).addEventListener('input', (e) => { S.qaDraft = e.target.value; });
   }
   const box = $('#qaInput', el);
+  const editing = !S.questions.length || S.qaEditing || S.qaDraft != null;
+  $('#qaEdit', el).hidden = !editing;
+  $('#qaCancel', el).hidden = !S.questions.length;
   if (S.qaDraft == null && document.activeElement !== box) {
     box.value = S.questions.join('\n');
     box.rows = Math.min(6, Math.max(3, S.questions.length + 1));
   }
   const save = $('#qaSave', el);
   save.disabled = S.qaBusy;
-  save.innerHTML = S.qaBusy ? '<span class="spinner"></span> Saving…' : 'Save questions &amp; answer';
-  $('#qaCopyAll', el).innerHTML = S.answers.length ? `<button class="secondary sm" data-action="copyAllAnswers">${I.copy} Copy all</button>` : '';
+  save.innerHTML = S.qaBusy ? '<span class="spinner"></span> Saving…' : `${I.sparkle} Save &amp; Answer`;
+  $('#qaHead', el).innerHTML = (S.answers.length ? `<button class="secondary sm" data-action="copyAllAnswers">${I.copy} Copy All</button>` : '')
+    + (S.questions.length && !editing ? '<button class="secondary sm" data-action="qaEdit">Edit</button>' : '');
   const t = currentThread(), pending = new Set((t?.want || []).map((q) => q.toLowerCase()));
   $('#qaErr', el).innerHTML = t?.error && /^Answers/.test(t.error) ? `<div class="alert error"><span>${esc(t.error)}</span></div>` : '';
   const writing = t && ['queued', 'writing', 'building'].includes(t.stage);
@@ -787,12 +799,12 @@ function patchQA() {
     const a = answerFor(q);
     const busy = writing || pending.has(q.toLowerCase());
     const blocked = ['needs_plan', 'needs_login', 'checking'].includes(S.gptSnap?.state.status);
-    const state = a ? '' : !gptOn() ? 'Connect ChatGPT to answer it.'
+    const state = a ? '' : !gptOn() ? 'Connect ChatGPT in Settings to answer it.'
       : blocked ? 'Answered once a paid ChatGPT account is confirmed.'
       : busy ? '<span class="spinner"></span> ChatGPT is answering…'
-      : S.resumeId ? 'Not answered yet — press Save questions &amp; answer.' : 'Answered once the CV is written.';
+      : S.resumeId ? 'Not answered yet — Edit → Save &amp; Answer.' : 'Answered once the CV is written.';
     return `<div class="qa-row">
-      <div class="row space"><strong class="q">${esc(q)}</strong>${a ? `<button class="sm" data-action="copyAnswer" data-i="${i}">${I.copy} Copy</button>` : ''}</div>
+      <div class="row space"><span class="q">${esc(q)}</span>${a ? `<button class="secondary sm" data-action="copyAnswer" data-i="${i}" title="Copy the answer">${I.copy} Copy</button>` : ''}</div>
       ${a ? `<div class="a">${esc(a)}</div>` : `<div class="muted small">${state}</div>`}
     </div>`;
   }).join('');
@@ -964,90 +976,110 @@ chrome.tabs.onUpdated.addListener((id, change, t) => { if (linkTabs.has(id) && (
 
 async function allowLinkedIn() {
   const ok = await chrome.permissions.request({ origins: LINKEDIN_ORIGINS }).catch(() => false);   // first await of the click
-  if (!ok) { setError('Easy Bids reads the job on your LinkedIn tab — click Allow again and choose "Allow".'); return; }
+  if (!ok) { setError('Easy Bids reads the job on your LinkedIn tab — click Connect again and choose "Allow".'); return; }
+  patchSettingsLinkedIn(); toast('LinkedIn connected');
   scheduleEasyCheck(true);
 }
 
-// The Easy Apply job card: the job on the LinkedIn tab, ONE label (New Job / Duplicate / Can't add /
-// Not Easy Apply), one short reason line, Gen CV. Everything else lives in ⚙ Settings.
+// The LinkedIn job card: the job on the LinkedIn tab, ONE label, one short reason, its buttons.
+// Labels: New Job · <region> / CV Ready / Duplicate / Applied / Skipped / Can't Bid / Blocked / Closed…
+// Connections (ChatGPT, LinkedIn access) are managed in ⚙ Settings — here only a pointer to it.
 function patchEasy() {
   const el = $('#easyBody'); if (!el) return;
   const typed = $('#easyExt')?.value || '';
   const E = S.easy, page = E.page, res = E.res, p = res?.profile || {};
   const name = esc(selectedProfile()?.name || 'this profile');
   const spin = '<span class="spinner"></span>';
-  const line = (cls, html) => `<div class="easy-line ${cls}">${html}</div>`;
+  const note = (cls, html, extra = '') => `<div class="easy-line ${cls}"><span class="txt">${html}</span>${extra}</div>`;
+  const settingsBtn = '<button class="secondary sm" data-action="settings">Settings</button>';
   const job = res?.job;
   const pill = (cls, text) => `<span class="easy-pill ${cls}">${text}</span>`;
   // The link the job is stored with: LinkedIn's posting (Easy Apply) or the company's site (outside).
   const link = E.outside ? E.ext : (E.lid ? jobViewLink(E.lid) : '');
-  const what = page?.title ? `<div class="easy-job" title="${esc(`${page.company} — ${page.title}${page.location ? ` · ${page.location}` : ''}`)}">
-      <strong>${esc(page.company)}</strong> — ${esc(page.title)}${page.location ? ` <span class="muted">· ${esc(page.location)}</span>` : ''}</div>
-    ${link ? `<div class="easy-link"><a href="${esc(link)}" data-action="easyCopyLink" title="The job link stored in TailorResume — click to copy">${esc(link)}</a></div>` : ''}` : '';
+  const what = page?.title ? `<div class="job-block" title="${esc(`${page.company} — ${page.title}${page.location ? ` · ${page.location}` : ''}`)}">
+      <div class="job-title easy-job">${esc(page.title)}</div>
+      <div class="job-sub"><span class="txt"><b>${esc(page.company)}</b>${page.location ? ` · ${esc(page.location)}` : ''}</span></div>
+      ${link ? `<a class="job-link easy-link" href="${esc(link)}" data-action="easyCopyLink" title="The job link stored in TailorResume — click to copy">${esc(link.replace(/^https?:\/\/(www\.)?/, ''))}</a>` : ''}
+    </div>` : '';
   let badge = '', body = '', buttons = '';
-  const btn = (action, label, title, primary = true) => `<button class="grow ${primary ? '' : 'secondary'}" data-action="${action}" ${S.genBusy || S.busy ? 'disabled' : ''} title="${title}">${label}</button>`;
+  const btn = (action, label, title, cls = '') => `<button class="${cls}" data-action="${action}" ${S.genBusy || S.busy ? 'disabled' : ''} title="${title}">${label}</button>`;
   switch (E.state) {
     case 'idle': case 'reading': case 'checking':
       badge = pill('muted', `${spin} Checking`); body = what; break;
-    case 'nolinkedin': body = line('muted', 'Open LinkedIn Jobs in this tab and click an <b>Easy Apply</b> job.')
-      + '<div class="row"><button class="secondary sm" data-action="easyOpenLinkedIn">Open LinkedIn Jobs</button></div>'; break;
-    case 'nojob': body = line('muted', 'Click a job in LinkedIn\'s list.'); break;
-    case 'access': body = line('warn', 'Easy Bids reads the job on your LinkedIn tab — allow it once.')
-      + '<div class="row"><button class="sm" data-action="easyAllow">Allow Reading LinkedIn</button></div>'; break;
-    case 'unreadable': body = line('warn', 'Couldn\'t read this job yet — let the page load, then Retry.')
-      + '<div class="row"><button class="secondary sm" data-action="easyRetry">Retry</button></div>'; break;
-    case 'error': body = what + line('error', esc(E.error))
-      + '<div class="row"><button class="secondary sm" data-action="easyRetry">Retry</button></div>'; break;
+    case 'nolinkedin': body = note('muted', 'Open LinkedIn Jobs in this tab and click an <b>Easy Apply</b> job.',
+      '<button class="secondary sm" data-action="easyOpenLinkedIn">Open LinkedIn Jobs</button>'); break;
+    case 'nojob': body = note('muted', 'Click a job in LinkedIn\'s list.'); break;
+    case 'access': badge = pill('warn', 'Not Connected');
+      body = note('warn', 'Easy Bids reads the job on your LinkedIn tab — connect LinkedIn in Settings.', settingsBtn); break;
+    case 'unreadable': body = note('warn', 'Couldn\'t read this job yet — let the page load, then Retry.',
+      '<button class="secondary sm" data-action="easyRetry">Retry</button>'); break;
+    case 'error': body = what + note('error', esc(E.error), '<button class="secondary sm" data-action="easyRetry">Retry</button>'); break;
     case 'noteasy':
       badge = pill('warn', page?.apply === 'closed' ? 'Closed' : 'No Apply Button');
       body = what; break;
     case 'invalid':
-      badge = pill('error', 'Can\'t Add'); body = what + line('error', esc(res?.message || 'The job is incomplete.')); break;
+      badge = pill('error', 'Can\'t Add'); body = what + note('error', esc(res?.message || 'The job is incomplete.')); break;
     case 'blocked': {
       const c = (res?.conflicts || [])[0] || {};
-      badge = c.kind === 'blacklist' ? pill('error', 'Blocked') : pill('error', 'Duplicate');
-      body = what + line('muted', esc(c.message || c.kind || ''));
+      if (c.kind === 'company' && c.applied) {
+        badge = pill('ok', 'Applied');
+        body = what + note('ok', `Already applied to <b>${esc(c.existing_company || page?.company || '')}</b> with ${name}${c.applied_at ? ` on ${esc(String(c.applied_at).slice(0, 10))}` : ''}.`);
+      } else {
+        badge = c.kind === 'blacklist' ? pill('error', 'Blocked') : pill('warn', 'Duplicate');
+        body = what + note('muted', esc(c.message || c.kind || ''));
+      }
       break;
     }
     case 'new': case 'added': case 'existing': {
       const region = esc(job?.region || 'ANY');
-      if (E.state === 'existing') {
-        badge = pill('warn', 'Duplicate');
-        body = what + line('muted', { linkedin: 'This posting is already in TailorResume.', url: 'This company link is already in TailorResume.' }[res.match]
-          || 'Same company + title already in TailorResume.');
-      } else badge = pill('ok', `New Job · ${region}`) + (E.outside ? pill('muted', 'Outside') : '');
-      if (E.state !== 'existing') body = what;
+      body = what;
       if (E.outside) {
         // An outside-apply posting: added with the company's link — bid from Out Bids, no CV here.
-        if (E.state === 'added') body += line('muted', 'Added — bid it from Out Bids.');
-        else if (E.state === 'new' && !E.ext) body += line('warn', 'Click <b>Apply</b> on LinkedIn once — the company link is read and that tab closed.')
-          + `<div class="row"><input id="easyExt" type="url" placeholder="…or paste the company's apply link" spellcheck="false"><button class="secondary sm" data-action="useLink">Use</button></div>`;
-        if (easyCanAdd()) buttons = btn('addJob', `${S.genBusy ? spin : ''} Add Job`, 'Add the job with the company\'s link — bid it from Out Bids');
-      } else {
-        if (p.applied) body += line('ok', `Applied with ${name}${p.applied_at ? ` on ${esc(String(p.applied_at).slice(0, 10))}` : ''}.`);
-        else if (p.skipped) body += line('warn', `Skipped for ${name}.`);
-        else if (p.problem) body += line('warn', esc(p.problem));
-        else if (page?.apply === 'applied') body += line('warn', E.state === 'new' ? 'You applied on LinkedIn — it is not in TailorResume.' : 'LinkedIn shows it applied — Mark as Applied below.');
-        else if (S.gen.has(job?.id) && !S.resumeId && gptOn()) body += line('muted', `${spin} ChatGPT is writing the CV — saved to Downloads when ready.`);
-        if (E.state === 'new' && easyCanGen()) {
-          buttons = btn('genCv', `${S.genBusy ? spin : I.sparkle} Add + Gen CV`, 'Add the job, write its CV with ChatGPT and save it to Downloads')
-            + btn('addJob', 'Add Job', 'Only add the job (make its CV later)', false);
-        } else if (easyCanGen()) buttons = btn('genCv', `${S.genBusy ? spin : I.sparkle} Gen CV`, 'Write the CV with ChatGPT and save it to Downloads');
+        badge = E.state === 'existing' ? pill('warn', 'Duplicate') : pill(E.state === 'added' ? 'info' : 'ok', `${E.state === 'added' ? 'Added' : 'New Job'} · ${region}`) + pill('muted', 'Outside');
+        if (E.state === 'existing') body += note('muted', { linkedin: 'This posting is already in TailorResume.', url: 'This company link is already in TailorResume.' }[res.match] || 'Same company + title already in TailorResume.');
+        else if (E.state === 'added') body += note('ok', 'Added — bid it from Out Bids.');
+        else if (!E.ext) body += note('warn', 'Click <b>Apply</b> on LinkedIn once — the company link is read and that tab closed.')
+          + `<div class="row"><input id="easyExt" class="grow" type="url" placeholder="…or paste the company's apply link" spellcheck="false"><button class="secondary" data-action="useLink">Use</button></div>`;
+        if (easyCanAdd()) buttons = btn('addJob', `${S.genBusy ? spin : ''} Add Job`, 'Add the job with the company\'s link — bid it from Out Bids', 'lg');
+        break;
       }
+      if (p.applied) {
+        // Already applied with this profile: nothing more to do here — no buttons.
+        badge = pill('ok', 'Applied');
+        body += note('ok', `Already applied with ${name}${p.applied_at ? ` on ${esc(String(p.applied_at).slice(0, 10))}` : ''}.`);
+        break;
+      }
+      if (p.skipped) { badge = pill('warn', 'Skipped'); body += note('warn', `Skipped for ${name}.`); break; }
+      if (p.problem) { badge = pill('error', 'Can\'t Bid'); body += note('warn', esc(p.problem)); break; }
+      const cvReady = E.state !== 'new' && (!!job?.resume_id || (job?.id === S.jobId && !!S.resumeId));
+      badge = E.state === 'new' ? pill('ok', `New Job · ${region}`)
+        : cvReady ? pill('ok', 'CV Ready')
+        : E.state === 'added' ? pill('info', `Added · ${region}`)
+        : pill('warn', 'Duplicate');
+      if (E.state === 'existing' && !cvReady) body += note('muted', { linkedin: 'This posting is already in TailorResume.', url: 'This company link is already in TailorResume.' }[res.match]
+        || 'Same company + title already in TailorResume.');
+      if (page?.apply === 'applied') body += note('warn', E.state === 'new' ? 'You applied on LinkedIn — it is not in TailorResume.' : 'LinkedIn shows it applied — click Mark as Applied below.');
+      else if (S.gen.has(job?.id) && !S.resumeId && gptOn()) body += note('info', `${spin} ChatGPT is writing the CV — saved to Downloads when ready.`);
+      if (E.state === 'new' && easyCanGen()) {
+        buttons = btn('genCv', `${S.genBusy ? spin : I.sparkle} Add + Gen CV`, 'Add the job, write its CV with ChatGPT and save it to Downloads')
+          + btn('addJob', 'Add Job', 'Only add the job (make its CV later)', 'secondary');
+      } else if (easyCanGen() && !(cvReady && job?.id === S.jobId)) {
+        buttons = btn('genCv', `${S.genBusy ? spin : I.sparkle} ${cvReady ? 'Use This Job' : 'Gen CV'}`,
+          cvReady ? 'Make it the current job and save its CV to Downloads' : 'Write the CV with ChatGPT and save it to Downloads');
+      }
+      if (buttons && /genCv/.test(buttons) && !gptOn() && !cvReady) body += note('warn', 'Gen CV needs ChatGPT — connect it in Settings.', settingsBtn);
       break;
     }
   }
-  if (buttons) body += `<div class="row easy-btns">${buttons}</div>`;
+  if (buttons) body += `<div class="btn-row easy-btns">${buttons}</div>`;
   // The tab moved on (LinkedIn does that after an application) while a job is being worked on: it stays below.
   const cur = currentJob();
   // (No job read from the tab — LinkedIn elsewhere, a search with no job open: the last answer is stale.)
   const tabJobId = ['nolinkedin', 'nojob', 'access'].includes(E.state) ? '' : res?.job?.id;
   if (easyPinned() && tabJobId !== S.jobId && !['idle', 'reading', 'checking'].includes(E.state)) {
-    body += `<div class="easy-line ok pinned">Still on <b>${esc(cur.company)}</b> — finish it below (Mark as Applied, Report or Skip).
-      <a href="#" data-action="easyBack" title="${esc(cur.link)}">Show it</a></div>`;
+    body += note('info pinned', `Still on <b>${esc(cur.company)}</b> — finish it below (Mark as Applied, Report or Skip).`,
+      `<button class="secondary sm" data-action="easyBack" title="${esc(cur.link)}">Show It</button>`);
   }
-  // CVs are written by ChatGPT: one compact line while it is not connected (details in ⚙ Settings).
-  if (!gptOn()) body += `<div class="easy-line warn row-line">ChatGPT is off. <button class="sm" data-action="gptConnect">Connect ChatGPT</button></div>`;
   el.innerHTML = `<div class="card-head"><span class="card-title">LinkedIn Job</span><span class="pills">${badge}</span></div>${body}`;
   if (typed && $('#easyExt')) $('#easyExt').value = typed;
 }
@@ -1113,9 +1145,9 @@ async function retryClassic() {
 // ---------- ⚙ Settings: ChatGPT, what each bid tab shows, classic job search ----------
 // The tabs keep only what is needed on screen; everything you set up once lives here.
 const SHOW_KEY = 'panelShow';
-const SHOW_ITEMS = [['details', 'Details'], ['jobs', 'Job list'], ['questions', 'Application questions'], ['preview', 'CV preview']];
-// Out Bids shows everything; Easy Bids fits on one screen: profile, Details, the Easy Apply job, Resume.
-const SHOW_DEFAULTS = { bid: { details: true, jobs: true, questions: true, preview: true }, easy: { details: true, jobs: false, questions: false, preview: false } };
+const SHOW_ITEMS = [['details', 'Details'], ['jobs', 'Job list'], ['questions', 'Tech questions'], ['preview', 'CV preview']];
+// Out Bids shows everything; Easy Bids: profile, Details, the LinkedIn job, Resume, Tech questions.
+const SHOW_DEFAULTS = { bid: { details: true, jobs: true, questions: true, preview: true }, easy: { details: true, jobs: false, questions: true, preview: false } };
 const shownFor = (mode) => ({ ...(SHOW_DEFAULTS[mode] || {}), ...((S.show || {})[mode] || {}) });
 async function loadShow() { S.show = (await chrome.storage.local.get(SHOW_KEY).catch(() => ({})))[SHOW_KEY] || {}; }
 function applyShow() {
@@ -1137,32 +1169,52 @@ function renderSettings() {
   const v = shownFor(S.mode);
   el.innerHTML = `
     <main class="main settings">
-      <div class="card-head"><span class="card-title">Settings</span><button class="secondary sm" data-action="settings">Done</button></div>
-      ${bidLike ? `<section class="card"><div class="card-head"><span class="card-title">ChatGPT</span></div><div id="settingsGpt"></div></section>
+      <div class="settings-head"><h2>Settings</h2><button class="secondary sm" data-action="settings">Done</button></div>
+      ${bidLike ? `<section class="card"><div class="card-head"><span class="card-title">Connections</span></div>
+        <div class="conn" id="settingsGpt"></div>
+        <div class="conn" id="settingsLinkedIn"></div>
+      </section>
       <section class="card"><div class="card-head"><span class="card-title">Show on ${tabName}</span></div>
         <div class="set-grid">${SHOW_ITEMS.map(([k, label]) => `<label class="set-switch"><input type="checkbox" data-action="showToggle" data-k="${k}" ${v[k] ? 'checked' : ''}> ${esc(label)}</label>`).join('')}</div>
       </section>` : ''}
-      <section class="card"><div class="card-head"><span class="card-title">Classic job search</span></div><div id="settingsClassic"></div></section>
-      <section class="card"><div class="card-head"><span class="card-title">Extension</span></div><div id="settingsExt"></div></section>
+      <section class="card"><div class="card-head"><span class="card-title">Classic job search</span></div><div id="settingsClassic" class="fld"></div></section>
+      <section class="card"><div class="card-head"><span class="card-title">Extension</span></div><div id="settingsExt" class="fld"></div></section>
     </main>`;
-  patchSettingsGpt(); patchClassic(); patchSettingsExt();
+  patchSettingsGpt(); patchSettingsLinkedIn(); patchClassic(); patchSettingsExt();
 }
-// The ChatGPT connection: state, plan, CVs ready, chats waiting to be deleted, Connect / Disconnect.
+const connRow = (name, pill, desc, acts) => `<div class="who-c"><div class="name">${name} ${pill}</div><div class="desc">${desc}</div></div>${acts ? `<div class="acts">${acts}</div>` : ''}`;
+// ChatGPT: state, plan, CVs ready, chats waiting to be deleted, Connect / Continue / Disconnect.
 function patchSettingsGpt() {
   const el = $('#settingsGpt'); if (!el) return;
   const st = S.gptSnap?.state || {};
   const mine = Object.values(S.gptSnap?.threads || {}).filter((x) => x.profileId === S.profileId && x.stage !== 'closing');
   const ready = mine.filter((x) => x.stage === 'ready').length;
-  const status = !st.enabled ? 'Not connected — CVs are written by hand (copy prompt / paste JSON).'
-    : st.status === 'checking' ? 'Checking your ChatGPT account…'
-    : st.notice || `Connected${st.plan ? ` · ChatGPT ${esc(planLabel(st.plan))}` : ''} · ${ready}/${mine.length} CVs ready for this profile`;
+  const pill = !st.enabled ? '<span class="pill muted">Not connected</span>'
+    : st.status === 'checking' ? '<span class="pill info"><span class="spinner"></span> Checking</span>'
+    : st.status === 'needs_login' ? '<span class="pill warn">Sign in needed</span>'
+    : st.status === 'needs_plan' ? '<span class="pill error">Paid plan needed</span>'
+    : st.status === 'limited' ? '<span class="pill warn">Limited</span>'
+    : '<span class="pill ok">Connected</span>';
   const del = st.toDelete ? ` · ${st.toDelete} chat${st.toDelete === 1 ? '' : 's'} to delete` : '';
-  el.innerHTML = `<div class="muted small">${esc(status)}${del}</div>
-    <div class="muted small">CVs are written in ChatGPT tabs opened in the background; a CV's chat stays open until the job is applied, reported or skipped.</div>
-    <div class="row">${!st.enabled ? '<button class="sm" data-action="gptConnect">Connect ChatGPT</button>'
-      : `${['needs_login', 'needs_plan'].includes(st.status) ? '<button class="secondary sm" data-action="gptSignIn">Open ChatGPT</button><button class="sm" data-action="gptContinue">Continue</button>' : ''}
-         <button class="secondary sm" data-action="gptDisconnect" title="Stop writing CVs with ChatGPT and delete its chats">Disconnect</button>`}</div>`;
+  const desc = !st.enabled ? 'Writes your CVs and answers tech questions. A paid ChatGPT plan is required.'
+    : st.notice ? esc(st.notice)
+    : `${st.plan ? `ChatGPT ${esc(planLabel(st.plan))}. ` : ''}${mine.length ? `${ready}/${mine.length} CVs ready for this profile${del}. ` : del ? `${del.slice(3)}. ` : ''}Each CV's chat stays open in a tab until the job is done.`;
+  const acts = !st.enabled ? '<button class="sm" data-action="gptConnect">Connect</button>'
+    : `${['needs_login', 'needs_plan'].includes(st.status) ? '<button class="secondary sm" data-action="gptSignIn">Open ChatGPT</button><button class="sm" data-action="gptContinue">Continue</button>' : ''}
+       <button class="ghost sm" data-action="gptDisconnect" title="Stop writing CVs with ChatGPT and delete its chats">Disconnect</button>`;
+  el.innerHTML = connRow('ChatGPT', pill, desc, acts);
 }
+// LinkedIn: Easy Bids reads the job on the bidder's LinkedIn tab (an optional host permission).
+async function patchSettingsLinkedIn() {
+  const el = $('#settingsLinkedIn'); if (!el) return;
+  const ok = await hasLinkedInAccess();
+  el.innerHTML = connRow('LinkedIn', ok ? '<span class="pill ok">Connected</span>' : '<span class="pill muted">Not connected</span>',
+    ok ? 'Easy Bids reads the job on your LinkedIn tab — company, title, description, apply button.'
+      : 'Needed by Easy Bids to read the job on your LinkedIn tab (and by the classic job search).',
+    ok ? '' : '<button class="sm" data-action="easyAllow">Connect</button>');
+}
+chrome.permissions.onAdded?.addListener(() => { patchSettingsLinkedIn(); if (S.mode === 'easy') scheduleEasyCheck(true); });
+chrome.permissions.onRemoved?.addListener(() => { patchSettingsLinkedIn(); if (S.mode === 'easy') scheduleEasyCheck(true); });
 
 // ---------- updates ----------
 // Chrome never updates a "Load unpacked" install, and an extension can't write its own folder: the
@@ -1364,9 +1416,7 @@ function renderMain() {
   applyShow();
 }
 
-// The job box shows the current job ("Company — Title") until you click into it;
-// then the text is selected, so typing starts a search and Esc / leaving restores it.
-const jobLabel = (j) => (j ? `${j.company} — ${j.job_title}` : '');
+// The job box is a search; the current job is shown right below it.
 
 function wireCombo() {
   const input = $('#jobSearch');
@@ -1417,7 +1467,7 @@ function patchCombo() {
   const list = $('#jobList'), input = $('#jobSearch'); if (!list) return;
   input.placeholder = S.queueLoading ? 'Loading jobs…' : `Search ${S.queue.length} ${S.mode === 'easy' ? 'Easy Apply ' : ''}job${S.queue.length === 1 ? '' : 's'} by company or title…`;
   patchLocks();
-  if (document.activeElement !== input) input.value = jobLabel(currentJob());
+  if (document.activeElement !== input) input.value = '';   // the current job is shown right below
   list.hidden = !S.combo.open || !S.queue.length;
   if (list.hidden) return;
   const items = comboMatches().slice(0, 200);
@@ -1443,14 +1493,14 @@ function patchJob() {
   const j = currentJob();
   if (!j) {
     el.innerHTML = `<div class="empty">${S.queueLoading ? '<span class="spinner"></span>' : !S.profileId ? ''
-      : S.mode === 'easy' ? 'No job selected — click an Easy Apply job on LinkedIn, or pick one above.' : 'No jobs left to bid for this profile.'}</div>`;
+      : S.mode === 'easy' ? 'No job selected — click an Easy Apply job on LinkedIn, or pick one above.' : S.queue.length ? 'Pick a job above.' : 'No jobs left to bid for this profile.'}</div>`;
     return;
   }
   const info = S.job?.company_info || j.company_info;
   el.innerHTML = `
-    <div class="job-line">
-      <span class="txt" title="${esc(`${j.job_title} · ${j.company} · ${j.region || 'ANY'}`)}"><a class="role" href="${esc(j.link)}" data-action="openJob">${esc(j.job_title)}</a> · ${esc(j.company)}</span>
-      <span class="region">${esc(j.region || 'ANY')}</span>${companyPill(info)}
+    <div class="job-block" title="${esc(`${j.job_title} · ${j.company} · ${j.region || 'ANY'}`)}">
+      <div class="job-title"><a class="role" href="${esc(j.link)}" data-action="openJob">${esc(j.job_title)}</a></div>
+      <div class="job-sub"><span class="txt">${esc(j.company)}</span><span class="region">${esc(j.region || 'ANY')}</span>${companyPill(info)}</div>
     </div>`;
 }
 
@@ -1497,42 +1547,46 @@ function patchBuild() {
   const score = S.atsScore;
   const tone = score >= 90 ? 'good' : score >= 75 ? 'mid' : 'low';
   el.innerHTML = `
-    <div class="card-head"><span class="card-title">Resume${S.mode === 'easy' ? ` <span class="card-job" title="${esc(`${j.company} — ${j.job_title}`)}">· ${esc(j.company)} — ${esc(j.job_title)}</span>` : ''}</span>
+    <div class="card-head"><span class="card-title">Resume</span>
       ${S.resumeId && score ? `<button class="ats-badge ${tone}" data-action="toggleAts" title="${S.ats ? 'How this score is calculated' : 'ATS score'}">ATS ${score}${S.ats ? (S.atsOpen ? ' ▴' : ' ▾') : ''}</button>` : ''}</div>
+    ${S.mode === 'easy' ? `<div class="card-sub" title="${esc(`${j.company} — ${j.job_title}`)}">${esc(j.company)} — ${esc(j.job_title)}</div>` : ''}
     <div id="gptLine"></div>
     ${S.resumeId ? `
-      <button class="dl-btn" data-action="download" ${b ? 'disabled' : ''} title="Saves it straight to Downloads, replacing the previous file of the same name">${b === 'dl' ? spin : I.download} Download CV</button>
-      <div class="muted small dl-hint">Saves “${esc(cvFilename())}” to Downloads — replaces the old one.</div>` : ''}
+      <button class="success lg dl-btn" data-action="download" ${b ? 'disabled' : ''} title="Saves it straight to Downloads, replacing the previous file of the same name">${b === 'dl' ? spin : I.download} Download CV</button>
+      <div class="muted dl-hint">Saves “${esc(cvFilename())}” to Downloads — replaces the old one.</div>` : ''}
     ${manual ? `
-      <div class="build-row two">
-        <button class="grow" data-action="copyPrompt" ${b ? 'disabled' : ''}>${b === 'prompt' ? spin : I.sparkle} Copy GPT Prompt</button>
-        <button class="grow" data-action="generate" ${b ? 'disabled' : ''}>${b === 'gen' ? spin : (S.resumeId ? 'Generate again' : 'Generate CV')}</button>
+      <div class="build-row">
+        <button class="secondary" data-action="copyPrompt" ${b ? 'disabled' : ''}>${b === 'prompt' ? spin : I.sparkle} Copy GPT Prompt</button>
+        <button class="${S.resumeId ? 'secondary' : ''}" data-action="generate" ${b ? 'disabled' : ''}>${b === 'gen' ? spin : (S.resumeId ? 'Generate Again' : 'Generate CV')}</button>
       </div>
       <textarea id="jsonInput" class="json" spellcheck="false" placeholder="Paste the JSON ChatGPT returned…"></textarea>
-      ${gptOn() ? '<a href="#" class="small" data-action="manual">Hide the manual flow</a>' : ''}`
-    : '<a href="#" class="small" data-action="manual">Write it by hand instead (copy prompt / paste JSON)</a>'}
+      ${gptOn() ? '<button class="link-btn" data-action="manual">Hide the manual flow</button>' : ''}`
+    : '<button class="link-btn" data-action="manual">Write it by hand instead (copy prompt / paste JSON)</button>'}
     ${S.atsOpen ? atsBreakdown() : ''}
-    <div class="actions-3">
-      <button data-action="confirmApply" ${S.resumeId && !b ? '' : 'disabled'} title="${S.resumeId ? 'Mark applied and go to the next job' : 'Generate the CV first'}">${b === 'apply' ? spin : 'Mark as Applied'}</button>
-      <button class="danger" data-action="confirmReport" ${b ? 'disabled' : ''}>Report Job</button>
-      <button class="warn" data-action="confirmSkip" ${b ? 'disabled' : ''} title="Not for this profile — removes the job from this profile's queue only">Skip Job</button>
-    </div>
+    ${S.confirm ? '' : `<div class="actions">
+      <button class="lg" data-action="confirmApply" ${S.resumeId && !b ? '' : 'disabled'} title="${S.resumeId ? 'You applied with this CV' : 'Generate the CV first'}">${b === 'apply' ? spin : 'Mark as Applied'}</button>
+      <div class="btn-row">
+        <button class="danger" data-action="confirmReport" ${b ? 'disabled' : ''} title="Something is wrong with the job (closed, spam, broken link…)">Report Job</button>
+        <button class="warn" data-action="confirmSkip" ${b ? 'disabled' : ''} title="Not for this profile — removes the job from this profile's queue only">Skip Job</button>
+      </div>
+    </div>`}
     ${S.confirm === 'apply' ? `
       <div class="confirm">
-        <div>Mark <strong>${esc(j.company)}</strong> as applied?${S.mode === 'easy' ? '' : ' The next job opens in this tab.'}</div>
-        <div class="row"><button class="grow" data-action="applySubmit" ${b ? 'disabled' : ''}>${b === 'apply' ? spin : 'Yes, applied'}</button><button class="secondary grow" data-action="cancelConfirm">Cancel</button></div>
+        <div>Mark <strong>${esc(j.company)}</strong> as applied with ${esc(selectedProfile()?.name || 'this profile')}?${S.mode === 'easy' ? '' : ' The next job opens in this tab.'}</div>
+        <div class="btn-row"><button data-action="applySubmit" ${b ? 'disabled' : ''}>${b === 'apply' ? spin : 'Yes, Applied'}</button><button class="secondary" data-action="cancelConfirm">Cancel</button></div>
       </div>` : ''}
     ${S.confirm === 'report' ? `
       <div class="confirm">
-        <textarea id="reportReason" rows="2" placeholder="What's wrong? Link broken, posting closed, spam…"></textarea>
-        <div class="row"><button class="danger grow" data-action="reportSubmit" ${b ? 'disabled' : ''}>${b === 'report' ? spin : 'Report'}</button><button class="secondary grow" data-action="cancelConfirm">Cancel</button></div>
+        <div>What's wrong with this job?</div>
+        <textarea id="reportReason" rows="2" placeholder="Link broken, posting closed, spam…"></textarea>
+        <div class="btn-row"><button class="danger solid" data-action="reportSubmit" ${b ? 'disabled' : ''}>${b === 'report' ? spin : 'Report'}</button><button class="secondary" data-action="cancelConfirm">Cancel</button></div>
       </div>` : ''}
     ${S.confirm === 'skip' ? `
       <div class="confirm">
-        <div>Are you sure skip this job? Why doesn't it suit ${esc(selectedProfile()?.name || 'this profile')}?</div>
+        <div>Skip this job? Why doesn't it suit ${esc(selectedProfile()?.name || 'this profile')}?</div>
         <div class="chips">${SKIP_REASONS.map((r) => `<span class="chip" role="button" tabindex="0" data-action="skipReason" data-r="${esc(r)}">${esc(r)}</span>`).join('')}</div>
         <textarea id="skipReason" rows="2" placeholder="Pick a reason above or type one…"></textarea>
-        <div class="row"><button class="warn grow" data-action="skipSubmit" ${b ? 'disabled' : ''}>${b === 'skip' ? spin : 'Skip job'}</button><button class="secondary grow" data-action="cancelConfirm">Cancel</button></div>
+        <div class="btn-row"><button class="warn" data-action="skipSubmit" ${b ? 'disabled' : ''}>${b === 'skip' ? spin : 'Skip Job'}</button><button class="secondary" data-action="cancelConfirm">Cancel</button></div>
       </div>` : ''}`;
   if ($('#jsonInput')) $('#jsonInput').value = prev;
   patchGptLine();
@@ -1632,6 +1686,8 @@ async function onClick(e) {
       case 'easyAllow': await allowLinkedIn(); break;
       case 'easyRetry': scheduleEasyCheck(true); break;
       case 'easyBack': e.preventDefault(); await showJob(currentJob()); break;
+      case 'qaEdit': S.qaEditing = true; patchQA(); $('#qaInput')?.focus(); break;
+      case 'qaCancel': S.qaEditing = false; S.qaDraft = null; $('#qaInput')?.blur(); patchQA(); break;
       case 'genCv': await addJob({ gen: true }); break;
       case 'addJob': await addJob({ gen: false }); break;
       case 'useLink': {

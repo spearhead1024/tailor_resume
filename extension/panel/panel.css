@@ -1,5 +1,8 @@
-/* Side panel — uses the web app's design tokens (frontend/src/styles.css) so the
-   panel reads as part of TailorResume, compacted for a ~360px column. */
+/* TailorResume side panel.
+   One column at every width (Chrome lets the panel be dragged from ~320px to half the window):
+   the column is fluid up to 600px and then centred, so nothing ever jumps between layouts.
+   One primary action per card; secondary / destructive actions are quiet. Colours are the web
+   app's tokens (frontend/src/styles.css). */
 :root {
   --bg:          #090e1a;
   --panel:       #0f1629;
@@ -11,113 +14,213 @@
   --text-soft:   #b8c8e0;
   --muted:       #6b82a6;
   --accent:      #3b82f6;
-  --accent-glow: rgba(59,130,246,0.18);
   --accent-dim:  #2563eb;
+  --accent-glow: rgba(59,130,246,.18);
+  --accent-bg:   rgba(59,130,246,.12);
   --success:     #10b981;
-  --success-bg:  rgba(16,185,129,0.12);
+  --success-dim: #059669;
+  --success-bg:  rgba(16,185,129,.12);
   --danger:      #ef4444;
-  --danger-bg:   rgba(239,68,68,0.12);
+  --danger-bg:   rgba(239,68,68,.12);
   --warning:     #f59e0b;
-  --warning-bg:  rgba(245,158,11,0.12);
+  --warning-bg:  rgba(245,158,11,.12);
+  --h: 28px;          /* every control */
+  --h-lg: 34px;       /* a card's main action */
+  --r: 8px;
+  --gap: 8px;
   font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
   font-size: 13px;
+  line-height: 1.4;
   color-scheme: dark;
   -webkit-font-smoothing: antialiased;
 }
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 [hidden] { display: none !important; }
-html, body { min-height: 100%; background: var(--bg); color: var(--text); }
-a { color: var(--accent); text-decoration: none; }
+html, body { min-height: 100%; background: var(--bg); color: var(--text); overflow-x: hidden; }
+a { color: var(--accent); text-decoration: none; cursor: pointer; }
 a:hover { text-decoration: underline; }
+b, strong { font-weight: 600; }
 
-.main { padding: 10px; display: grid; gap: 8px; }
-.card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 10px 11px; display: grid; gap: 8px; }
-.card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.card-title { font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+/* ── Layout ──────────────────────────────────────────────────────────────── */
+.main { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--gap); padding: 10px; width: 100%; max-width: 600px; margin: 0 auto; }
+.col { display: contents; }
+.card { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 11px 12px; }
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; min-height: 22px; }
+.card-title { font-size: 12.5px; font-weight: 650; color: var(--text-soft); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card-sub { font-size: 12px; color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: -4px; }
 .muted { color: var(--muted); }
 .small { font-size: 12px; }
-.row { display: flex; gap: 6px; align-items: center; }
+.row { display: flex; gap: 6px; align-items: center; min-width: 0; flex-wrap: wrap; }
+.row.space { justify-content: space-between; align-items: flex-start; flex-wrap: nowrap; }
 .grow { flex: 1 1 0; min-width: 0; }
+.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.empty { text-align: center; color: var(--muted); padding: 14px 8px; font-size: 12.5px; }
 
-/* Buttons — same shape/colours as the web app */
+/* ── Buttons ─────────────────────────────────────────────────────────────── */
 button {
-  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-  background: var(--accent); color: #fff; border: none; border-radius: 8px;
-  padding: 7px 10px; font-family: inherit; font-size: 12.5px; font-weight: 500; line-height: 1.2; cursor: pointer; white-space: nowrap;
-  transition: background .14s, box-shadow .14s, opacity .14s; box-shadow: 0 1px 3px rgba(0,0,0,.25);
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: var(--h); padding: 0 12px; min-width: 0;
+  background: var(--accent); color: #fff; border: 1px solid transparent; border-radius: var(--r);
+  font: inherit; font-size: 12.5px; font-weight: 550; line-height: 1; white-space: nowrap; cursor: pointer;
+  transition: background .14s, border-color .14s, color .14s, opacity .14s;
 }
-button:hover:not(:disabled) { background: var(--accent-dim); box-shadow: 0 2px 8px rgba(59,130,246,.3); }
+button:hover:not(:disabled) { background: var(--accent-dim); }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 button:disabled { opacity: .45; cursor: not-allowed; }
-button.secondary { background: var(--panel-2); color: var(--text-soft); border: 1px solid var(--border-soft); box-shadow: none; }
+button.secondary { background: var(--panel-2); color: var(--text-soft); border-color: var(--border-soft); }
 button.secondary:hover:not(:disabled) { background: var(--panel-3); color: var(--text); border-color: var(--muted); }
-button.danger { background: var(--danger); }
-button.danger:hover:not(:disabled) { background: #dc2626; box-shadow: 0 2px 8px rgba(239,68,68,.3); }
-button.warn { background: var(--warning-bg); color: var(--warning); border: 1px solid rgba(245,158,11,.35); box-shadow: none; }
-button.warn:hover:not(:disabled) { background: rgba(245,158,11,.2); }
-button.icon { padding: 0; width: 32px; height: 32px; flex: 0 0 32px; }
-button svg, .ico svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+button.ghost { background: transparent; color: var(--text-soft); border-color: var(--border-soft); }
+button.ghost:hover:not(:disabled) { background: var(--panel-2); color: var(--text); }
+button.danger { background: transparent; color: var(--danger); border-color: rgba(239,68,68,.35); }
+button.danger:hover:not(:disabled) { background: var(--danger-bg); }
+button.danger.solid { background: var(--danger); color: #fff; border-color: transparent; }
+button.danger.solid:hover:not(:disabled) { background: #dc2626; }
+button.warn { background: transparent; color: var(--warning); border-color: rgba(245,158,11,.35); }
+button.warn:hover:not(:disabled) { background: var(--warning-bg); }
+button.success { background: var(--success); }
+button.success:hover:not(:disabled) { background: var(--success-dim); }
+button.lg { height: var(--h-lg); font-size: 13px; font-weight: 600; width: 100%; }
+button.sm { height: 24px; padding: 0 9px; font-size: 12px; }
+button.icon { width: var(--h); height: var(--h); padding: 0; flex: 0 0 var(--h); }
+button svg, .ico svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+button.sm svg { width: 13px; height: 13px; }
+.btn-row { display: flex; gap: 6px; }
+.btn-row > button { flex: 1 1 0; }
+.link-btn { background: none; border: none; height: auto; padding: 0; color: var(--muted); font-size: 12px; font-weight: 500; text-decoration: underline; justify-self: start; white-space: normal; text-align: left; line-height: 1.4; }
+.link-btn:hover:not(:disabled) { background: none; color: var(--text); }
 
+/* ── Inputs ──────────────────────────────────────────────────────────────── */
 input, textarea, select {
-  width: 100%; background: var(--panel-2); color: var(--text); border: 1px solid var(--border-soft);
-  border-radius: 8px; padding: 7px 9px; font: inherit; font-size: 12.5px; line-height: 1.4;
+  width: 100%; min-width: 0; background: var(--panel-2); color: var(--text); border: 1px solid var(--border-soft);
+  border-radius: var(--r); padding: 6px 9px; font: inherit; font-size: 12.5px; line-height: 1.4;
   transition: border-color .15s, box-shadow .15s;
 }
-input::placeholder, textarea::placeholder { color: var(--muted); opacity: .8; }
+input, select { height: var(--h); padding-top: 0; padding-bottom: 0; }
+input::placeholder, textarea::placeholder { color: var(--muted); opacity: .85; }
 input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
-textarea { resize: vertical; }
-textarea.json { min-height: 96px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; }
+textarea { resize: vertical; display: block; }
+textarea.json { min-height: 90px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; }
+input[type="checkbox"] { width: 14px; height: 14px; flex: none; padding: 0; margin: 0; accent-color: var(--accent); box-shadow: none; }
 
-/* Job combobox */
-.combo { position: relative; }
-.combo-list {
-  position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; right: 0; max-height: 280px; overflow: auto;
-  background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.45);
-}
-.combo-item { padding: 7px 9px; cursor: pointer; border-bottom: 1px solid var(--border); }
-.combo-item:last-child { border-bottom: none; }
-.combo-item:hover, .combo-item.active { background: var(--panel-3); }
-.combo-item.current { box-shadow: inset 3px 0 0 var(--accent); }
-.combo-item .t { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.combo-item .s { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.combo-empty { padding: 10px; color: var(--muted); text-align: center; }
+/* ── Notes (one-line status / hint inside a card) ────────────────────────── */
+.note, .easy-line, .gpt-line { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; font-size: 12px; line-height: 1.45;
+  border-radius: var(--r); padding: 7px 9px; background: var(--panel-2); color: var(--text-soft); min-width: 0; }
+.note .txt, .easy-line .txt, .gpt-line .txt { flex: 1 1 150px; min-width: 0; }
+.note.ok, .easy-line.ok, .gpt-line.ok { background: var(--success-bg); color: var(--success); }
+.note.warn, .easy-line.warn, .gpt-line.warn { background: var(--warning-bg); color: var(--warning); }
+.note.error, .easy-line.error, .gpt-line.error { background: var(--danger-bg); color: var(--danger); }
+.note.info, .easy-line.info { background: var(--accent-bg); color: #93c5fd; }
+.note a, .easy-line a { color: inherit; font-weight: 600; text-decoration: underline; }
+.note button, .easy-line button, .gpt-line button { flex: none; }
+.easy-line ul { margin: 4px 0 0 16px; padding: 0; }
+.spinner { width: 13px; height: 13px; border: 2px solid rgba(255,255,255,.25); border-top-color: currentColor; border-radius: 50%; animation: spin .8s linear infinite; display: inline-block; flex: none; vertical-align: -2px; }
+.note .spinner, .easy-line .spinner, .gpt-line .spinner { width: 11px; height: 11px; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
-/* Current job — one line: role (link) · company · region */
-.job-line { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 14px; }
-.job-line .txt { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
-.job-line .role { color: var(--text); font-weight: 600; font-size: 15px; }
-.job-line .role:hover { color: var(--accent); }
-.region { font-size: 11.5px; font-weight: 600; background: var(--panel-3); color: var(--text-soft); border-radius: 4px; padding: 1px 6px; }
-.pill { flex: 0 0 auto; font-size: 11.5px; font-weight: 600; border-radius: 999px; padding: 2px 7px; }
+/* Pills */
+.pills { display: inline-flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; flex: none; }
+.pill, .easy-pill { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; border-radius: 999px; padding: 2px 8px; white-space: nowrap; flex: none; }
+.easy-pill.ok, .pill.ok { background: var(--success-bg); color: var(--success); }
+.easy-pill.warn, .pill.warn { background: var(--warning-bg); color: var(--warning); }
+.easy-pill.error, .pill.error { background: var(--danger-bg); color: var(--danger); }
+.easy-pill.info, .pill.info { background: var(--accent-bg); color: #93c5fd; }
+.easy-pill.muted, .pill.muted { background: var(--panel-2); color: var(--text-soft); }
+.easy-pill .spinner { width: 10px; height: 10px; }
 .pill.startup     { background: rgba(22,163,74,.16);  color: #4ade80; }
 .pill.not_startup { background: rgba(148,163,184,.16); color: #94a3b8; }
 .pill.unknown     { background: rgba(234,179,8,.14);   color: #facc15; }
 .pill.pending     { background: rgba(59,130,246,.14);  color: #93c5fd; }
+.region { font-size: 11px; font-weight: 600; background: var(--panel-3); color: var(--text-soft); border-radius: 5px; padding: 1px 6px; flex: none; }
 
-/* Application details — icon buttons */
-/* 13 fields: two rows of 7 + 6 (contact & address, then links & background) */
-.copy-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px 4px; }
+/* Alerts, toast */
+#alerts:not([hidden]), #adAlerts:not([hidden]) { display: grid; gap: 6px; }
+.alert { display: flex; gap: 8px; align-items: flex-start; border-radius: var(--r); padding: 7px 9px; font-size: 12px; }
+.alert > span { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.alert.error { background: var(--danger-bg); color: var(--danger); }
+.alert.ok { background: var(--success-bg); color: var(--success); }
+.alert.warn { background: var(--warning-bg); color: var(--warning); }
+.alert ul { margin: 4px 0 0; padding-left: 16px; }
+.alert-x { height: auto; padding: 0 2px; background: none; border: none; color: inherit; opacity: .7; font-size: 12px; }
+.alert-x:hover:not(:disabled) { background: none; opacity: 1; }
+.toast { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 50; max-width: calc(100% - 32px);
+  background: var(--panel-3); color: var(--text); border: 1px solid var(--border-soft); padding: 7px 14px; border-radius: 999px;
+  font-size: 12px; font-weight: 500; text-align: center; box-shadow: 0 6px 18px rgba(0,0,0,.4); }
+
+/* ── Top bar: tabs by role, who is signed in, ⚙, sign out ────────────────── */
+.topbar { position: sticky; top: 0; z-index: 30; display: flex; align-items: center; gap: 6px; padding: 7px 10px;
+  background: rgba(9,14,26,.92); backdrop-filter: blur(6px); border-bottom: 1px solid var(--border); }
+.modes { display: flex; gap: 2px; padding: 2px; background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: 9px; min-width: 0; }
+.modes .mode { height: 24px; padding: 0 10px; background: transparent; color: var(--muted); border: none; border-radius: 7px; font-weight: 600; }
+.modes .mode:hover:not(:disabled) { background: var(--panel-3); color: var(--text); }
+.modes .mode[aria-selected="true"] { background: var(--accent); color: #fff; }
+.mode-one { font-weight: 600; font-size: 13px; }
+.topbar .who { flex: 1 1 auto; min-width: 0; text-align: right; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#settingsBtn.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+@media (max-width: 340px) { .topbar .who { display: none; } .modes .mode { padding: 0 8px; } }
+.update-bar { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 6px 8px; max-width: 580px;
+  margin: 8px auto 0; width: calc(100% - 20px); padding: 7px 10px; border-radius: 10px;
+  background: var(--success-bg); color: var(--success); font-size: 12.5px; font-weight: 500; }
+.update-bar > span { flex: 1 1 180px; min-width: 0; }
+.update-bar.warn { background: var(--warning-bg); color: var(--warning); }
+.update-bar a { color: inherit; font-weight: 600; text-decoration: underline; }
+
+/* ── Profile picker ──────────────────────────────────────────────────────── */
+.profile-row { display: flex; gap: 6px; align-items: center; min-width: 0; }
+.profile-row .profile-select { flex: 1 1 auto; min-width: 0; font-weight: 600; font-size: 13px; background: var(--panel); border-color: var(--border); }
+.icon.spinning svg { animation: spin .8s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .icon.spinning svg { animation-duration: 1.6s; } }
+
+/* ── Details: click-to-copy icons; as many per row as fit ─────────────────── */
+.copy-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(46px, 1fr)); gap: 8px 2px; }
 .copy-cell { display: grid; justify-items: center; gap: 3px; min-width: 0; }
-.copy-btn { width: 34px; height: 34px; padding: 0; border-radius: 9px; background: var(--panel-2); color: var(--text-soft); border: 1px solid var(--border-soft); box-shadow: none; }
-.copy-btn:hover:not(:disabled) { background: var(--accent-glow); border-color: var(--accent); color: var(--accent); box-shadow: none; }
+.copy-btn { width: 30px; height: 30px; padding: 0; border-radius: 9px; background: var(--panel-2); color: var(--text-soft); border: 1px solid var(--border-soft); }
+.copy-btn:hover:not(:disabled) { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }
 .copy-btn.copied { background: var(--success-bg); border-color: var(--success); color: var(--success); }
 .copy-btn:disabled { opacity: .3; }
 .copy-cell .lbl { font-size: 10px; color: var(--muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* Build resume */
-.actions-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
-.confirm { display: grid; gap: 6px; padding: 8px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--border-soft); }
+/* ── A job: title, company · location, its link ──────────────────────────── */
+.job-block { display: grid; gap: 1px; min-width: 0; }
+.job-title { font-size: 13.5px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-title a { color: inherit; }
+.job-title a:hover { color: var(--accent); }
+.job-sub { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; color: var(--muted); }
+.job-sub .txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-link { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-link:hover { color: var(--text-soft); }
+
+/* Out Bids: job search */
+#jobCard { position: relative; z-index: 5; }
+.combo { position: relative; }
+.combo-list { position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; right: 0; max-height: 300px; overflow: auto;
+  background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: var(--r); box-shadow: 0 10px 28px rgba(0,0,0,.5); }
+.combo-item { padding: 7px 10px; cursor: pointer; border-bottom: 1px solid var(--border); }
+.combo-item:last-child { border-bottom: none; }
+.combo-item:hover, .combo-item.active { background: var(--panel-3); }
+.combo-item.current { box-shadow: inset 3px 0 0 var(--accent); }
+.combo-item .t { font-weight: 600; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.combo-item .s { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.combo-empty { padding: 10px; color: var(--muted); text-align: center; }
+
+/* ── Resume ──────────────────────────────────────────────────────────────── */
+.dl-hint { font-size: 11.5px; margin-top: -4px; }
+.build-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 6px; }
+.actions { display: grid; gap: 6px; padding-top: 2px; }
+.actions .btn-row > button { height: 26px; font-size: 12px; }
+.confirm { display: grid; gap: 6px; padding: 9px; border-radius: var(--r); background: var(--panel-2); border: 1px solid var(--border-soft); font-size: 12.5px; }
+.confirm .btn-row > button { height: var(--h); }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip { font-size: 11.5px; padding: 3px 9px; border-radius: 999px; background: var(--panel-3); color: var(--text-soft); border: 1px solid var(--border-soft); cursor: pointer; user-select: none; }
+.chip:hover, .chip:focus-visible { border-color: var(--accent); color: var(--text); outline: none; }
 
 /* ATS */
-.ats-badge { font-size: 11.5px; font-weight: 700; border-radius: 999px; padding: 2px 9px; cursor: pointer; border: none; box-shadow: none; }
-.ats-badge.good { background: var(--success-bg); color: var(--success); }
-.ats-badge.mid  { background: var(--warning-bg); color: var(--warning); }
-.ats-badge.low  { background: var(--danger-bg);  color: var(--danger); }
-.ats-badge:hover:not(:disabled) { box-shadow: none; filter: brightness(1.15); }
-.ats-badge.good:hover:not(:disabled) { background: var(--success-bg); }
-.ats-badge.mid:hover:not(:disabled)  { background: var(--warning-bg); }
-.ats-badge.low:hover:not(:disabled)  { background: var(--danger-bg); }
-.ats { display: grid; gap: 6px; padding: 8px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--border-soft); font-size: 12px; }
-.ats-row { display: grid; grid-template-columns: 118px 1fr 40px; align-items: center; gap: 6px; }
+.ats-badge { height: auto; font-size: 11px; font-weight: 700; border-radius: 999px; padding: 2px 9px; border: none; flex: none; }
+.ats-badge.good, .ats-badge.good:hover:not(:disabled) { background: var(--success-bg); color: var(--success); }
+.ats-badge.mid,  .ats-badge.mid:hover:not(:disabled)  { background: var(--warning-bg); color: var(--warning); }
+.ats-badge.low,  .ats-badge.low:hover:not(:disabled)  { background: var(--danger-bg);  color: var(--danger); }
+.ats { display: grid; gap: 6px; padding: 9px; border-radius: var(--r); background: var(--panel-2); border: 1px solid var(--border-soft); font-size: 12px; }
+.ats-row { display: grid; grid-template-columns: minmax(80px, 130px) 1fr 40px; align-items: center; gap: 6px; }
+.ats-row > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ats-bar { height: 5px; border-radius: 3px; background: var(--panel-3); overflow: hidden; }
 .ats-bar > i { display: block; height: 100%; background: var(--accent); }
 .ats-row .v { text-align: right; color: var(--text-soft); font-variant-numeric: tabular-nums; }
@@ -126,134 +229,38 @@ textarea.json { min-height: 96px; font-family: ui-monospace, SFMono-Regular, Men
 .kw .hit  { background: var(--success-bg); color: var(--success); }
 .kw .miss { background: var(--danger-bg); color: var(--danger); }
 
-/* Alerts, toast, spinner */
-.alert { border-radius: 8px; padding: 7px 9px; font-size: 12px; }
-.alert.error { background: var(--danger-bg); color: var(--danger); }
-.alert.ok { background: var(--success-bg); color: var(--success); }
-.toast { position: fixed; left: 50%; bottom: 12px; transform: translateX(-50%); background: var(--panel-3); color: var(--text); border: 1px solid var(--border-soft); padding: 7px 12px; border-radius: 999px; font-size: 12px; font-weight: 500; z-index: 30; max-width: 90%; text-align: center; box-shadow: 0 6px 18px rgba(0,0,0,.4); }
-.spinner { width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.25); border-top-color: currentColor; border-radius: 50%; animation: spin .8s linear infinite; display: inline-block; }
-@keyframes spin { to { transform: rotate(360deg); } }
-.empty { text-align: center; color: var(--muted); padding: 16px 8px; }
+/* ── Tech questions ──────────────────────────────────────────────────────── */
+.qa-list { display: grid; gap: 6px; }
+.qa-row { display: grid; gap: 4px; padding: 8px 9px; border-radius: var(--r); background: var(--panel-2); border: 1px solid var(--border); min-width: 0; }
+.qa-row .q { font-size: 12.5px; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.qa-row .a { white-space: pre-wrap; font-size: 12.5px; line-height: 1.5; color: var(--text-soft); overflow-wrap: anywhere; }
+.qa-row .row.space { gap: 8px; }
 
-/* Sign-in */
-.login { max-width: 340px; margin: 40px auto; padding: 0 12px; display: grid; gap: 10px; }
-.login .hero { text-align: center; display: grid; gap: 4px; justify-items: center; }
-.login .hero img { width: 40px; height: 40px; border-radius: 10px; }
-.login label { display: grid; gap: 4px; font-size: 12px; font-weight: 500; color: var(--muted); }
+/* CV preview */
+.pdf-frame { width: 100%; height: 72vh; min-height: 420px; border: 1px solid var(--border-soft); border-radius: var(--r); background: #fff; }
 
-button.sm { padding: 5px 9px; font-size: 12px; }
+/* Cards each bid tab shows (⚙ Settings → "Show on …") */
+#bidView.hide-details #copyCard, #bidView.hide-jobs #jobCard, #bidView.hide-questions #qaCard,
+#bidView.hide-preview #previewCard { display: none !important; }
 
-/* Profile picker on top; the "Details" card */
-select.profile-select { font-weight: 600; font-size: 13px; padding: 8px 10px; background: var(--panel); border-color: var(--border); }
-.card-head .card-title { min-width: 0; }
-.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#jobSearch { font-size: 13.5px; font-weight: 500; }
-
-/* ── Responsive ─────────────────────────────────────────────────────────────
-   Chrome lets the side panel be dragged from ~320px to half the window. Cards
-   adapt to their OWN width (container queries), so the same rules hold whether
-   the panel is one column or two; the viewport only decides the column count. */
-/* minmax(0, 1fr): a grid track otherwise grows to its widest unbreakable content (a
-   long job title, the job box's text) and pushes the card past the panel's edge. */
-.main, .col, .card { grid-template-columns: minmax(0, 1fr); }
-.col { display: grid; gap: 8px; align-content: start; min-width: 0; }
-.card { container-type: inline-size; min-width: 0; }
-.build-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 32px; gap: 6px; }
-.build-row button, .actions-3 button { min-width: 0; }
-
-/* Narrow card (panel at its minimum width) */
-@container (max-width: 300px) {
-  .card-head { flex-wrap: wrap; }
-  .card-head .card-title { flex: 1 1 100%; }
-  .copy-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
-  .build-row { grid-template-columns: minmax(0, 1fr) 32px; }
-  .build-row [data-action="copyPrompt"] { grid-column: 1 / -1; }
-  .actions-3 { grid-template-columns: 1fr 1fr; }
-  .actions-3 [data-action="confirmApply"] { grid-column: 1 / -1; }
-  .ats-row { grid-template-columns: 92px 1fr 38px; }
-  .job-line { flex-wrap: wrap; }
-  /* role · company may take two lines here, so the company isn't cut off */
-  .job-line .txt { flex-basis: 100%; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-}
-/* Roomy card: larger copy buttons, taller JSON box */
-@container (min-width: 420px) {
-  .copy-btn { width: 40px; height: 40px; }
-  .copy-cell .lbl { font-size: 11px; }
-  textarea.json { min-height: 140px; }
-  .ats-row { grid-template-columns: 150px 1fr 44px; }
-}
-
-/* Wide panel: two columns — profile + details | job + build */
-@media (min-width: 640px) {
-  .main { grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); align-items: start; gap: 10px; padding: 12px; }
-  #alerts { grid-column: 1 / -1; }
-}
-/* Very wide: don't let lines stretch across the screen */
-@media (min-width: 1200px) {
-  .main { max-width: 1200px; margin: 0 auto; }
-}
-/* Cards with container-type are their own stacking context — keep the job card (and
-   its search dropdown) above the cards that follow it. */
-#jobCard { position: relative; z-index: 5; }
-
-/* Profile picker + refresh on one line (refresh is a 32px icon, like download) */
-.profile-row { display: flex; gap: 6px; align-items: stretch; min-width: 0; }
-.profile-row .profile-select { flex: 1 1 auto; min-width: 0; }
-.profile-row .icon { height: auto; min-height: 32px; }
-.icon.spinning svg { animation: spin .8s linear infinite; }
-@media (prefers-reduced-motion: reduce) { .icon.spinning svg { animation-duration: 1.6s; } }
-
-/* ── Buttons: one height everywhere (80% of the old ~32px) ─────────────────── */
-:root { --btn-h: 26px; }
-button { height: var(--btn-h); padding: 0 10px; line-height: 1; }
-button.icon, .profile-row .icon { width: var(--btn-h); height: var(--btn-h); min-height: 0; flex: 0 0 var(--btn-h); }
-.build-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) var(--btn-h); }
-@container (max-width: 300px) { .build-row { grid-template-columns: minmax(0, 1fr) var(--btn-h); } }
-.profile-row { align-items: center; }
-.profile-row .profile-select { height: var(--btn-h); padding: 0 8px; }
-.copy-btn { width: 28px; height: 28px; }
-@container (min-width: 420px) { .copy-btn { width: 32px; height: 32px; } }
-.ats-badge { height: auto; }
-
-/* Alerts: dismissible */
-.alert { display: flex; gap: 8px; align-items: flex-start; }
-.alert > span { flex: 1 1 auto; min-width: 0; }
-.alert-x { height: auto; padding: 0 2px; background: none; border: none; box-shadow: none; color: inherit; opacity: .7; font-size: 12px; }
-.alert-x:hover:not(:disabled) { background: none; box-shadow: none; opacity: 1; }
-#alerts:not([hidden]) { display: grid; gap: 6px; }
-
-/* Skip reasons */
-.chips { display: flex; flex-wrap: wrap; gap: 4px; }
-.chip { font-size: 11.5px; padding: 3px 8px; border-radius: 999px; background: var(--panel-3); color: var(--text-soft); border: 1px solid var(--border-soft); cursor: pointer; user-select: none; }
-.chip:hover, .chip:focus-visible { border-color: var(--accent); color: var(--text); outline: none; }
-
-/* CV preview at the bottom; full width when the panel is two columns */
-#previewCard { grid-column: 1 / -1; }
-.pdf-frame { width: 100%; height: 72vh; min-height: 420px; border: 1px solid var(--border-soft); border-radius: 8px; background: #fff; }
-
-/* ── Tabs by role (Bid / Add job) + who's signed in ─────────────────────────── */
-.topbar {
-  position: sticky; top: 0; z-index: 30; display: flex; align-items: center; gap: 6px;
-  padding: 6px 10px; background: var(--bg); border-bottom: 1px solid var(--border);
-}
-.modes { display: flex; gap: 2px; padding: 2px; background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: 9px; }
-.modes .mode {
-  height: 24px; padding: 0 12px; background: transparent; color: var(--muted); box-shadow: none; border-radius: 7px; font-weight: 600;
-}
-.modes .mode:hover:not(:disabled) { background: var(--panel-3); color: var(--text); box-shadow: none; }
-.modes .mode[aria-selected="true"] { background: var(--accent); color: #fff; }
-.mode-one { font-weight: 600; font-size: 13px; }
-.topbar .who { flex: 1 1 auto; min-width: 0; text-align: right; color: var(--muted); font-size: 12px; }
-.topbar .icon { flex: 0 0 var(--btn-h); }
-
-/* ── Add job tab ────────────────────────────────────────────────────────────── */
-#adAlerts:not([hidden]) { display: grid; gap: 6px; }
-#addView .card-title { white-space: nowrap; flex: 0 0 auto; }
-@media (min-width: 640px) { #adAlerts { grid-column: 1 / -1; } }
+/* ── ⚙ Settings ──────────────────────────────────────────────────────────── */
+.settings-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 2px 0; }
+.settings-head h2 { font-size: 14px; font-weight: 650; }
+.set-desc { font-size: 12px; color: var(--muted); }
+.conn { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.conn + .conn { padding-top: 9px; border-top: 1px solid var(--border); }
+.conn .who-c { flex: 1 1 auto; min-width: 0; display: grid; gap: 1px; }
+.conn .name { font-weight: 600; font-size: 12.5px; display: flex; align-items: center; gap: 6px; }
+.conn .desc { font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
+.conn .acts { display: flex; gap: 6px; flex: none; flex-wrap: wrap; justify-content: flex-end; }
+.set-switch { display: flex; align-items: center; gap: 7px; font-size: 12.5px; cursor: pointer; min-width: 0; }
+.set-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 6px 10px; }
 .fld { display: grid; gap: 4px; min-width: 0; }
-.fld-l { display: flex; align-items: baseline; gap: 6px; font-size: 12px; font-weight: 500; color: var(--muted); }
+.fld-l { display: flex; align-items: baseline; gap: 6px; font-size: 12px; font-weight: 500; color: var(--muted); min-width: 0; }
 .fld-l .src { font-weight: 400; font-size: 11px; color: var(--success); }
 .fld-l .count { margin-left: auto; font-weight: 400; font-size: 11px; }
+
+/* ── Add Jobs tab ────────────────────────────────────────────────────────── */
 .fld-2 { display: grid; grid-template-columns: minmax(0, 1fr) 92px; gap: 6px; }
 textarea.desc { min-height: 150px; font-size: 12px; }
 .alert.dup ul, .alert.url-dup ul { margin: 4px 0 0; padding-left: 16px; }
@@ -262,78 +269,9 @@ textarea.desc { min-height: 150px; font-size: 12px; }
 .url-line .spinner { width: 11px; height: 11px; }
 #adSubmit svg { order: 2; }
 
-/* ── ChatGPT connection (Bid tab) ───────────────────────────────────────────── */
-.gpt-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 12px; border-radius: 8px; padding: 6px 8px; background: var(--panel-2); }
-.gpt-line .txt { flex: 1 1 160px; min-width: 0; display: flex; align-items: center; gap: 6px; }
-.gpt-line .spinner { width: 11px; height: 11px; }
-.gpt-line.muted { color: var(--text-soft); }
-.gpt-line.warn { background: var(--warning-bg); color: var(--warning); }
-.gpt-line.ok { background: var(--success-bg); color: var(--success); }
-.gpt-line.error { background: var(--danger-bg); color: var(--danger); }
-.gpt-meta { flex: 1 0 100%; font-size: 11px; color: var(--muted); }
-.gpt-meta a { color: var(--muted); text-decoration: underline; }
-.alert.warn { background: var(--warning-bg); color: var(--warning); }
-button.dl-btn { width: 100%; height: 34px; font-size: 13px; font-weight: 600; background: var(--success); }
-button.dl-btn:hover:not(:disabled) { background: #059669; box-shadow: 0 2px 8px rgba(16,185,129,.3); }
-.dl-hint { margin-top: -4px; }
-.build-row.two { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-#buildCard > a.small, #buildCard a[data-action="manual"] { justify-self: start; color: var(--muted); text-decoration: underline; }
-
-/* ── Application questions (Bid tab) ───────────────────────────────────────── */
-.qa-list { display: grid; gap: 8px; }
-.qa-row { display: grid; gap: 4px; padding: 8px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--border); }
-.qa-row .q { font-size: 12.5px; }
-.qa-row .a { white-space: pre-wrap; font-size: 12.5px; line-height: 1.45; }
-.qa-row .spinner { width: 11px; height: 11px; vertical-align: -2px; }
-.row.space { justify-content: space-between; align-items: flex-start; }
-@container (max-width: 300px) { .build-row.two { grid-template-columns: minmax(0, 1fr); } }
-
-/* ── A newer version is installed (Load unpacked + the Windows updater) ──────── */
-.update-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 10px 0; padding: 7px 10px;
-  border-radius: 10px; background: var(--success-bg); color: var(--success); font-size: 12.5px; font-weight: 500; }
-.update-bar.warn { background: var(--warning-bg); color: var(--warning); }
-.update-bar a { color: inherit; font-weight: 600; }
-#settingsExt .row { align-items: center; gap: 10px; }
-
-/* Easy Bids: the LinkedIn job on the tab (panel.js patchEasy) */
-.easy-job { font-size: 12.5px; line-height: 1.35; margin-bottom: 6px; overflow-wrap: anywhere; }
-.easy-line { font-size: 12px; line-height: 1.4; border-radius: 7px; padding: 6px 8px; margin-top: 4px; }
-.easy-line.muted { background: var(--panel-2); color: var(--text-soft); }
-.easy-line.ok { background: var(--success-bg); color: var(--success); }
-.easy-line.warn { background: var(--warning-bg); color: var(--warning); }
-.easy-line.pinned a { margin-left: 4px; font-weight: 600; }
-.card-title .card-job { text-transform: none; letter-spacing: 0; font-weight: 500; color: var(--text-soft); }
-.card-head .card-title:has(.card-job) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.easy-line.error { background: var(--danger-bg); color: var(--danger); }
-.easy-line ul { margin: 4px 0 0 16px; padding: 0; }
-.easy-line .spinner { width: 11px; height: 11px; vertical-align: -2px; margin-right: 4px; }
-#easyCard .row { margin-top: 6px; }
-.easy-link { font-size: 11px; margin-top: 2px; overflow-wrap: anywhere; }
-.easy-link a { color: var(--muted); }
-#easyCard button[data-action="genCv"] svg { width: 14px; height: 14px; }
-
-
-/* Cards each bid tab shows (⚙ Settings → "Show on …") */
-#bidView.hide-details #copyCard, #bidView.hide-jobs #jobCard, #bidView.hide-questions #qaCard,
-#bidView.hide-preview #previewCard { display: none !important; }
-
-/* Easy Apply job: one label */
-.easy-pill { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; }
-.easy-pill.ok { background: var(--success-bg); color: var(--success); }
-.easy-pill.warn { background: var(--warning-bg); color: var(--warning); }
-.easy-pill.error { background: var(--danger-bg); color: var(--danger); }
-.easy-pill.muted { background: var(--panel-2); color: var(--text-soft); }
-.easy-pill .spinner { width: 10px; height: 10px; }
-#easyCard .easy-job { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 0; }
-.easy-line.row-line { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-
-/* ⚙ Settings */
-#settingsBtn.on { background: var(--accent); color: #fff; border-color: var(--accent); }
-.settings { gap: 8px; }
-.settings .card { display: grid; gap: 6px; }
-.set-switch { display: flex; align-items: center; gap: 6px; font-size: 12.5px; cursor: pointer; }
-.set-switch input { margin: 0; width: 14px; height: 14px; flex: none; padding: 0; accent-color: var(--accent); box-shadow: none; }
-.set-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; }
-.pills { display: inline-flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
-.easy-btns { gap: 6px; }
-#easyExt { flex: 1 1 auto; min-width: 0; }
+/* ── Sign-in ─────────────────────────────────────────────────────────────── */
+.login { max-width: 340px; margin: 40px auto; padding: 0 14px; display: grid; gap: 10px; }
+.login .hero { text-align: center; display: grid; gap: 4px; justify-items: center; }
+.login .hero img { width: 40px; height: 40px; border-radius: 10px; }
+.login label { display: grid; gap: 4px; font-size: 12px; font-weight: 500; color: var(--muted); }
+.login button[type="submit"] { height: var(--h-lg); }

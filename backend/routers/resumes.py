@@ -650,6 +650,12 @@ def _easy_item(job: dict) -> dict:
     }
 
 
+def _profile_application(pid: str, jid: str) -> dict | None:
+    """This profile's applied CV for the job, or None."""
+    return next((r for r in storage.get_generated_resumes_for_profile(pid)
+                 if r.get("job_id") == jid and r.get("applied_status") == "applied"), None)
+
+
 def _easy_profile_state(profile: dict, job: dict, item: dict) -> dict:
     """Where this profile stands on the job: applied / skipped / can't take it (and why) / its CV."""
     pid, jid = profile.get("id", ""), job.get("id", "")
@@ -752,6 +758,10 @@ def bid_easy(body: dict, user: dict = Depends(get_current_user)):
                 "existing_id": same.get("id", ""), "existing_company": same.get("company", ""),
                 "existing_title": same.get("job_title", ""),
             })
+            # This profile already applied to that company's job: the panel says so instead of "Duplicate".
+            mine = _profile_application(profile.get("id", ""), same.get("id", ""))
+            if mine:
+                conflicts[-1].update(applied=True, applied_at=mine.get("applied_at", ""))
         reason = storage.job_block_reason(payload)
         if reason is not None:
             conflicts.append({"kind": "blacklist", "message": f"Blocked — {reason} (Settings → Blacklist)."})

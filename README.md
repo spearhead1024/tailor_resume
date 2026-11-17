@@ -44,35 +44,27 @@ npm run dev   # http://localhost:5173
 
 ### Browser extension (`extension/`)
 
-One side panel with tabs chosen by role: **Out Bids** and **Easy Bids** (bidder), **Add Jobs**
-(job_adder), and all three for admins. Jobs are split by link (`backend/core/easy_apply.py`): a
-LinkedIn job link (`/jobs/view/<id>` or `?currentJobId=<id>`) is an **Easy Apply** job, bid from
-Easy Bids; every other job applies on the company's site and is bid from Out Bids. **Easy Bids**
-follows the LinkedIn tab: whenever it shows another job, the job is read and checked for duplicates
-first (same LinkedIn job id, same company + title, same company this month) — nothing is added.
-Easy Apply jobs only. **Gen CV** adds the job if it is new (link
-`https://www.linkedin.com/jobs/view/<id>/`), then ChatGPT writes the CV and it is saved to Downloads
-by itself (`POST /api/resumes/bid/easy`, `add=false` to check, `add=true` on Gen CV).
-The extension also keeps **LinkedIn's classic job search** (`extension/lib/classic.js`, merged from
-the separate *Classic Job Search Keeper* extension — remove that one): when LinkedIn opens its AI
-job search, the tab goes back to the classic search with the last classic filters (never while an
-application form is open; 2 tries, then it leaves the tab alone for 10 minutes). One switch and
-"Open saved search" sit at the bottom of the Easy Bids card.
-**ChatGPT** writes CVs in real ChatGPT tabs the extension opens in the background (visible in the tab
-strip — `extension/gpt/runner.js`). A CV's chat tab stays open so the bidder can ask it more (tech
-questions); it is closed and the chat deleted on Mark as Applied / Report / Skip (or 2 h idle, or
-Disconnect). ⚙ Settings in the panel: the ChatGPT connection, which cards each bid tab shows, and the
-classic job search (switch + editable saved search URL). Easy Bids adds jobs with the profile's region
-(its region field, or its country) and calls a job a Duplicate on the same posting, the same company +
-title, or the same company in any region within 15 days. A LinkedIn posting that applies on the
-company's site ("Apply") gets **Add Job** only: it is added with the company's own link (read from
-LinkedIn's job data; else caught from the tab LinkedIn's Apply opens, which is then closed) — an
-outside job, bid from Out Bids — with its LinkedIn id kept (`linkedin_job_id`) so it is recognised
-again. An Easy Apply posting gets **Add + Gen CV** or **Add Job** (CV later). A job with a CV (or one
-being written) stays the current job until Mark as Applied / Report / Skip, or Gen CV on another — LinkedIn
-moving the tab by itself (it jumps to another job after an application) never takes it away; the card
-says "Still on <company>" with **Show it**. The
-profile's details are click-to-copy (Autofill / Remember were removed in 1.6). To try changes without packing or installing it:
+One side panel (`extension/panel/`), tabs by role: **Out Bids** and **Easy Bids** (bidder), **Add Jobs**
+(job_adder), all three for admins. Bidding happens only here — the web app has no Bid tab.
+
+- **Jobs are split by link** (`backend/core/easy_apply.py`): a LinkedIn job link (`/jobs/view/<id>` or
+  `?currentJobId=<id>`) is an **Easy Apply** job, bid from Easy Bids; every other job applies on the
+  company's site and is bid from Out Bids.
+- **Easy Bids** follows the LinkedIn tab and checks the job first (`POST /api/resumes/bid/easy`, `add=false`):
+  *New Job · region* (the profile's region), *CV Ready*, *Duplicate* (same posting / company + title / same
+  company in any region within 15 days), *Applied* ("Already applied with <profile>" — no buttons).
+  **Add + Gen CV** adds it (link `https://www.linkedin.com/jobs/view/<id>/`), ChatGPT writes the CV and it is
+  saved to Downloads; **Add Job** adds it only. A posting that applies on the company's site gets **Add Job**
+  only, stored with the company's own link (an Out Bids job). A job with a CV stays the current job until
+  Mark as Applied / Report / Skip, even when LinkedIn moves the tab ("Still on <company>").
+- **Tech Questions**: the application's questions, shared per job; ChatGPT answers them in the chat that
+  wrote the CV (`gpt/runner.js` keeps that tab open until the job is done).
+- **⚙ Settings**: Connections (ChatGPT — real background tabs; LinkedIn — the optional host permission),
+  which cards each tab shows, LinkedIn's classic job search (`lib/classic.js`, kept instead of the AI search),
+  and Update Now.
+- The layout is one fluid column (centred past 600px), so it works from Chrome's narrowest side panel up.
+
+To try changes without packing or installing it:
 
 ```bash
 python3 extension-dev/serve.py   # http://127.0.0.1:8600 — in VS Code: Ports → 8600 → Simple Browser
