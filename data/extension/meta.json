@@ -1,6 +1,6 @@
 {
-  "version": "1.8.2",
+  "version": "1.9.0",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "Update Now button (\u2699 Settings \u2192 Extension, and a bar when a new version is out); updates fetched within a minute",
-  "built_at": "2026-11-17T17:53:02Z"
+  "changelog": "Redesigned panel; ChatGPT & LinkedIn connections in Settings; Tech Questions in Easy Bids; CV Ready / Already applied labels",
+  "built_at": "2026-11-17T19:25:12Z"
 }
