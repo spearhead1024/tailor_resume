@@ -1,6 +1,6 @@
 {
-  "version": "1.8.1",
+  "version": "1.8.2",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "Easy Bids keeps the job you applied to when LinkedIn moves to another job \u2014 Mark as Applied stays",
-  "built_at": "2026-11-17T17:03:41Z"
+  "changelog": "Update Now button (\u2699 Settings \u2192 Extension, and a bar when a new version is out); updates fetched within a minute",
+  "built_at": "2026-11-17T17:53:02Z"
 }
