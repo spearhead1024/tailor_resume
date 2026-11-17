@@ -682,7 +682,10 @@ def bid_easy(body: dict, user: dict = Depends(get_current_user)):
     tab. The panel CHECKS it whenever the tab changes (add=false) and ADDS it only when the bidder
     presses Gen CV (add=true).
 
-    Body: {profile_id, link | linkedin_job_id, company, job_title, description, add (default true)}.
+    Body: {profile_id, link | linkedin_job_id, company, job_title, description, add (default true),
+           apply ('easy' | 'outside'), external_link (outside: the company's own apply URL)}.
+    An outside-apply posting is added as an OUTSIDE job (its link = the company's site; bid from Out
+    Bids), its LinkedIn id kept so the same posting is recognised again; it is also matched by that link.
     Duplicates are looked for first — the same LinkedIn posting (by its job id, however its link was
     saved), then the same company + title. Found → that job. Then the company NAME: a job of the
     same company (any region; "Acme, Inc." == "Acme") added within storage.COMPANY_DEDUP_DAYS →
@@ -709,17 +712,28 @@ def bid_easy(body: dict, user: dict = Depends(get_current_user)):
     # Page text: collapse runs of whitespace, so "Backend  Engineer" finds "Backend Engineer".
     company = " ".join(str(body.get("company") or "").split())
     title = " ".join(str(body.get("job_title") or "").split())
+    # An OUTSIDE-apply posting (LinkedIn's "Apply" opens the company's site): added with the
+    # company's own link — an outside job, bid from Out Bids — and its LinkedIn id kept with it.
+    outside = str(body.get("apply") or "easy") == "outside"
+    external = str(body.get("external_link") or "").strip()
+    if outside and external and (not re.match(r"(?i)^https?://", external) or easy_apply.is_linkedin_host(external)):
+        return {"state": "invalid", "message": "The company's apply link must be its own site (https://…), not LinkedIn."}
 
     from routers import jobs as J   # the Jobs tab's own submit rules (no import cycle: jobs never imports this)
     with _easy_lock:
         job, match = storage.find_job_by_linkedin_id(lid), "linkedin"
+        if not job and outside and external:
+            job, match = storage.find_job_by_url(external), "url"
         if not job and company and title:
             job, match = storage.find_duplicate_job(company, title), "company_title"
         if job:
             item = _easy_item(job)
             return {"state": "existing", "match": match, "job": item, "profile": _easy_profile_state(profile, job, item)}
 
-        payload = {"company": company, "job_title": title, "link": easy_apply.canonical_link(lid),
+        if outside and not external and body.get("add") is not False:
+            return {"state": "invalid", "message": "The company's apply link is needed — click Apply on LinkedIn, or paste the link."}
+        link = (external or easy_apply.canonical_link(lid)) if outside else easy_apply.canonical_link(lid)
+        payload = {"company": company, "job_title": title, "link": link, "linkedin_job_id": lid,
                    "region": easy_apply.profile_market(profile),
                    "description": str(body.get("description") or "").strip(), "note": ""}
         try:
@@ -745,6 +759,8 @@ def bid_easy(body: dict, user: dict = Depends(get_current_user)):
             return {"state": "blocked", "conflicts": conflicts}
         if body.get("add") is False:           # only checking: it would be added — nothing is written
             preview = {**payload, "id": "", "status": "approved"}
+            if outside and not external:
+                preview["link"] = ""            # not read yet (the panel reads it before Add Job)
             item = _easy_item(preview)
             return {"state": "new", "match": "", "job": item, "profile": _easy_profile_state(profile, preview, item)}
 

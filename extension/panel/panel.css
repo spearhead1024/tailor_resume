@@ -328,3 +328,6 @@ button.dl-btn:hover:not(:disabled) { background: #059669; box-shadow: 0 2px 8px 
 .set-switch { display: flex; align-items: center; gap: 6px; font-size: 12.5px; cursor: pointer; }
 .set-switch input { margin: 0; width: 14px; height: 14px; flex: none; padding: 0; accent-color: var(--accent); box-shadow: none; }
 .set-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; }
+.pills { display: inline-flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+.easy-btns { gap: 6px; }
+#easyExt { flex: 1 1 auto; min-width: 0; }

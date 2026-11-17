@@ -89,3 +89,38 @@ export async function readLinkedInJob(wantId) {
   }
   return { ...(last || {}), ready: false };
 }
+
+// Injected into the LinkedIn tab: the company's own apply link of an outside-apply posting ('' if it
+// can't be read). No click, no tab:
+//   1. a link on the page that carries it — LinkedIn's redirect /jobs/view/externalApply/…?url=<link>
+//   2. the posting's data from LinkedIn's own API (the request its job page makes, with the signed-in
+//      session's CSRF token) — its applyMethod holds companyApplyUrl, wherever the format puts it.
+// (When both fail, the panel catches the tab LinkedIn's "Apply" button opens — the bidder's click.)
+export async function readOutsideLink(jobId) {
+  const external = (u) => { try { const x = new URL(u, location.href); return /^https?:$/.test(x.protocol) && !/(^|\.)linkedin\.com$/i.test(x.hostname) ? x.href : ''; } catch { return ''; } };
+  for (const a of document.querySelectorAll('a[href*="externalApply"], a[href*="url="]')) {
+    try {
+      const u = new URL(a.getAttribute('href'), location.href);
+      const hit = external(u.searchParams.get('url') || '');
+      if (hit) return hit;
+    } catch { /* not a URL */ }
+  }
+  const csrf = (document.cookie.match(/JSESSIONID="?([^";]+)/) || [])[1] || '';
+  const find = (node, depth = 0) => {
+    if (!node || typeof node !== 'object' || depth > 12) return '';
+    for (const [k, v] of Object.entries(node)) {
+      if (k === 'companyApplyUrl' && typeof v === 'string' && external(v)) return external(v);
+      const hit = find(v, depth + 1); if (hit) return hit;
+    }
+    return '';
+  };
+  for (const path of [`/voyager/api/jobs/jobPostings/${jobId}`, `/voyager/api/jobs/jobPostings/${jobId}?decorationId=com.linkedin.voyager.deco.jobs.web.shared.WebFullJobPosting-65`]) {
+    try {
+      const res = await fetch(path, { credentials: 'include', headers: { 'csrf-token': csrf, 'x-restli-protocol-version': '2.0.0', accept: 'application/json' } });
+      if (!res.ok) continue;
+      const hit = find(await res.json());
+      if (hit) return hit;
+    } catch { /* blocked / changed — the click fallback takes over */ }
+  }
+  return '';
+}

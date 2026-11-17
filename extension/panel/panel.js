@@ -21,7 +21,7 @@
 import { request, getConfig, setSession, clearSession } from '../lib/api.js';
 import { requestSiteAccess } from '../lib/access.js';
 import { createAdder } from './adder.js';
-import { linkedinJobId, readLinkedInJob } from './linkedin.js';
+import { linkedinJobId, readLinkedInJob, readOutsideLink } from './linkedin.js';
 import { CLASSIC_ON, CLASSIC_SEARCH, classicTabKey, classicUrl, isAiSearch, isClassicSearch, describeSearch, applicationOpen } from '../lib/classic.js';
 import { gpt, gptSnapshot, onGptChange, requestChatAccess, threadKey } from '../gpt/client.js';
 import { UPDATE_KEY, diskVersion } from '../lib/self-update.js';
@@ -64,7 +64,7 @@ const I = {
 };
 
 // ---------- state ----------
-const freshEasy = () => ({ state: 'idle', lid: '', tabId: null, profileId: '', page: null, res: null, error: '' });
+const freshEasy = () => ({ state: 'idle', lid: '', tabId: null, profileId: '', page: null, res: null, error: '', outside: false, ext: '' });
 const S = {
   screen: 'loading', user: null,
   mode: '',            // the tab on screen: '' | bid (Out Bids) | easy (Easy Bids) | add (Add Jobs)
@@ -819,14 +819,20 @@ function scheduleEasyCheck(force = false) {
   easyTimer = setTimeout(() => easyCheck({ force }).catch(showError), force ? 0 : 300);
 }
 function setEasy(patch) { Object.assign(S.easy, patch); patchEasy(); }
-const easyBody = (pid, lid, page, add) => ({ profile_id: pid, linkedin_job_id: lid, link: jobViewLink(lid),
-  company: page.company, job_title: page.title, description: page.description, add });
+const easyBody = (pid, lid, page, add, { outside = false, ext = '' } = {}) => ({ profile_id: pid, linkedin_job_id: lid, link: jobViewLink(lid),
+  company: page.company, job_title: page.title, description: page.description, add,
+  apply: outside ? 'outside' : 'easy', external_link: outside ? ext : '' });
 // Gen CV is offered for: an Easy Apply job that would be added, or one on file this profile can bid.
 function easyCanGen() {
   const E = S.easy, p = E.res?.profile || {};
-  if (E.page?.apply !== 'easy' || p.applied || p.skipped || p.problem) return false;
+  if (E.outside || E.page?.apply !== 'easy' || p.applied || p.skipped || p.problem) return false;
   return E.state === 'new' || E.state === 'existing' || E.state === 'added';
 }
+// Add Job (without a CV) is offered for a new posting: Easy Apply, or outside-apply once its company
+// link is known (it is added with that link — an outside job, bid from Out Bids).
+const easyCanAdd = () => S.easy.state === 'new' && (S.easy.outside ? !!S.easy.ext : S.easy.page?.apply === 'easy');
+// An outside posting whose company link isn't known yet: the tab LinkedIn's "Apply" opens is caught.
+const awaitingLink = () => S.mode === 'easy' && S.easy.outside && !S.easy.ext && S.easy.state === 'new';
 
 async function easyCheck({ force = false } = {}) {
   if (S.mode !== 'easy' || S.screen !== 'main' || !S.profileId) return;
@@ -855,12 +861,19 @@ async function easyCheck({ force = false } = {}) {
   if (stale()) return;                                    // the bidder clicked another job meanwhile
   if (!page?.ready) { setEasy({ state: 'unreadable', page }); return; }
   setEasy({ page });
-  // Easy Apply only. (One already applied to on LinkedIn is still looked up — it may need Mark as Applied.)
-  if (page.apply !== 'easy' && page.apply !== 'applied') { setEasy({ state: 'noteasy' }); if (!S.busy) followEasyJob(null); return; }
-  setEasy({ state: 'checking' });
+  // Easy Apply or outside apply (LinkedIn's "Apply" opens the company's site). A closed posting, or one
+  // with no apply button, can't be added. (One already applied to on LinkedIn is only looked up.)
+  if (page.apply === 'closed' || page.apply === 'none') { setEasy({ state: 'noteasy' }); if (!S.busy) followEasyJob(null); return; }
+  const outside = page.apply === 'external';
+  let ext = '';
+  if (outside) {   // the company's own link, read silently (no click, no tab)
+    try { const [r] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: readOutsideLink, args: [lid] }); ext = r?.result || ''; } catch { /* read on Apply */ }
+    if (stale()) return;
+  }
+  setEasy({ state: 'checking', outside, ext });
   let res;
   try {
-    res = await api('/api/resumes/bid/easy', { method: 'POST', body: easyBody(pid, lid, page, false) });   // check only — nothing is added
+    res = await api('/api/resumes/bid/easy', { method: 'POST', body: easyBody(pid, lid, page, false, { outside, ext }) });   // check only — nothing is added
   } catch (e) {
     if (!stale()) { setEasy({ state: 'error', error: e?.message || String(e) }); if (e?.status === 0) showError(e); }
     return;
@@ -868,7 +881,7 @@ async function easyCheck({ force = false } = {}) {
   if (stale()) return;
   setEasy({ state: res.state, res });
   const p = res.profile || {};
-  const biddable = res.state === 'existing' && !p.applied && !p.skipped && !p.problem;
+  const biddable = !outside && res.state === 'existing' && !p.applied && !p.skipped && !p.problem;
   // A CV still saving / a click in flight: the job changes the moment it ends (unless the tab moved on).
   for (let i = 0; S.busy && i < 600; i++) { await new Promise((r) => setTimeout(r, 200)); if (stale()) return; }
   await followEasyJob(biddable ? res.job : null);
@@ -883,30 +896,65 @@ async function followEasyJob(item) {
   track('open_link', item);                               // the bidder has the posting open on LinkedIn
 }
 
-// Gen CV: add the job if it is new (the same checks run again on the server), make it current, and
-// have ChatGPT write its CV — saved to Downloads by itself when built (at once if it already has one).
-async function genCv() {
+// Add + Gen CV / Add Job / Gen CV: add the posting if it is new (the same checks run again on the
+// server). An Easy Apply job then becomes the current job, and with a CV asked for, ChatGPT writes it
+// and it is saved to Downloads by itself (at once if it already has one). An outside job is only
+// added — with the company's link — and bid from Out Bids.
+async function addJob({ gen }) {
   const E = S.easy;
-  if (S.genBusy || S.busy || !easyCanGen()) return;
+  if (S.genBusy || S.busy || !(gen ? easyCanGen() : easyCanAdd())) return;
   const seq = easySeq, pid = S.profileId, lid = E.lid, page = E.page;
   let res = E.res;
   S.genBusy = true; patchEasy();
   try {
     if (res.state === 'new') {
-      res = await api('/api/resumes/bid/easy', { method: 'POST', body: easyBody(pid, lid, page, true) });
+      res = await api('/api/resumes/bid/easy', { method: 'POST', body: easyBody(pid, lid, page, true, { outside: E.outside, ext: E.ext }) });
       if (seq !== easySeq || S.profileId !== pid) return;  // the bidder moved on meanwhile
       setEasy({ state: res.state, res });
-      if (res.state === 'added') loadQueue();              // it joins this profile's Easy Bids list
-      if (!easyCanGen()) return;                           // a duplicate after all (someone added it just now…)
+      if (res.state === 'added') { loadQueue(); toast(E.outside ? 'Added — bid it from Out Bids' : 'Job added'); }
+      if (E.outside) return;
+      if (res.state !== 'added' && !(gen && easyCanGen())) return;   // a duplicate after all (someone added it just now…)
     }
-    const item = res.job;
+    const item = res.job, p = res.profile || {};
+    if (p.applied || p.skipped || p.problem) return;
     if (S.jobId !== item.id) { await selectJob(item.id, { open: false, item }); track('open_link', item); }
+    if (!gen) return;
     S.gen.set(item.id, { id: item.id, company: item.company, job_title: item.job_title });
     if (S.resumeId) { maybeAutoDownload(); return; }      // it already has a CV: save it now
     if (gptOn()) gptPrepare();
     else setMessage(`Connect ChatGPT to write the CV automatically — or write it by hand in the Resume card below.`);
   } finally { S.genBusy = false; patchEasy(); }
 }
+// The company link became known (caught from LinkedIn's Apply tab, or pasted): check again with it —
+// the link itself may already be on file.
+async function useOutsideLink(ext) {
+  const E = S.easy, seq = easySeq, pid = S.profileId;
+  if (!E.outside || !E.page) return;
+  setEasy({ ext, state: 'checking' });
+  try {
+    const res = await api('/api/resumes/bid/easy', { method: 'POST', body: easyBody(pid, E.lid, E.page, false, { outside: true, ext }) });
+    if (seq === easySeq && S.profileId === pid) setEasy({ state: res.state, res });
+  } catch (e) { if (seq === easySeq) setEasy({ state: 'error', error: e?.message || String(e) }); }
+}
+// LinkedIn's "Apply" (the bidder's click) opens the company's site in a new tab: while an outside
+// posting waits for its link, that tab is read and closed, and the LinkedIn tab comes back.
+const linkTabs = new Set();
+const externalOf = (u) => { try { const x = new URL(u); return /^https?:$/.test(x.protocol) && !/(^|\.)linkedin\.com$/i.test(x.hostname) ? x.href : ''; } catch { return ''; } };
+async function caughtLinkTab(tabId, url) {
+  const ext = externalOf(url); if (!ext || !linkTabs.has(tabId)) return;
+  linkTabs.delete(tabId);
+  await chrome.tabs.remove(tabId).catch(() => {});
+  if (S.easy.tabId != null) chrome.tabs.update(S.easy.tabId, { active: true }).catch(() => {});
+  if (awaitingLink()) { toast('Company link read'); await useOutsideLink(ext); }
+}
+chrome.tabs.onCreated.addListener((t) => {
+  if (!awaitingLink() || t.openerTabId !== S.easy.tabId) return;
+  linkTabs.add(t.id);
+  caughtLinkTab(t.id, t.pendingUrl || t.url || '');
+  setTimeout(() => linkTabs.delete(t.id), 30_000);
+});
+chrome.tabs.onUpdated.addListener((id, change, t) => { if (linkTabs.has(id) && (change.url || t.pendingUrl)) caughtLinkTab(id, change.url || t.pendingUrl); });
+
 async function allowLinkedIn() {
   const ok = await chrome.permissions.request({ origins: LINKEDIN_ORIGINS }).catch(() => false);   // first await of the click
   if (!ok) { setError('Easy Bids reads the job on your LinkedIn tab — click Allow again and choose "Allow".'); return; }
@@ -917,16 +965,20 @@ async function allowLinkedIn() {
 // Not Easy Apply), one short reason line, Gen CV. Everything else lives in ⚙ Settings.
 function patchEasy() {
   const el = $('#easyBody'); if (!el) return;
+  const typed = $('#easyExt')?.value || '';
   const E = S.easy, page = E.page, res = E.res, p = res?.profile || {};
   const name = esc(selectedProfile()?.name || 'this profile');
   const spin = '<span class="spinner"></span>';
   const line = (cls, html) => `<div class="easy-line ${cls}">${html}</div>`;
   const job = res?.job;
   const pill = (cls, text) => `<span class="easy-pill ${cls}">${text}</span>`;
+  // The link the job is stored with: LinkedIn's posting (Easy Apply) or the company's site (outside).
+  const link = E.outside ? E.ext : (E.lid ? jobViewLink(E.lid) : '');
   const what = page?.title ? `<div class="easy-job" title="${esc(`${page.company} — ${page.title}${page.location ? ` · ${page.location}` : ''}`)}">
       <strong>${esc(page.company)}</strong> — ${esc(page.title)}${page.location ? ` <span class="muted">· ${esc(page.location)}</span>` : ''}</div>
-    <div class="easy-link"><a href="${esc(jobViewLink(E.lid))}" data-action="easyCopyLink" title="The job link stored in TailorResume — click to copy">${esc(jobViewLink(E.lid))}</a></div>` : '';
-  let badge = '', body = '', gen = false;
+    ${link ? `<div class="easy-link"><a href="${esc(link)}" data-action="easyCopyLink" title="The job link stored in TailorResume — click to copy">${esc(link)}</a></div>` : ''}` : '';
+  let badge = '', body = '', buttons = '';
+  const btn = (action, label, title, primary = true) => `<button class="grow ${primary ? '' : 'secondary'}" data-action="${action}" ${S.genBusy || S.busy ? 'disabled' : ''} title="${title}">${label}</button>`;
   switch (E.state) {
     case 'idle': case 'reading': case 'checking':
       badge = pill('muted', `${spin} Checking`); body = what; break;
@@ -940,7 +992,7 @@ function patchEasy() {
     case 'error': body = what + line('error', esc(E.error))
       + '<div class="row"><button class="secondary sm" data-action="easyRetry">Retry</button></div>'; break;
     case 'noteasy':
-      badge = pill('warn', page?.apply === 'closed' ? 'Closed' : 'Not Easy Apply');
+      badge = pill('warn', page?.apply === 'closed' ? 'Closed' : 'No Apply Button');
       body = what; break;
     case 'invalid':
       badge = pill('error', 'Can\'t Add'); body = what + line('error', esc(res?.message || 'The job is incomplete.')); break;
@@ -954,27 +1006,35 @@ function patchEasy() {
       const region = esc(job?.region || 'ANY');
       if (E.state === 'existing') {
         badge = pill('warn', 'Duplicate');
-        body = what + line('muted', res.match === 'linkedin' ? 'This posting is already in TailorResume.' : 'Same company + title already in TailorResume.');
+        body = what + line('muted', { linkedin: 'This posting is already in TailorResume.', url: 'This company link is already in TailorResume.' }[res.match]
+          || 'Same company + title already in TailorResume.');
+      } else badge = pill('ok', `New Job · ${region}`) + (E.outside ? pill('muted', 'Outside') : '');
+      if (E.state !== 'existing') body = what;
+      if (E.outside) {
+        // An outside-apply posting: added with the company's link — bid from Out Bids, no CV here.
+        if (E.state === 'added') body += line('muted', 'Added — bid it from Out Bids.');
+        else if (E.state === 'new' && !E.ext) body += line('warn', 'Click <b>Apply</b> on LinkedIn once — the company link is read and that tab closed.')
+          + `<div class="row"><input id="easyExt" type="url" placeholder="…or paste the company's apply link" spellcheck="false"><button class="secondary sm" data-action="useLink">Use</button></div>`;
+        if (easyCanAdd()) buttons = btn('addJob', `${S.genBusy ? spin : ''} Add Job`, 'Add the job with the company\'s link — bid it from Out Bids');
       } else {
-        badge = pill('ok', `New Job · ${region}`);
-        body = what;
+        if (p.applied) body += line('ok', `Applied with ${name}${p.applied_at ? ` on ${esc(String(p.applied_at).slice(0, 10))}` : ''}.`);
+        else if (p.skipped) body += line('warn', `Skipped for ${name}.`);
+        else if (p.problem) body += line('warn', esc(p.problem));
+        else if (page?.apply === 'applied') body += line('warn', E.state === 'new' ? 'You applied on LinkedIn — it is not in TailorResume.' : 'LinkedIn shows it applied — Mark as Applied below.');
+        else if (S.gen.has(job?.id) && !S.resumeId && gptOn()) body += line('muted', `${spin} ChatGPT is writing the CV — saved to Downloads when ready.`);
+        if (E.state === 'new' && easyCanGen()) {
+          buttons = btn('genCv', `${S.genBusy ? spin : I.sparkle} Add + Gen CV`, 'Add the job, write its CV with ChatGPT and save it to Downloads')
+            + btn('addJob', 'Add Job', 'Only add the job (make its CV later)', false);
+        } else if (easyCanGen()) buttons = btn('genCv', `${S.genBusy ? spin : I.sparkle} Gen CV`, 'Write the CV with ChatGPT and save it to Downloads');
       }
-      if (p.applied) body += line('ok', `Applied with ${name}${p.applied_at ? ` on ${esc(String(p.applied_at).slice(0, 10))}` : ''}.`);
-      else if (p.skipped) body += line('warn', `Skipped for ${name}.`);
-      else if (p.problem) body += line('warn', esc(p.problem));
-      else if (page?.apply === 'applied') body += line('warn', E.state === 'new' ? 'You applied on LinkedIn — it is not in TailorResume.' : 'LinkedIn shows it applied — Mark as Applied below.');
-      else if (S.gen.has(job?.id) && !S.resumeId && gptOn()) body += line('muted', `${spin} ChatGPT is writing the CV — saved to Downloads when ready.`);
-      gen = easyCanGen();
       break;
     }
   }
-  if (gen) {
-    body += `<div class="row"><button class="grow" data-action="genCv" ${S.genBusy || S.busy ? 'disabled' : ''}
-      title="Add the job if it is new, write the CV with ChatGPT and save it to Downloads">${S.genBusy ? spin : I.sparkle} Gen CV</button></div>`;
-  }
+  if (buttons) body += `<div class="row easy-btns">${buttons}</div>`;
   // CVs are written by ChatGPT: one compact line while it is not connected (details in ⚙ Settings).
   if (!gptOn()) body += `<div class="easy-line warn row-line">ChatGPT is off. <button class="sm" data-action="gptConnect">Connect ChatGPT</button></div>`;
-  el.innerHTML = `<div class="card-head"><span class="card-title">Easy Apply Job</span>${badge}</div>${body}`;
+  el.innerHTML = `<div class="card-head"><span class="card-title">LinkedIn Job</span><span class="pills">${badge}</span></div>${body}`;
+  if (typed && $('#easyExt')) $('#easyExt').value = typed;
 }
 
 // ---------- LinkedIn classic job search (lib/classic.js does the work in the service worker) ----------
@@ -1498,7 +1558,13 @@ async function onClick(e) {
       case 'skipReason': { const ta = $('#skipReason'); if (ta) { ta.value = t.dataset.r; ta.focus(); } break; }
       case 'easyAllow': await allowLinkedIn(); break;
       case 'easyRetry': scheduleEasyCheck(true); break;
-      case 'genCv': await genCv(); break;
+      case 'genCv': await addJob({ gen: true }); break;
+      case 'addJob': await addJob({ gen: false }); break;
+      case 'useLink': {
+        const v = ($('#easyExt')?.value || '').trim();
+        if (externalOf(v)) await useOutsideLink(externalOf(v)); else setError('Paste the company\'s apply link (https://…, not LinkedIn).', 6000);
+        break;
+      }
       case 'settings': S.settingsOpen = !S.settingsOpen; if (S.settingsOpen) renderSettings(); showViews(); break;
       case 'showToggle': {
         const m = S.mode; S.show = { ...S.show, [m]: { ...shownFor(m), [t.dataset.k]: t.checked } };
@@ -1509,7 +1575,7 @@ async function onClick(e) {
       case 'classicToggle': await chrome.storage.local.set({ [CLASSIC_ON]: t.checked }); break;
       case 'classicOpen': await openClassicSearch(); break;
       case 'classicRetry': e.preventDefault(); await retryClassic(); break;
-      case 'easyCopyLink': e.preventDefault(); await copyText(jobViewLink(S.easy.lid), 'Job link'); break;
+      case 'easyCopyLink': e.preventDefault(); await copyText(t.getAttribute('href') || '', 'Job link'); break;
       case 'easyOpenLinkedIn': await chrome.tabs.create({ url: 'https://www.linkedin.com/jobs/search/?f_AL=true' }); break;
       case 'copyField': {
         const f = copyFields(selectedProfile())[Number(t.dataset.i)];

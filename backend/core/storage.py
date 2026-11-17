@@ -1014,6 +1014,9 @@ def _normalize_job(item: dict) -> dict:
         'admin_applied_by_username': str(item.get('admin_applied_by_username', '')).strip(),
         'sync_remote_id': str(item.get('sync_remote_id', '')).strip(),
         'sync_locked': bool(item.get('sync_locked', False)),
+        # The LinkedIn posting a job was added from (Easy Bids) — kept for outside-apply jobs too,
+        # whose link is the company's own site, so the same posting is recognised again.
+        'linkedin_job_id': str(item.get('linkedin_job_id', '')).strip(),
     }
 
 
@@ -2361,6 +2364,11 @@ class Storage:
         if not lid.isdigit():
             return None
         with session_scope(self.db_path) as session:
+            # An outside-apply job added from a LinkedIn posting: its id is stored with it.
+            row = session.scalar(select(JobRow).where(text("json_extract(jobs.data, '$.linkedin_job_id') = :lid"))
+                                 .params(lid=lid).order_by(JobRow.submitted_at.desc()).limit(1))
+            if row is not None:
+                return _normalize_job(dict(row.data or {}))
             rows = session.scalars(
                 select(JobRow).where(JobRow.normalized_url.like('%linkedin.com%'),
                                      JobRow.normalized_url.like(f'%{lid}%'))

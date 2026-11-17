@@ -64,7 +64,11 @@ questions); it is closed and the chat deleted on Mark as Applied / Report / Skip
 Disconnect). ⚙ Settings in the panel: the ChatGPT connection, which cards each bid tab shows, and the
 classic job search (switch + editable saved search URL). Easy Bids adds jobs with the profile's region
 (its region field, or its country) and calls a job a Duplicate on the same posting, the same company +
-title, or the same company in any region within 15 days. The
+title, or the same company in any region within 15 days. A LinkedIn posting that applies on the
+company's site ("Apply") gets **Add Job** only: it is added with the company's own link (read from
+LinkedIn's job data; else caught from the tab LinkedIn's Apply opens, which is then closed) — an
+outside job, bid from Out Bids — with its LinkedIn id kept (`linkedin_job_id`) so it is recognised
+again. An Easy Apply posting gets **Add + Gen CV** or **Add Job** (CV later). The
 profile's details are click-to-copy (Autofill / Remember were removed in 1.6). To try changes without packing or installing it:
 
 ```bash
