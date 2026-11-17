@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useUrlState } from '../lib/urlState';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
@@ -49,125 +49,92 @@ export default function Help() {
   );
 }
 
-// ─── Subtab 1: install / update the extension ───────────────────────────────
+// ─── Subtab 1: the extension — install once, it updates itself, how to use it ──
+// Bidders install with the one-time Windows setup (backend routers/extension.py → a scheduled task
+// that fetches new versions; the extension restarts into them — extension/lib/self-update.js).
 function ExtensionGuide() {
   const { data, isLoading } = useQuery({
     queryKey: ['extension', 'version'],
     queryFn: () => api.get<ExtMeta>('/api/extension/version'),
   });
-  const [tab, setTab] = useUrlState<'win' | 'quick' | 'auto'>('install', navigator.platform.toLowerCase().includes('win') ? 'win' : 'quick');
-
   if (isLoading) return <div><span className="spinner" /> Loading…</div>;
 
+  const installer = `${BASE}/api/extension/install-windows.cmd`;
   const zipUrl = data?.zip_url || `${BASE}/api/extension/latest.zip`;
-  const extId = data?.extension_id || '';
+  const folder = '%LOCALAPPDATA%\\TailorResume\\extension';
+  const step: React.CSSProperties = { lineHeight: 1.75, fontSize: '0.9rem', margin: '0.25rem 0 0', paddingLeft: '1.2rem' };
+  const h2: React.CSSProperties = { margin: '0 0 0.5rem', fontSize: '1.05rem' };
 
   return (
-    <div>
-      <p className="muted">
-        The TailorResume Assistant docks a Bid side panel next to the job page: pick a profile and a job,
-        copy the ChatGPT prompt, generate &amp; download the CV, <strong>autofill the application form</strong> (CV
-        attached), then mark applied, report or skip — without leaving the page. Questions it can't answer yet: fill them
-        once and click <strong>Remember</strong>; next time they fill themselves for that profile.
-      </p>
-
-      <div className="card" style={{ marginBottom: '1rem' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          <div>
-            <div style={{ fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--muted)' }}>
-              Current version
+    <div style={{ display: 'grid', gap: '1rem', maxWidth: 820 }}>
+      {/* Version */}
+      <div className="card" style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+        <div style={{ flex: '1 1 260px', minWidth: 0 }}>
+          <div className="muted" style={{ fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.04em' }}>TailorResume extension</div>
+          <div style={{ fontSize: '1.4rem', fontWeight: 700 }}>v{data?.version || '—'}</div>
+          {data?.changelog && <div style={{ fontSize: '0.86rem', marginTop: 4 }}><strong>New:</strong> {data.changelog}</div>}
+          {data?.built_at && (
+            <div className="muted" style={{ fontSize: '0.8rem', marginTop: 2 }}>
+              Released {new Date(data.built_at).toLocaleString('en-US', { timeZone: 'America/New_York' })} ET
             </div>
-            <div style={{ fontSize: '1.4rem', fontWeight: 700 }}>v{data?.version || '—'}</div>
-          </div>
-          <div style={{ flex: 1 }} />
-          {data?.available
-            ? <a href={zipUrl} download><button>⬇ Download extension (.zip)</button></a>
-            : <span className="pill rejected">Not published yet</span>}
+          )}
         </div>
-        {data?.built_at && (
-          <div className="muted" style={{ fontSize: '0.82rem', marginTop: 8 }}>
-            Built {new Date(data.built_at).toLocaleString('en-US', { timeZone: 'America/New_York' })} ET
-            {extId && <> · ID <code>{extId}</code></>}
-          </div>
-        )}
-        {data?.changelog && (
-          <div style={{ marginTop: 10, fontSize: '0.88rem', whiteSpace: 'pre-wrap' }}>
-            <strong>What's new:</strong> {data.changelog}
-          </div>
-        )}
+        <a href={installer} download><button>⬇ Download setup (Windows)</button></a>
       </div>
 
-      <div className="card" style={{ background: 'var(--panel-2)', fontSize: '0.85rem', marginBottom: '0.75rem' }}>
-        👉 <strong>Pick ONE install method below.</strong>
-        <ul style={{ margin: '6px 0 0', lineHeight: 1.6 }}>
-          <li><strong>Automatic updates (Windows)</strong> — recommended. A one-time setup; after that every new version installs by itself.</li>
-          <li><strong>Manual install</strong> — download the zip and load it yourself. It never updates by itself.</li>
-          <li><strong>Managed PCs (policy)</strong> — only for company-managed Chrome (domain-joined / Chrome Enterprise).</li>
+      {/* Install */}
+      <div className="card">
+        <h2 style={h2}>1 · Install — once per PC (2 min, no admin rights)</h2>
+        <ol style={step}>
+          <li>Download the setup above and <strong>double-click</strong> it. If Windows warns, click <strong>More info → Run anyway</strong>.
+            It opens the extension folder <code>{folder}</code>.</li>
+          <li>In Chrome open <code>chrome://extensions</code> and <strong>Remove</strong> any old TailorResume extension.</li>
+          <li>Turn on <strong>Developer mode</strong> (top right) → <strong>Load unpacked</strong> → choose that folder.</li>
+          <li>Pin the TailorResume icon, click it, and <strong>sign in</strong>.</li>
+        </ol>
+      </div>
+
+      {/* Updates */}
+      <div className="card">
+        <h2 style={h2}>2 · Updates — automatic</h2>
+        <p style={{ margin: 0, fontSize: '0.9rem', lineHeight: 1.6 }}>
+          New versions install by themselves within a minute. In a hurry? Click <strong>Update Now</strong> in the panel
+          (the green bar, or ⚙ Settings → Extension).
+        </p>
+        <p className="muted" style={{ margin: '6px 0 0', fontSize: '0.82rem' }}>
+          Set up before v1.8.2? Run the setup once more — it switches to the faster check.
+        </p>
+      </div>
+
+      {/* Use */}
+      <div className="card">
+        <h2 style={h2}>3 · Use it</h2>
+        <ul style={{ ...step, listStyle: 'disc' }}>
+          <li><strong>⚙ Settings → Connections</strong>: connect <strong>ChatGPT</strong> (a paid plan — it writes the CVs)
+            and <strong>LinkedIn</strong> (Easy Bids reads the job you have open). Pick a profile at the top of the panel.</li>
+          <li><strong>Easy Bids</strong> — LinkedIn Easy Apply. Open a job on LinkedIn; the panel checks it first:
+            <em> New Job</em>, <em>CV Ready</em>, <em>Duplicate</em> or <em>Applied</em>. Click <strong>Add + Gen CV</strong>:
+            the CV is written and saved to Downloads. Apply on LinkedIn, then <strong>Mark as Applied</strong>.
+            A posting that applies on the company's site gets <strong>Add Job</strong> only — it goes to Out Bids.</li>
+          <li><strong>Out Bids</strong> — jobs that apply on the company's site. Pick a job, <strong>Download CV</strong>,
+            apply, then <strong>Mark as Applied</strong> (or Report / Skip).</li>
+          <li><strong>Tech Questions</strong> — paste the application's questions (one per line) and click
+            <strong> Save &amp; Answer</strong>: ChatGPT answers them in the same chat that wrote the CV. Every bidder on
+            that job sees them; click <strong>Copy</strong> to use an answer.</li>
+          <li><strong>Add Jobs</strong> (job adders) — open a job posting and add it in one click; duplicates are flagged.</li>
         </ul>
       </div>
 
-      <div style={{ display: 'flex', gap: 4, marginBottom: '1rem', borderBottom: '1px solid var(--border)', flexWrap: 'wrap' }}>
-        <button onClick={() => setTab('win')}
-          style={{
-            background: 'transparent', border: 'none', borderRadius: 0,
-            borderBottom: `2px solid ${tab === 'win' ? 'var(--accent, #2563eb)' : 'transparent'}`,
-            color: tab === 'win' ? 'var(--text)' : 'var(--muted)',
-            fontWeight: tab === 'win' ? 700 : 400, padding: '8px 14px',
-          }}>
-          ⭐ Automatic updates (Windows)
-        </button>
-        <button onClick={() => setTab('quick')}
-          style={{
-            background: 'transparent', border: 'none', borderRadius: 0,
-            borderBottom: `2px solid ${tab === 'quick' ? 'var(--accent, #2563eb)' : 'transparent'}`,
-            color: tab === 'quick' ? 'var(--text)' : 'var(--muted)',
-            fontWeight: tab === 'quick' ? 700 : 400, padding: '8px 14px',
-          }}>
-          📦 Manual install
-        </button>
-        <button onClick={() => setTab('auto')}
-          style={{
-            background: 'transparent', border: 'none', borderRadius: 0,
-            borderBottom: `2px solid ${tab === 'auto' ? 'var(--accent, #2563eb)' : 'transparent'}`,
-            color: tab === 'auto' ? 'var(--text)' : 'var(--muted)',
-            fontWeight: tab === 'auto' ? 700 : 400, padding: '8px 14px',
-          }}>
-          🏢 Managed PCs (policy)
-        </button>
-      </div>
-
-      {tab === 'quick' && (
-        <div className="card" style={{ marginBottom: '1rem' }}>
-          <h2 style={{ marginTop: 0 }}>Manual install — Load unpacked (~1 min)</h2>
-          <p className="muted" style={{ fontSize: '0.85rem' }}>
-            Simplest way to get going. To update later, re-download and click the reload icon (no auto-update).
-          </p>
-          {data?.available && (
-            <a href={zipUrl} download style={{ display: 'inline-block', marginBottom: 12 }}>
-              <button>⬇ Download extension (.zip)</button>
-            </a>
-          )}
-          <ol style={{ lineHeight: 1.8, fontSize: '0.9rem' }}>
-            <li><strong>Extract</strong> the downloaded <code>.zip</code> to a folder you'll keep
-              (e.g. <code>Documents/tailorresume-extension</code>).</li>
-            <li>Open <code>chrome://extensions</code>.</li>
-            <li>Turn <strong>Developer mode</strong> ON (top-right).</li>
-            <li>Click <strong>Load unpacked</strong> → select the <strong>extracted folder</strong>.</li>
-            <li>Pin the TailorResume icon and click it — the <strong>side panel</strong> opens. <strong>Sign in</strong> with your TailorResume username &amp; password, pick a profile, and bid without leaving the job page.</li>
-          </ol>
-          <div className="card" style={{ background: 'var(--panel-2)', fontSize: '0.82rem' }}>
-            ⚠️ Don't drag the <code>.crx</code> onto the page — Chrome blocks self-hosted <code>.crx</code> drag-installs
-            (<code>CRX_REQUIRED_PROOF_MISSING</code>). Use the <strong>.zip + Load unpacked</strong> steps above.
-          </div>
-          <p className="muted" style={{ fontSize: '0.82rem', marginTop: 10 }}>
-            <strong>Updating:</strong> when this page shows a newer version, re-download the .zip, replace the folder's
-            contents, and click the ↻ reload icon on the extension card.
-          </p>
-        </div>
-      )}
-
-      {tab === 'win' && <WindowsAutoUpdate />}
-      {tab === 'auto' && <AutoUpdateGuide extId={extId} />}
+      <details className="card" style={{ fontSize: '0.86rem' }}>
+        <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Not on Windows, or something's wrong?</summary>
+        <ul style={{ ...step, listStyle: 'disc', marginTop: 8 }}>
+          <li><strong>Mac / Linux</strong>: <a href={zipUrl} download>download the .zip</a>, extract it, then
+            <code> chrome://extensions</code> → Developer mode → <strong>Load unpacked</strong>. It doesn't update by itself:
+            for a new version replace the folder's files and click ↻ on the extension.</li>
+          <li><strong>Update didn't arrive</strong>: check <code>%LOCALAPPDATA%\TailorResume\updater.log</code>, or run the setup again.</li>
+          <li><strong>Stop automatic updates</strong>: Windows Task Scheduler → delete “TailorResume extension updater”.</li>
+        </ul>
+      </details>
     </div>
   );
 }
@@ -325,173 +292,6 @@ function GuideVideo() {
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-// A normal (not company-managed) Windows PC: Chrome never auto-updates a self-hosted
-// extension there, so a one-time installer keeps a "Load unpacked" folder current
-// (backend routers/extension.py → a scheduled task) and the extension restarts itself
-// into each new version (extension/lib/self-update.js).
-function WindowsAutoUpdate() {
-  const installer = `${BASE}/api/extension/install-windows.cmd`;
-  const folder = '%LOCALAPPDATA%\\TailorResume\\extension';
-  return (
-    <div className="card" style={{ marginBottom: '1rem' }}>
-      <h2 style={{ marginTop: 0 }}>Automatic updates — Windows (one-time setup, ~2 min)</h2>
-      <p className="muted" style={{ fontSize: '0.85rem' }}>
-        After this, new versions install by themselves: a new version is fetched within a minute and the
-        extension restarts into it (if its side panel is open, it shows a <strong>Restart Now</strong> button instead).
-        In a hurry? ⚙ Settings → <strong>Update Now</strong> in the side panel restarts into it as soon as it lands.
-        No admin rights needed. (Set up before 1.8.2? Run the setup file again once — it switches the check to every minute.)
-      </p>
-      <a href={installer} download style={{ display: 'inline-block', marginBottom: 12 }}>
-        <button>⬇ Download the setup file</button>
-      </a>
-      <ol style={{ lineHeight: 1.8, fontSize: '0.9rem' }}>
-        <li><strong>Double-click</strong> <code>TailorResume-auto-update-setup.cmd</code>. If Windows shows
-          “Windows protected your PC”, click <strong>More info → Run anyway</strong>.</li>
-        <li>It downloads the extension, sets up the update check, and opens the extension folder:
-          <code style={{ display: 'block', margin: '4px 0' }}>{folder}</code></li>
-        <li>In Chrome open <code>chrome://extensions</code> and <strong>Remove</strong> any old “TailorResume Assistant”.</li>
-        <li>Turn <strong>Developer mode</strong> ON (top-right) → <strong>Load unpacked</strong> → choose that folder
-          (paste the path above into the folder picker's address bar).</li>
-        <li>Pin the TailorResume icon, click it, and sign in. That's it — you never have to download it again.</li>
-      </ol>
-      <div className="card" style={{ background: 'var(--panel-2)', fontSize: '0.82rem' }}>
-        To stop automatic updates: Windows <strong>Task Scheduler</strong> → delete “TailorResume extension updater”.
-        The update log is in <code>%LOCALAPPDATA%\TailorResume\updater.log</code>.
-      </div>
-    </div>
-  );
-}
-
-function AutoUpdateGuide({ extId }: { extId: string }) {
-  const [os, setOs] = useState<'win' | 'mac' | 'linux'>(() => {
-    const p = navigator.platform.toLowerCase();
-    if (p.includes('win')) return 'win';
-    if (p.includes('mac')) return 'mac';
-    return 'linux';
-  });
-  const regUrl = `${BASE}/api/extension/policy.reg`;
-  const jsonUrl = `${BASE}/api/extension/policy.json`;
-  const updateUrl = `${BASE}/api/extension/update.xml`;
-  const forceEntry = `${extId};${updateUrl}`;
-
-  const codeBox: React.CSSProperties = {
-    background: 'var(--panel-2)', border: '1px solid var(--border)', borderRadius: 8,
-    padding: '8px 10px', fontSize: '0.8rem', fontFamily: 'ui-monospace, monospace',
-    whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: '4px 0 10px',
-  };
-  const osBtn = (k: typeof os, label: string) => (
-    <button onClick={() => setOs(k)} className={os === k ? '' : 'secondary'}
-      style={{ borderRadius: 999, fontSize: '0.82rem' }}>{label}</button>
-  );
-
-  return (
-    <div className="card" style={{ marginBottom: '1rem' }}>
-      <h2 style={{ marginTop: 0 }}>Auto-update setup — managed policy (one-time, needs admin)</h2>
-      <div className="card" style={{ background: 'var(--callout-danger-bg)', border: '1px solid var(--callout-danger-bd)', fontSize: '0.85rem', marginBottom: 12 }}>
-        🛑 <strong>Requires an enterprise-managed Chrome.</strong> Chrome only force-installs a self-hosted (non-Web-Store)
-        extension on machines that are <strong>domain-joined</strong> or enrolled in <strong>Chrome Browser Cloud
-        Management</strong>. On a normal/personal PC this policy is <strong>blocked</strong> — at <code>chrome://policy</code>
-        you'll see the value prefixed <code>[BLOCKED]</code> and a warning that the computer “is not detected as enterprise
-        managed.” If you see that, this method won't work on that machine — use <strong>Manual install</strong> instead,
-        or publish to the Chrome Web Store (ask the admin).
-      </div>
-      <div className="card" style={{ background: 'var(--panel-2)', fontSize: '0.82rem', marginBottom: 12 }}>
-        ⚠️ A “Load unpacked” install <em>never</em> auto-updates — Chrome ignores the update
-        URL for it. Auto-update <strong>only</strong> works through the policy below, which makes Chrome install its
-        own managed copy from this server and keep it current.
-        <div style={{ marginTop: 6 }}>
-          <strong>If you already loaded it unpacked,</strong> remove that copy <strong>first</strong>:
-          go to <code>chrome://extensions</code> → find “TailorResume Assistant” → <strong>Remove</strong>.
-          Then do the policy steps below — the managed copy (same ID) will install and auto-update from now on.
-        </div>
-      </div>
-
-      <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
-        {osBtn('win', '🪟 Windows')}
-        {osBtn('mac', '🍎 macOS')}
-        {osBtn('linux', '🐧 Linux')}
-      </div>
-
-      {os === 'win' && (
-        <ol style={{ lineHeight: 1.8, fontSize: '0.9rem' }}>
-          <li><a href={regUrl} download>Download <code>tailorresume_policy.reg</code></a>.</li>
-          <li><strong>Double-click</strong> the downloaded <code>.reg</code> file.</li>
-          <li>Click <strong>Yes</strong> on the “User Account Control” / “add to registry?” prompts.
-            (You need a Windows admin account.)</li>
-          <li><strong>Fully quit Chrome</strong> (close every window) and reopen it.</li>
-          <li>Go to <code>chrome://policy</code> → click <strong>Reload policies</strong>. You should see
-            <code> ExtensionInstallForcelist</code> listed with the value below.</li>
-          <li>Open <code>chrome://extensions</code> — TailorResume Assistant appears, marked
-            <strong> “Installed by enterprise policy.”</strong> Click its icon and <strong>sign in</strong>.</li>
-        </ol>
-      )}
-
-      {os === 'mac' && (
-        <ol style={{ lineHeight: 1.8, fontSize: '0.9rem' }}>
-          <li>Open <strong>Terminal</strong> (Applications → Utilities).</li>
-          <li>Paste this command and press Enter (it asks for your admin password):
-            <div style={codeBox}>sudo defaults write com.google.Chrome ExtensionInstallForcelist -array "{forceEntry}"</div>
-          </li>
-          <li>Then run:
-            <div style={codeBox}>sudo defaults write com.google.Chrome ExtensionInstallSources -array "{BASE}/*"</div>
-          </li>
-          <li><strong>Fully quit Chrome</strong> (Cmd-Q) and reopen it.</li>
-          <li>Go to <code>chrome://policy</code> → <strong>Reload policies</strong> and confirm
-            <code> ExtensionInstallForcelist</code> shows the value below.</li>
-          <li>At <code>chrome://extensions</code> the extension appears “Installed by enterprise policy.”
-            Click its icon and <strong>sign in</strong>.</li>
-          <li className="muted" style={{ fontSize: '0.82rem' }}>
-            On Macs managed by MDM, push a configuration profile for <code>com.google.Chrome</code> with the same
-            <code> ExtensionInstallForcelist</code> value instead.
-          </li>
-        </ol>
-      )}
-
-      {os === 'linux' && (
-        <ol style={{ lineHeight: 1.8, fontSize: '0.9rem' }}>
-          <li>Create the policy folder (run in a terminal):
-            <div style={codeBox}>sudo mkdir -p /etc/opt/chrome/policies/managed</div>
-          </li>
-          <li><a href={jsonUrl} download>Download <code>tailorresume_policy.json</code></a> and move it there:
-            <div style={codeBox}>sudo mv ~/Downloads/tailorresume_policy.json /etc/opt/chrome/policies/managed/</div>
-            (For Chromium use <code>/etc/chromium/policies/managed/</code> instead.)
-          </li>
-          <li>Make it readable:
-            <div style={codeBox}>sudo chmod 644 /etc/opt/chrome/policies/managed/tailorresume_policy.json</div>
-          </li>
-          <li><strong>Fully quit Chrome</strong> and reopen it.</li>
-          <li>Go to <code>chrome://policy</code> → <strong>Reload policies</strong> and confirm
-            <code> ExtensionInstallForcelist</code> shows the value below.</li>
-          <li>At <code>chrome://extensions</code> the extension appears “Installed by enterprise policy.”
-            Click its icon and <strong>sign in</strong>.</li>
-        </ol>
-      )}
-
-      <div style={{ marginTop: 8 }}>
-        <div className="muted" style={{ fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-          The exact policy value (for verifying at chrome://policy)
-        </div>
-        <div style={codeBox}>{forceEntry}</div>
-      </div>
-
-      <details style={{ fontSize: '0.85rem' }}>
-        <summary style={{ cursor: 'pointer', color: 'var(--muted)' }}>It didn't install / didn't update — checklist</summary>
-        <ul style={{ lineHeight: 1.7, marginTop: 8 }}>
-          <li><strong>You must fully quit and relaunch Chrome</strong> — reloading a tab isn't enough.</li>
-          <li>At <code>chrome://policy</code>, the <code>ExtensionInstallForcelist</code> row must show the value above.
-            If it's missing, the file is in the wrong place or Chrome wasn't restarted.</li>
-          <li>Windows: the <code>.reg</code> must be applied with an <strong>admin</strong> account, under
-            <code> HKLM</code> (not HKCU).</li>
-          <li>Updates aren't instant — Chrome checks the update URL on its own schedule (up to ~5 h). To force it now:
-            <code> chrome://extensions</code> → Developer mode ON → <strong>Update</strong> button.</li>
-          <li>Corporate/managed devices may already have a Chrome policy that blocks extra extensions — then your IT
-            admin must add this one to the allowed list.</li>
-        </ul>
-      </details>
     </div>
   );
 }

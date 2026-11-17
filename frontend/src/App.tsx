@@ -6,7 +6,6 @@ import ThemeToggle from './lib/ThemeToggle';
 import { initPushSound, syncPushIfGranted } from './lib/push';
 import { ToastProvider } from './lib/toast';
 import Login from './pages/Login';
-import Bid from './pages/Bid';
 import Jobs from './pages/Jobs';
 import Profiles from './pages/Profiles';
 import Users from './pages/Users';
@@ -27,7 +26,6 @@ const TABS: { path: string; label: string; roles: Role[] }[] = [
   // they read everyone else's on the calendar instead.
   { path: '/availability', label: 'Availability', roles: ['caller', 'manager'] },
   { path: '/jobs',     label: 'Jobs',     roles: ['admin', 'job_adder'] },
-  { path: '/bid',      label: 'Bid',      roles: ['admin', 'bidder'] },
   { path: '/applied',  label: 'Applied',  roles: ['admin'] },
   // { path: '/screenshots', label: 'Screenshots', roles: ['admin'] },
   { path: '/metrics',  label: 'Metrics',  roles: ['admin', 'bidder', 'job_adder'] },
@@ -55,7 +53,8 @@ function visibleTabs(user: User) {
 export function defaultLandingPath(user: User | null): string {
   if (!user) return '/login';
   if (hasRole(user, 'admin', 'call_board_manager', 'manager', 'caller')) return '/interviews';
-  if (hasRole(user, 'bidder')) return '/bid';
+  // Bidders bid in the browser extension (Out Bids / Easy Bids); here they see their numbers.
+  if (hasRole(user, 'bidder')) return '/metrics';
   if (hasRole(user, 'job_adder')) return '/jobs';
   const v = visibleTabs(user);
   return v.length ? v[0].path : '/login';
@@ -141,7 +140,7 @@ export default function App() {
       <main className="content">
         <Routes>
           <Route path="/login" element={<Login />} />
-          <Route path="/bid"      element={<RoleGate roles={['admin', 'bidder']}><Bid /></RoleGate>} />
+          <Route path="/bid"       element={<Navigate to="/" replace />} />   {/* bidding moved to the extension */}
           <Route path="/interviews" element={<RoleGate roles={['admin', 'caller', 'manager', 'call_board_manager']}><Interviews /></RoleGate>} />
           <Route path="/availability" element={<RoleGate roles={['caller', 'manager']}><AvailabilityPage /></RoleGate>} />
           <Route path="/jobs"     element={<RoleGate roles={['admin', 'job_adder']}><Jobs /></RoleGate>} />
