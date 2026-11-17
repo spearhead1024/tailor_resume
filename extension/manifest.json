@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "TailorResume Assistant",
-  "version": "1.5.0",
-  "description": "Side panel to bid outside-apply jobs (CV, ChatGPT, autofill) and LinkedIn Easy Apply jobs (duplicate check, Gen CV, classic job search kept), and to add jobs from postings.",
+  "version": "1.6.0",
+  "description": "Side panel to bid outside-apply jobs and LinkedIn Easy Apply jobs (duplicate check, ChatGPT CVs, classic job search kept), and to add jobs from postings.",
   "minimum_chrome_version": "116",
   "update_url": "https://tailorresume.duckdns.org/api/extension/update.xml",
   "permissions": [
@@ -11,10 +11,7 @@
     "downloads",
     "sidePanel",
     "scripting",
-    "debugger",
-    "alarms",
-    "offscreen",
-    "declarativeNetRequestWithHostAccess"
+    "alarms"
   ],
   "host_permissions": [
     "https://tailorresume.duckdns.org/*"
@@ -44,14 +41,5 @@
     "https://chatgpt.com/*",
     "https://chat.openai.com/*"
   ],
-  "commands": {
-    "autofill": {
-      "suggested_key": {
-        "default": "Alt+Shift+F",
-        "mac": "Alt+Shift+F"
-      },
-      "description": "Autofill the application form on this tab"
-    }
-  },
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmFRvhRTehvNk989FkTeagyo7CGplDDRO4nmnLf+c7mTbVEJxOah716pIPh0+dK4c3Pwq4o/FkJup/U4f7+DraJXptA8IEaDmD4NJZYDnkW+OFDXivXRaPDsakw6F5atie1dLwA2Xs863ItyU5jmqcLjZcdHzPIppJ6o7wCoLC9cA6DqVHus7F1EsDNDSc/l2jLcZqxVVStA8Ophgw34xt5EQckLdo3E1UaUwb222soiei+NZ2n9anFItJy3GkxkjyAT7PdaHWuu+Bhhzs2ES0TKgJbYK1IfWp7rhxhepvZ06pRTDSISMT8A/TAk2MGSvGAh4jWHTP0GXmak9ISzs5QIDAQAB"
 }

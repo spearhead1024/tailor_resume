@@ -1,6 +1,6 @@
 {
-  "version": "1.5.0",
+  "version": "1.6.0",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "v1.5.0 \u2014 One extension: LinkedIn's classic job search is now kept by TailorResume itself (merged from Classic Job Search Keeper \u2014 remove that extension). When LinkedIn opens its AI job search, the tab goes back to the classic search with your last classic filters; never while an application form is open; after 2 tries LinkedIn's AI search is left alone for 10 minutes. In Easy Bids: one switch, your saved search and Open saved search.",
-  "built_at": "2026-11-17T13:21:55Z"
+  "changelog": "v1.6.0 \u2014 ChatGPT writes CVs in real ChatGPT tabs, opened in the background (you keep your tab) and closed when done \u2014 no more hidden frames. Every chat it opens is still deleted afterwards, now even when a ChatGPT tab is closed by hand mid-write. Autofill, Remember and the Alt+Shift+F shortcut are removed; the profile card is just \"Details\" (click-to-copy). Fewer permissions.",
+  "built_at": "2026-11-17T14:08:22Z"
 }
