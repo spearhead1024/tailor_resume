@@ -322,3 +322,10 @@ button.dl-btn:hover:not(:disabled) { background: #059669; box-shadow: 0 2px 8px 
 .easy-link { font-size: 11px; margin-top: 2px; overflow-wrap: anywhere; }
 .easy-link a { color: var(--muted); }
 #easyCard button[data-action="genCv"] svg { width: 14px; height: 14px; }
+
+/* LinkedIn classic job search (panel.js patchClassic) */
+.classic-row { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border-soft); }
+.classic-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.classic-switch { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; flex: 1 1 auto; min-width: 0; }
+.classic-switch input { margin: 0; width: 14px; height: 14px; flex: none; padding: 0; accent-color: var(--accent); box-shadow: none; }
+.classic-saved { margin-top: 3px; overflow-wrap: anywhere; }

@@ -23,6 +23,7 @@ import { request, getConfig, setSession, clearSession } from '../lib/api.js';
 import { requestSiteAccess, hasSiteAccess, autofillTab, collectAnswers } from './autofill-runner.js';
 import { createAdder } from './adder.js';
 import { linkedinJobId, readLinkedInJob } from './linkedin.js';
+import { CLASSIC_ON, CLASSIC_SEARCH, classicTabKey, classicUrl, isAiSearch, describeSearch, applicationOpen } from '../lib/classic.js';
 import { gpt, gptSnapshot, onGptChange, requestChatAccess, threadKey } from '../gpt/client.js';
 import { UPDATE_KEY, diskVersion } from '../lib/self-update.js';
 
@@ -907,6 +908,7 @@ function easyCanGen() {
 
 async function easyCheck({ force = false } = {}) {
   if (S.mode !== 'easy' || S.screen !== 'main' || !S.profileId) return;
+  patchClassic();                                         // its "this tab" note follows the tab too
   const tab = await activeTab();
   const url = tab?.url || tab?.pendingUrl || '';
   const lid = linkedinJobId(url);
@@ -990,7 +992,7 @@ async function allowLinkedIn() {
 }
 
 function patchEasy() {
-  const el = $('#easyCard'); if (!el) return;
+  const el = $('#easyBody'); if (!el) return;
   const E = S.easy, page = E.page, res = E.res, p = res?.profile || {};
   const name = esc(selectedProfile()?.name || 'this profile');
   const spin = '<span class="spinner"></span>';
@@ -1050,6 +1052,51 @@ function patchEasy() {
     ? `<div class="easy-line warn">Gen CV writes the CV with ChatGPT (a paid plan) — connect it once.</div>
        <div class="row"><button class="sm" data-action="gptConnect">Connect ChatGPT</button></div>` : '';
   el.innerHTML = `<div class="card-head"><span class="card-title">Easy Apply job</span><span class="muted small">checked · Gen CV</span></div>${body}${connect}`;
+}
+
+// ---------- LinkedIn classic job search (lib/classic.js does the work in the service worker) ----------
+// One switch, the remembered search, "Open saved search", and a note when LinkedIn forced AI search
+// back on the tab often enough that it is left alone for a while.
+async function patchClassic() {
+  const el = $('#classicRow'); if (!el) return;
+  const got = await chrome.storage.local.get([CLASSIC_ON, CLASSIC_SEARCH]).catch(() => ({}));
+  const on = got[CLASSIC_ON] !== false, saved = got[CLASSIC_SEARCH] || '';
+  const tab = await activeTab();
+  const key = tab?.id != null ? classicTabKey(tab.id) : '';
+  const st = key ? (await chrome.storage.session.get(key).catch(() => ({})))[key] : null;
+  const blocked = on && (st?.blockedUntil || 0) > Date.now();
+  el.innerHTML = `
+    <div class="classic-head">
+      <label class="classic-switch" title="When LinkedIn opens its AI job search, go back to the classic search with your last filters">
+        <input type="checkbox" data-action="classicToggle" ${on ? 'checked' : ''}> Keep LinkedIn's classic job search</label>
+      ${saved ? '<button class="secondary sm" data-action="classicOpen" title="Open your last classic search (in a new tab if an application is open)">Open saved search</button>' : ''}
+    </div>
+    <div class="muted small classic-saved">${saved ? `Saved: ${esc(describeSearch(saved))}` : 'Your last classic search with filters is remembered here.'}</div>
+    ${blocked ? `<div class="easy-line warn">LinkedIn keeps sending this tab back to AI search — left alone until ${esc(new Date(st.blockedUntil).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}.
+      <a href="#" data-action="classicRetry">Try again</a></div>` : ''}`;
+}
+chrome.storage.onChanged.addListener((ch, area) => {
+  if ((area === 'local' && (CLASSIC_ON in ch || CLASSIC_SEARCH in ch)) || (area === 'session' && Object.keys(ch).some((k) => k.startsWith('classic:tab:')))) patchClassic();
+});
+// The saved search: on the LinkedIn tab when nothing is being applied for there, else in a new tab.
+async function openClassicSearch() {
+  const { [CLASSIC_SEARCH]: saved } = await chrome.storage.local.get(CLASSIC_SEARCH);
+  const target = classicUrl(saved || '');
+  if (!target) return;
+  const tab = await activeTab();
+  if (tab?.id != null && isLinkedIn(tab.url) && (await applicationOpen(tab.id)) === false) {
+    await chrome.storage.session.remove(classicTabKey(tab.id));
+    await chrome.tabs.update(tab.id, { url: target });
+  } else await chrome.tabs.create({ url: target, active: true });
+}
+// "Try again": forget the loop guard for this tab and, if it shows AI search, go back to classic now.
+async function retryClassic() {
+  const tab = await activeTab(); if (tab?.id == null) return;
+  await chrome.storage.session.remove(classicTabKey(tab.id));
+  if (isAiSearch(tab.url) && (await applicationOpen(tab.id)) === false) {
+    const { [CLASSIC_SEARCH]: saved } = await chrome.storage.local.get(CLASSIC_SEARCH);
+    await chrome.tabs.update(tab.id, { url: classicUrl(saved || '') || classicUrl(tab.url) });
+  }
 }
 
 // ---------- a newer version is on disk (the updater put it there) ----------
@@ -1178,7 +1225,7 @@ function renderMain() {
           <button class="icon secondary" id="refreshBtn" data-action="refresh" title="Refresh profiles and jobs">${I.refresh}</button>
         </div>
         <section class="card" id="copyCard"></section>
-        ${S.mode === 'easy' ? '<section class="card" id="easyCard"></section>' : ''}
+        ${S.mode === 'easy' ? '<section class="card" id="easyCard"><div id="easyBody"></div><div id="classicRow" class="classic-row"></div></section>' : ''}
       </div>
       <div class="col">
         <section class="card" id="jobCard">
@@ -1195,7 +1242,7 @@ function renderMain() {
     </main>`;
   $('#profileSelect').addEventListener('change', (e) => { setError(''); setMessage(''); selectProfile(e.target.value); });
   wireCombo();
-  patchAlerts(); patchProfile(); patchJob(); patchBuild(); patchCopy(); patchQA(); patchEasy();
+  patchAlerts(); patchProfile(); patchJob(); patchBuild(); patchCopy(); patchQA(); patchEasy(); patchClassic();
 }
 
 // The job box shows the current job ("Company — Title") until you click into it;
@@ -1523,6 +1570,9 @@ async function onClick(e) {
       case 'easyAllow': await allowLinkedIn(); break;
       case 'easyRetry': scheduleEasyCheck(true); break;
       case 'genCv': await genCv(); break;
+      case 'classicToggle': await chrome.storage.local.set({ [CLASSIC_ON]: t.checked }); break;
+      case 'classicOpen': await openClassicSearch(); break;
+      case 'classicRetry': e.preventDefault(); await retryClassic(); break;
       case 'easyCopyLink': e.preventDefault(); await copyText(jobViewLink(S.easy.lid), 'Job link'); break;
       case 'easyOpenLinkedIn': await chrome.tabs.create({ url: 'https://www.linkedin.com/jobs/search/?f_AL=true' }); break;
       case 'remember': await rememberAnswers(); break;

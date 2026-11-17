@@ -52,7 +52,12 @@ follows the LinkedIn tab: whenever it shows another job, the job is read and che
 first (same LinkedIn job id, same company + title, same company this month) — nothing is added.
 Easy Apply jobs only. **Gen CV** adds the job if it is new (link
 `https://www.linkedin.com/jobs/view/<id>/`), then ChatGPT writes the CV and it is saved to Downloads
-by itself (`POST /api/resumes/bid/easy`, `add=false` to check, `add=true` on Gen CV). To try changes without packing or installing it:
+by itself (`POST /api/resumes/bid/easy`, `add=false` to check, `add=true` on Gen CV).
+The extension also keeps **LinkedIn's classic job search** (`extension/lib/classic.js`, merged from
+the separate *Classic Job Search Keeper* extension — remove that one): when LinkedIn opens its AI
+job search, the tab goes back to the classic search with the last classic filters (never while an
+application form is open; 2 tries, then it leaves the tab alone for 10 minutes). One switch and
+"Open saved search" sit at the bottom of the Easy Bids card. To try changes without packing or installing it:
 
 ```bash
 python3 extension-dev/serve.py   # http://127.0.0.1:8600 — in VS Code: Ports → 8600 → Simple Browser

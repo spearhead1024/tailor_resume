@@ -1,12 +1,15 @@
 // Service worker (module). The extension is the docked side panel (Out Bids / Easy Bids / Add Jobs tabs) —
 // the panel (panel/panel.js) talks to the API itself via lib/api.js. The worker makes the
-// toolbar button open that panel, relays the Autofill shortcut, runs the ChatGPT connection
+// toolbar button open that panel, relays the Autofill shortcut, keeps LinkedIn's classic job search
+// (lib/classic.js — merged from the Classic Job Search Keeper extension), runs the ChatGPT connection
 // (gpt/runner.js — ChatGPT in hidden frames, even while the panel is closed) and restarts a
 // "Load unpacked" install into a newer version its updater put on disk (lib/self-update.js).
 import { installGptRunner, gptBusy } from './gpt/runner.js';
 import { installSelfUpdate } from './lib/self-update.js';
+import { installClassicSearch } from './lib/classic.js';
 
 installGptRunner();
+installClassicSearch();       // LinkedIn AI job search → back to the classic search (lib/classic.js)
 installSelfUpdate(gptBusy);   // a "Load unpacked" install restarts into a newer version on disk
 
 // Set at top level so it applies on every service-worker start, not just install.
