@@ -298,6 +298,9 @@ button.dl-btn:hover:not(:disabled) { background: #059669; box-shadow: 0 2px 8px 
 .easy-line.muted { background: var(--panel-2); color: var(--text-soft); }
 .easy-line.ok { background: var(--success-bg); color: var(--success); }
 .easy-line.warn { background: var(--warning-bg); color: var(--warning); }
+.easy-line.pinned a { margin-left: 4px; font-weight: 600; }
+.card-title .card-job { text-transform: none; letter-spacing: 0; font-weight: 500; color: var(--text-soft); }
+.card-head .card-title:has(.card-job) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .easy-line.error { background: var(--danger-bg); color: var(--danger); }
 .easy-line ul { margin: 4px 0 0 16px; padding: 0; }
 .easy-line .spinner { width: 11px; height: 11px; vertical-align: -2px; margin-right: 4px; }

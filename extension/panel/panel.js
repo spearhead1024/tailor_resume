@@ -887,9 +887,15 @@ async function easyCheck({ force = false } = {}) {
   await followEasyJob(biddable ? res.job : null);
 }
 // The current job follows the LinkedIn tab: the job on it when it is on file and this profile can
-// bid it, else none (a new job has no id until Gen CV adds it).
+// bid it, else none (a new job has no id until Gen CV adds it) — except a job being worked on.
+// The job being worked on — it has a CV, or Gen CV was pressed for it — stays the current job until it
+// is finished (Mark as Applied / Report / Skip) or the bidder takes another (Gen CV on it): LinkedIn
+// moves the tab by itself (after an application it jumps to the next job or back to the search), and
+// that must never take Mark as Applied away.
+const easyPinned = () => S.mode === 'easy' && !!S.jobId && !!currentJob() && (!!S.resumeId || S.gen.has(S.jobId));
 async function followEasyJob(item) {
   if (S.busy) return;                                     // a request for the current job is in flight
+  if (easyPinned() && item?.id !== S.jobId) { patchEasy(); return; }
   if (!item) { if (S.jobId) await selectJob('', { open: false }); return; }
   if (S.jobId === item.id) { maybeAutoDownload(); return; }
   await selectJob(item.id, { open: false, item });
@@ -917,7 +923,8 @@ async function addJob({ gen }) {
     }
     const item = res.job, p = res.profile || {};
     if (p.applied || p.skipped || p.problem) return;
-    if (S.jobId !== item.id) { await selectJob(item.id, { open: false, item }); track('open_link', item); }
+    // Add Job alone (a CV later) never takes the place of a job being worked on.
+    if (S.jobId !== item.id && (gen || !easyPinned())) { await selectJob(item.id, { open: false, item }); track('open_link', item); }
     if (!gen) return;
     S.gen.set(item.id, { id: item.id, company: item.company, job_title: item.job_title });
     if (S.resumeId) { maybeAutoDownload(); return; }      // it already has a CV: save it now
@@ -1031,6 +1038,14 @@ function patchEasy() {
     }
   }
   if (buttons) body += `<div class="row easy-btns">${buttons}</div>`;
+  // The tab moved on (LinkedIn does that after an application) while a job is being worked on: it stays below.
+  const cur = currentJob();
+  // (No job read from the tab — LinkedIn elsewhere, a search with no job open: the last answer is stale.)
+  const tabJobId = ['nolinkedin', 'nojob', 'access'].includes(E.state) ? '' : res?.job?.id;
+  if (easyPinned() && tabJobId !== S.jobId && !['idle', 'reading', 'checking'].includes(E.state)) {
+    body += `<div class="easy-line ok pinned">Still on <b>${esc(cur.company)}</b> — finish it below (Mark as Applied, Report or Skip).
+      <a href="#" data-action="easyBack" title="${esc(cur.link)}">Show it</a></div>`;
+  }
   // CVs are written by ChatGPT: one compact line while it is not connected (details in ⚙ Settings).
   if (!gptOn()) body += `<div class="easy-line warn row-line">ChatGPT is off. <button class="sm" data-action="gptConnect">Connect ChatGPT</button></div>`;
   el.innerHTML = `<div class="card-head"><span class="card-title">LinkedIn Job</span><span class="pills">${badge}</span></div>${body}`;
@@ -1425,7 +1440,7 @@ function patchBuild() {
   const score = S.atsScore;
   const tone = score >= 90 ? 'good' : score >= 75 ? 'mid' : 'low';
   el.innerHTML = `
-    <div class="card-head"><span class="card-title">Resume</span>
+    <div class="card-head"><span class="card-title">Resume${S.mode === 'easy' ? ` <span class="card-job" title="${esc(`${j.company} — ${j.job_title}`)}">· ${esc(j.company)} — ${esc(j.job_title)}</span>` : ''}</span>
       ${S.resumeId && score ? `<button class="ats-badge ${tone}" data-action="toggleAts" title="${S.ats ? 'How this score is calculated' : 'ATS score'}">ATS ${score}${S.ats ? (S.atsOpen ? ' ▴' : ' ▾') : ''}</button>` : ''}</div>
     <div id="gptLine"></div>
     ${S.resumeId ? `
@@ -1447,7 +1462,7 @@ function patchBuild() {
     </div>
     ${S.confirm === 'apply' ? `
       <div class="confirm">
-        <div>Mark <strong>${esc(j.company)}</strong> as applied? The next job opens in this tab.</div>
+        <div>Mark <strong>${esc(j.company)}</strong> as applied?${S.mode === 'easy' ? '' : ' The next job opens in this tab.'}</div>
         <div class="row"><button class="grow" data-action="applySubmit" ${b ? 'disabled' : ''}>${b === 'apply' ? spin : 'Yes, applied'}</button><button class="secondary grow" data-action="cancelConfirm">Cancel</button></div>
       </div>` : ''}
     ${S.confirm === 'report' ? `
@@ -1558,6 +1573,7 @@ async function onClick(e) {
       case 'skipReason': { const ta = $('#skipReason'); if (ta) { ta.value = t.dataset.r; ta.focus(); } break; }
       case 'easyAllow': await allowLinkedIn(); break;
       case 'easyRetry': scheduleEasyCheck(true); break;
+      case 'easyBack': e.preventDefault(); await showJob(currentJob()); break;
       case 'genCv': await addJob({ gen: true }); break;
       case 'addJob': await addJob({ gen: false }); break;
       case 'useLink': {
