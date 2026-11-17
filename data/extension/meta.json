@@ -1,6 +1,6 @@
 {
-  "version": "1.8.0",
+  "version": "1.8.1",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "v1.8.0 \u2014 LinkedIn jobs that apply on the company's site can be added too (Add Job): the company's exact apply link is read from LinkedIn's job data \u2014 or, if LinkedIn doesn't give it, caught from the tab its Apply button opens (that tab is closed right away); it is added as an outside job, bid from Out Bids. Easy Apply jobs get two buttons: Add + Gen CV, or Add Job (CV later).",
-  "built_at": "2026-11-17T15:50:43Z"
+  "changelog": "Easy Bids keeps the job you applied to when LinkedIn moves to another job \u2014 Mark as Applied stays",
+  "built_at": "2026-11-17T17:03:41Z"
 }
