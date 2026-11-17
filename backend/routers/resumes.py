@@ -680,20 +680,21 @@ def _easy_profile_state(profile: dict, job: dict, item: dict) -> dict:
 @router.post("/bid/easy")
 def bid_easy(body: dict, user: dict = Depends(get_current_user)):
     """Easy Bids (the extension tab for LinkedIn Easy Apply): the job open in the bidder's LinkedIn
-    tab — check it against TailorResume first, and add it when it is new.
+    tab. The panel CHECKS it whenever the tab changes (add=false) and ADDS it only when the bidder
+    presses Gen CV (add=true).
 
     Body: {profile_id, link | linkedin_job_id, company, job_title, description, add (default true)}.
     Duplicates are looked for first — the same LinkedIn posting (by its job id, however its link was
-    saved), then the same company + title. Found → that job. Not found and add → the SAME rules as
-    the Jobs tab's Add job (required fields, one job per company per region per month, blacklist),
-    then it is added (approved, the profile's region, link https://www.linkedin.com/jobs/view/<id>/).
+    saved), then the same company + title. Found → that job. Otherwise the SAME rules as the Jobs
+    tab's Add job (required fields, one job per company per region per month, blacklist); a job
+    that passes is added (approved, the profile's region, link https://www.linkedin.com/jobs/view/<id>/)
+    — or, with add=false, only reported as one that would be.
 
     Returns {state, match, job, profile, conflicts, message}:
-      existing | added → job (a Bid-queue item, with this profile's CV if it has one) and profile
-                         {applied, applied_at, skipped, problem} — problem: why no CV can be made
+      existing | added | new → job (a Bid-queue item; id '' for `new`; this profile's CV if any)
+                         and profile {applied, applied_at, skipped, problem} — problem: why no CV
       blocked          → conflicts (same company this month / blacklist), nothing added
-      invalid          → message (e.g. the description is too short), nothing added
-      not_found        → add was false and the posting is not on file"""
+      invalid          → message (e.g. the description is too short), nothing added"""
     if not has_role(user, "admin", "bidder"):
         raise HTTPException(status_code=403, detail="Forbidden")
     body = body or {}
@@ -717,8 +718,6 @@ def bid_easy(body: dict, user: dict = Depends(get_current_user)):
         if job:
             item = _easy_item(job)
             return {"state": "existing", "match": match, "job": item, "profile": _easy_profile_state(profile, job, item)}
-        if body.get("add") is False:
-            return {"state": "not_found"}
 
         region = str(profile.get("region") or "ANY").strip().upper()
         payload = {"company": company, "job_title": title, "link": easy_apply.canonical_link(lid),
@@ -738,6 +737,10 @@ def bid_easy(body: dict, user: dict = Depends(get_current_user)):
             conflicts.append({"kind": "blacklist", "message": f"Blocked — {reason} (Settings → Blacklist)."})
         if conflicts:
             return {"state": "blocked", "conflicts": conflicts}
+        if body.get("add") is False:           # only checking: it would be added — nothing is written
+            preview = {**payload, "id": "", "status": "approved"}
+            item = _easy_item(preview)
+            return {"state": "new", "match": "", "job": item, "profile": _easy_profile_state(profile, preview, item)}
 
         now = _utcnow_iso()
         payload.update({

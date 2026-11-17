@@ -71,7 +71,8 @@ const S = {
   bidView: '',         // which of bid / easy the shared bid view holds now ('' = not loaded yet)
   easy: freshEasy(),   // Easy Bids: the LinkedIn job on the tab — see easyCheck()
   extraJob: null,      // Easy Bids: the current job when it is not in the queue (e.g. a stack the queue filters out)
-  autoDl: '',          // Easy Bids: "<job>|<resume>" last saved to Downloads by itself
+  gen: new Map(),      // Easy Bids: jobs Gen CV was pressed for → their CV is saved to Downloads once built
+  genBusy: false,      // Easy Bids: Gen CV is adding the job
   gptSnap: null,       // the ChatGPT connection's state + threads, mirrored from chrome.storage
   questions: [],       // the job's application questions (shared by every bidder)
   answers: [],         // this CV's answers to them
@@ -415,7 +416,7 @@ async function login(identifier, password) {
 
 function showLogin(note) {
   Object.assign(S, { screen: 'login', mode: '', bidView: '', profiles: [], queue: [], jobId: '', job: null, extraJob: null,
-    resumeId: '', ats: null, easy: freshEasy(), autoDl: '' });
+    resumeId: '', ats: null, easy: freshEasy(), gen: new Map(), genBusy: false });
   easySeq++;
   adder = null;
   clearSession();
@@ -476,7 +477,7 @@ async function selectProfile(id) {
   // Nothing of the previous profile may survive: its CV would otherwise be attached by Autofill
   // to a form being filled with the new profile's details.
   Object.assign(S, { queue: [], jobId: '', job: null, extraJob: null, resumeId: '', ats: null, atsScore: 0,
-    atsOpen: false, confirm: '', fill: { busy: '', report: null }, autoDl: '', easy: freshEasy() });
+    atsOpen: false, confirm: '', fill: { busy: '', report: null }, gen: new Map(), genBusy: false, easy: freshEasy() });
   easySeq++;
   patchCopy(); patchBuild(); patchEasy();
   await chrome.storage.local.set({ [PROFILE_KEY]: id });
@@ -567,19 +568,18 @@ async function generate() {
     track('generate', job);
   } finally { S.busy = ''; patchBuild(); }
   if (rid && S.jobId === jobId && S.resumeId === rid) {
-    S.autoDl = `${jobId}|${rid}`;          // (Easy Bids: this IS the automatic download)
+    S.gen.delete(jobId);                   // (Easy Bids: a Gen CV request this answers)
     await download();                      // straight to Downloads, replacing
   }
 }
 
-// Easy Bids saves the current job's CV to Downloads by itself — once it is built, or at once when
-// the job already had one — so the file the bidder attaches on LinkedIn is THIS job's CV. Again on
-// coming back to a job (the file was replaced meanwhile); never twice in a row for the same CV.
+// Easy Bids: after Gen CV, the job's CV is saved to Downloads by itself as soon as it is built — or
+// at once when it already had one. Only while that job is on screen (the file must match the job
+// the bidder is applying to); one that finishes while they look at another job is saved when they
+// come back to it.
 function maybeAutoDownload() {
-  if (S.mode !== 'easy' || !S.resumeId || !currentJob() || S.busy) return;
-  const key = `${S.jobId}|${S.resumeId}`;
-  if (S.autoDl === key) return;
-  S.autoDl = key;
+  if (S.mode !== 'easy' || !S.resumeId || !currentJob() || S.busy || !S.gen.has(S.jobId)) return;
+  S.gen.delete(S.jobId);
   download().catch(showError);
 }
 
@@ -706,12 +706,15 @@ function renderLogin() {
 const gptOn = () => !!S.gptSnap?.state.enabled;
 const currentThread = () => (S.gptSnap && S.profileId && S.jobId ? S.gptSnap.threads[threadKey(S.profileId, S.jobId)] || null : null);
 
-// The job on screen and the next ones without a CV (5 in all) are written ahead. Easy Bids: only
-// the job on the LinkedIn tab — the next one is whichever the bidder clicks there.
+// The job on screen and the next ones without a CV (5 in all) are written ahead. Easy Bids: only the
+// jobs Gen CV was pressed for (the one on screen first) — nothing is written just by looking at a job.
 function gptPrepare() {
-  if (!gptOn() || !S.profileId || !S.jobId) return;
+  if (!gptOn() || !S.profileId) return;
+  if (S.mode !== 'easy' && !S.jobId) return;
   const i = Math.max(0, S.queue.findIndex((j) => j.id === S.jobId));
-  const list = S.mode === 'easy' ? [currentJob()].filter(Boolean) : S.queue.slice(i, i + 20);
+  const list = S.mode === 'easy'
+    ? [...S.gen.values()].sort((a, b) => (b.id === S.jobId) - (a.id === S.jobId))
+    : S.queue.slice(i, i + 20);
   const jobs = list.map((j) => ({ id: j.id, company: j.company, job_title: j.job_title }));
   // The server keeps the queue (3 ahead, skipping jobs with a CV); the worker is told to look.
   if (jobs.length) api('/api/gpt/prepare', { method: 'POST', body: { profile_id: S.profileId, jobs } }).then(() => gpt('sync')).catch(() => {});
@@ -873,20 +876,34 @@ function patchQA() {
 }
 
 // ---------- Easy Bids: the LinkedIn Easy Apply job on the tab ----------
-// Whenever the tab shows a LinkedIn job (switching tabs, clicking a job in LinkedIn's list): read
-// it (company, title, description, its apply button), check it against TailorResume — the same
-// posting or company + title — and add it when it is new; then it becomes the current job and its
-// CV is written by ChatGPT and saved to Downloads by itself (maybeAutoDownload). Jobs this profile
-// can't take (applied, skipped, another region / stack, not Easy Apply, a duplicate) are only shown.
+// 1. Whenever the LinkedIn tab shows another job, read it (company, title, description, the apply
+//    button) and CHECK it against TailorResume first — the same posting (its LinkedIn job id) or the
+//    same company (+ title; one job per company a month) — without adding anything.
+// 2. Only Easy Apply jobs go further. The job link is always https://www.linkedin.com/jobs/view/<id>/,
+//    never the search page the bidder is on.
+// 3. Gen CV (the bidder's click): add the job if it is new, then ChatGPT writes the CV and it is saved
+//    to Downloads by itself (maybeAutoDownload). A job already in TailorResume that this profile can
+//    bid becomes the current job straight away (Download, Mark as Applied…), but its CV is still only
+//    written on Gen CV. Jobs this profile can't take (applied, skipped, region / stack, a duplicate)
+//    are only shown.
 const LINKEDIN_ORIGINS = ['https://www.linkedin.com/*', 'https://linkedin.com/*'];
 const hasLinkedInAccess = () => chrome.permissions.contains({ origins: [LINKEDIN_ORIGINS[0]] }).catch(() => false);
 const isLinkedIn = (url) => /^https:\/\/([^/]+\.)?linkedin\.com\//i.test(url || '');
+const jobViewLink = (lid) => `https://www.linkedin.com/jobs/view/${lid}/`;
 let easySeq = 0, easyTimer = 0;
 function scheduleEasyCheck(force = false) {
   clearTimeout(easyTimer);
   easyTimer = setTimeout(() => easyCheck({ force }).catch(showError), force ? 0 : 300);
 }
 function setEasy(patch) { Object.assign(S.easy, patch); patchEasy(); }
+const easyBody = (pid, lid, page, add) => ({ profile_id: pid, linkedin_job_id: lid, link: jobViewLink(lid),
+  company: page.company, job_title: page.title, description: page.description, add });
+// Gen CV is offered for: an Easy Apply job that would be added, or one on file this profile can bid.
+function easyCanGen() {
+  const E = S.easy, p = E.res?.profile || {};
+  if (E.page?.apply !== 'easy' || p.applied || p.skipped || p.problem) return false;
+  return E.state === 'new' || E.state === 'existing' || E.state === 'added';
+}
 
 async function easyCheck({ force = false } = {}) {
   if (S.mode !== 'easy' || S.screen !== 'main' || !S.profileId) return;
@@ -914,34 +931,57 @@ async function easyCheck({ force = false } = {}) {
   if (stale()) return;                                    // the bidder clicked another job meanwhile
   if (!page?.ready) { setEasy({ state: 'unreadable', page }); return; }
   setEasy({ page });
-  // Easy Bids takes Easy Apply jobs only; one already applied to on LinkedIn is only looked up.
+  // Easy Apply only. (One already applied to on LinkedIn is still looked up — it may need Mark as Applied.)
   if (page.apply !== 'easy' && page.apply !== 'applied') { setEasy({ state: 'noteasy' }); if (!S.busy) followEasyJob(null); return; }
   setEasy({ state: 'checking' });
   let res;
   try {
-    res = await api('/api/resumes/bid/easy', { method: 'POST', body: {
-      profile_id: pid, linkedin_job_id: lid, link: url, company: page.company, job_title: page.title,
-      description: page.description, add: page.apply === 'easy' } });
+    res = await api('/api/resumes/bid/easy', { method: 'POST', body: easyBody(pid, lid, page, false) });   // check only — nothing is added
   } catch (e) {
     if (!stale()) { setEasy({ state: 'error', error: e?.message || String(e) }); if (e?.status === 0) showError(e); }
     return;
   }
   if (stale()) return;
-  setEasy({ state: res.state === 'not_found' ? 'noteasy' : res.state, res });
+  setEasy({ state: res.state, res });
   const p = res.profile || {};
-  const biddable = (res.state === 'added' || res.state === 'existing') && !p.applied && !p.skipped && !p.problem;
+  const biddable = res.state === 'existing' && !p.applied && !p.skipped && !p.problem;
   // A CV still saving / a click in flight: the job changes the moment it ends (unless the tab moved on).
   for (let i = 0; S.busy && i < 600; i++) { await new Promise((r) => setTimeout(r, 200)); if (stale()) return; }
   await followEasyJob(biddable ? res.job : null);
-  if (res.state === 'added') loadQueue();                // the new job joins this profile's Easy Bids list
 }
-// The current job follows the LinkedIn tab: the job on it when this profile can bid it, else none.
+// The current job follows the LinkedIn tab: the job on it when it is on file and this profile can
+// bid it, else none (a new job has no id until Gen CV adds it).
 async function followEasyJob(item) {
   if (S.busy) return;                                     // a request for the current job is in flight
   if (!item) { if (S.jobId) await selectJob('', { open: false }); return; }
   if (S.jobId === item.id) { maybeAutoDownload(); return; }
   await selectJob(item.id, { open: false, item });
   track('open_link', item);                               // the bidder has the posting open on LinkedIn
+}
+
+// Gen CV: add the job if it is new (the same checks run again on the server), make it current, and
+// have ChatGPT write its CV — saved to Downloads by itself when built (at once if it already has one).
+async function genCv() {
+  const E = S.easy;
+  if (S.genBusy || S.busy || !easyCanGen()) return;
+  const seq = easySeq, pid = S.profileId, lid = E.lid, page = E.page;
+  let res = E.res;
+  S.genBusy = true; patchEasy();
+  try {
+    if (res.state === 'new') {
+      res = await api('/api/resumes/bid/easy', { method: 'POST', body: easyBody(pid, lid, page, true) });
+      if (seq !== easySeq || S.profileId !== pid) return;  // the bidder moved on meanwhile
+      setEasy({ state: res.state, res });
+      if (res.state === 'added') loadQueue();              // it joins this profile's Easy Bids list
+      if (!easyCanGen()) return;                           // a duplicate after all (someone added it just now…)
+    }
+    const item = res.job;
+    if (S.jobId !== item.id) { await selectJob(item.id, { open: false, item }); track('open_link', item); }
+    S.gen.set(item.id, { id: item.id, company: item.company, job_title: item.job_title });
+    if (S.resumeId) { maybeAutoDownload(); return; }      // it already has a CV: save it now
+    if (gptOn()) gptPrepare();
+    else setMessage(`Connect ChatGPT to write the CV automatically — or write it by hand in the Resume card below.`);
+  } finally { S.genBusy = false; patchEasy(); }
 }
 async function allowLinkedIn() {
   const ok = await chrome.permissions.request({ origins: LINKEDIN_ORIGINS }).catch(() => false);   // first await of the click
@@ -956,13 +996,14 @@ function patchEasy() {
   const spin = '<span class="spinner"></span>';
   const line = (cls, html) => `<div class="easy-line ${cls}">${html}</div>`;
   const job = res?.job;
-  const what = page?.title ? `<div class="easy-job"><strong>${esc(page.company)}</strong> — ${esc(page.title)}${page.location ? ` <span class="muted">· ${esc(page.location)}</span>` : ''}</div>` : '';
+  const what = page?.title ? `<div class="easy-job"><strong>${esc(page.company)}</strong> — ${esc(page.title)}${page.location ? ` <span class="muted">· ${esc(page.location)}</span>` : ''}
+    <div class="easy-link"><a href="${esc(jobViewLink(E.lid))}" data-action="easyCopyLink" title="The job link stored in TailorResume — click to copy">${esc(jobViewLink(E.lid))}</a></div></div>` : '';
   let body = '';
   switch (E.state) {
     case 'idle': body = line('muted', `${spin} Looking at the tab…`); break;
-    case 'nolinkedin': body = line('muted', 'Open LinkedIn Jobs in this tab and click an <b>Easy Apply</b> job — it is checked, added and its CV made here.')
+    case 'nolinkedin': body = line('muted', 'Open LinkedIn Jobs in this tab and click an <b>Easy Apply</b> job — it is checked here, then <b>Gen CV</b> adds it and makes its CV.')
       + '<div class="row"><button class="secondary sm" data-action="easyOpenLinkedIn">Open LinkedIn Easy Apply jobs</button></div>'; break;
-    case 'nojob': body = line('muted', 'Click a job in LinkedIn\'s list — the job on the right is picked up here.'); break;
+    case 'nojob': body = line('muted', 'Click a job in LinkedIn\'s list — the job on the right is checked here.'); break;
     case 'access': body = line('warn', 'Easy Bids reads the job open on your LinkedIn tab. Allow it once:')
       + '<div class="row"><button class="sm" data-action="easyAllow">Allow reading LinkedIn</button></div>'; break;
     case 'reading': body = line('muted', `${spin} Reading the job on LinkedIn…`); break;
@@ -971,35 +1012,44 @@ function patchEasy() {
     case 'noteasy': body = what + line('warn', {
       external: 'Not an Easy Apply job — it applies on the company\'s own site. Easy Bids is for Easy Apply only.',
       closed: 'LinkedIn says this job is no longer accepting applications.',
-      applied: 'You already applied to this job on LinkedIn (it is not in TailorResume).',
       none: 'No Easy Apply button on this job.',
     }[page?.apply] || 'Not an Easy Apply job.'); break;
     case 'checking': body = what + line('muted', `${spin} Checking TailorResume for duplicates…`); break;
     case 'error': body = what + line('error', `Couldn't check this job — ${esc(E.error)}`)
       + '<div class="row"><button class="secondary sm" data-action="easyRetry">Retry</button></div>'; break;
-    case 'invalid': body = what + line('error', `Not added — ${esc(res?.message || 'the job is incomplete')}`); break;
-    case 'blocked': body = what + line('error', `<strong>Not added — duplicate:</strong><ul>${(res?.conflicts || []).map((c) => `<li>${esc(c.message || c.kind)}</li>`).join('')}</ul>`); break;
-    case 'added': case 'existing': {
-      const head = E.state === 'added'
-        ? line('ok', `✓ Added to TailorResume · ${esc(job?.region || 'ANY')}`)
+    case 'invalid': body = what + line('error', `Can't be added — ${esc(res?.message || 'the job is incomplete')}`); break;
+    case 'blocked': body = what + line('error', `<strong>Duplicate — can't be added:</strong><ul>${(res?.conflicts || []).map((c) => `<li>${esc(c.message || c.kind)}</li>`).join('')}</ul>`); break;
+    case 'new': case 'added': case 'existing': {
+      const head = E.state === 'new'
+        ? (page?.apply === 'applied'
+          ? line('warn', 'You already applied to this job on LinkedIn — it is not in TailorResume.')
+          : line('ok', `✓ No duplicate — not in TailorResume yet. Gen CV adds it (${esc(job?.region || 'ANY')}) and makes the CV.`))
+        : E.state === 'added' ? line('ok', `✓ Added to TailorResume · ${esc(job?.region || 'ANY')}`)
         : line('muted', `Already in TailorResume${res.match === 'company_title' ? ' (same company + title)' : ''} — not added again.`);
-      let st;
+      let st = '';
       if (p.applied) st = line('ok', `Applied with ${name}${p.applied_at ? ` on ${esc(String(p.applied_at).slice(0, 10))}` : ''} — nothing more to do.`);
       else if (p.skipped) st = line('warn', `Skipped for ${name}.`);
       else if (p.problem) st = line('warn', `${esc(p.problem)} No CV is made for ${name}.`);
-      else if (page?.apply === 'applied') st = line('warn', 'LinkedIn shows this job as applied — Mark as Applied below.');
-      else st = line('muted', S.resumeId ? `CV ready for ${name} — saved to Downloads.` : gptOn()
-        ? `ChatGPT is writing ${name}'s CV — it is saved to Downloads when ready.` : 'Connect ChatGPT below to make the CV automatically — or write it by hand.');
+      else if (E.state !== 'new' && page?.apply === 'applied') st = line('warn', 'LinkedIn shows this job as applied — Mark as Applied below.');
+      else if (S.gen.has(job?.id) && !S.resumeId) st = line('muted', gptOn()
+        ? `${spin} ChatGPT is writing ${name}'s CV — it is saved to Downloads when ready.`
+        : 'Connect ChatGPT to write the CV automatically — or write it by hand below.');
+      else if (job?.id && job.id === S.jobId && S.resumeId) st = line('muted', `${name} has a CV for this job — Gen CV saves it to Downloads.`);
       body = what + head + st;
+      if (easyCanGen()) {
+        const busy = S.genBusy || (S.gen.has(job?.id) && !S.resumeId && gptOn());
+        body += `<div class="row"><button class="grow" data-action="genCv" ${S.genBusy || S.busy ? 'disabled' : ''}
+          title="Add the job if it is new, write the CV with ChatGPT and save it to Downloads">${busy ? spin : I.sparkle} Gen CV</button></div>`;
+      }
       break;
     }
   }
   // CVs are written automatically only through ChatGPT — offer to connect even before the first job.
   const st = S.gptSnap?.state || {};
   const connect = !st.enabled
-    ? `<div class="easy-line warn">CVs are written automatically by ChatGPT (a paid plan) — connect it once.</div>
+    ? `<div class="easy-line warn">Gen CV writes the CV with ChatGPT (a paid plan) — connect it once.</div>
        <div class="row"><button class="sm" data-action="gptConnect">Connect ChatGPT</button></div>` : '';
-  el.innerHTML = `<div class="card-head"><span class="card-title">Easy Apply job</span><span class="muted small">auto-added · auto CV</span></div>${body}${connect}`;
+  el.innerHTML = `<div class="card-head"><span class="card-title">Easy Apply job</span><span class="muted small">checked · Gen CV</span></div>${body}${connect}`;
 }
 
 // ---------- a newer version is on disk (the updater put it there) ----------
@@ -1093,7 +1143,7 @@ async function setMode(mode) {
     S.bidView = mode;
     Object.assign(S, { queue: [], jobId: '', job: null, extraJob: null, resumeId: '', ats: null, atsScore: 0, atsOpen: false,
       confirm: '', fill: { busy: '', report: null }, questions: [], answers: [], qaDraft: null, manual: false,
-      autoDl: '', easy: freshEasy() });
+      gen: new Map(), genBusy: false, easy: freshEasy() });
     easySeq++;
     pdfCache = { id: '', promise: null, url: '' };
     renderMain();
@@ -1472,6 +1522,8 @@ async function onClick(e) {
       case 'autofill': await autofill(); break;
       case 'easyAllow': await allowLinkedIn(); break;
       case 'easyRetry': scheduleEasyCheck(true); break;
+      case 'genCv': await genCv(); break;
+      case 'easyCopyLink': e.preventDefault(); await copyText(jobViewLink(S.easy.lid), 'Job link'); break;
       case 'easyOpenLinkedIn': await chrome.tabs.create({ url: 'https://www.linkedin.com/jobs/search/?f_AL=true' }); break;
       case 'remember': await rememberAnswers(); break;
       case 'copyField': {

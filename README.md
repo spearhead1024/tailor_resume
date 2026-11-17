@@ -48,8 +48,11 @@ One side panel with tabs chosen by role: **Out Bids** and **Easy Bids** (bidder)
 (job_adder), and all three for admins. Jobs are split by link (`backend/core/easy_apply.py`): a
 LinkedIn job link (`/jobs/view/<id>` or `?currentJobId=<id>`) is an **Easy Apply** job, bid from
 Easy Bids; every other job applies on the company's site and is bid from Out Bids. **Easy Bids**
-follows the LinkedIn tab: the job on it is read, checked for duplicates and added when new
-(`POST /api/resumes/bid/easy`), and its CV is written by ChatGPT and saved to Downloads by itself. To try changes without packing or installing it:
+follows the LinkedIn tab: whenever it shows another job, the job is read and checked for duplicates
+first (same LinkedIn job id, same company + title, same company this month) — nothing is added.
+Easy Apply jobs only. **Gen CV** adds the job if it is new (link
+`https://www.linkedin.com/jobs/view/<id>/`), then ChatGPT writes the CV and it is saved to Downloads
+by itself (`POST /api/resumes/bid/easy`, `add=false` to check, `add=true` on Gen CV). To try changes without packing or installing it:
 
 ```bash
 python3 extension-dev/serve.py   # http://127.0.0.1:8600 — in VS Code: Ports → 8600 → Simple Browser

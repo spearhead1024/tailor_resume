@@ -319,3 +319,6 @@ button.dl-btn:hover:not(:disabled) { background: #059669; box-shadow: 0 2px 8px 
 .easy-line ul { margin: 4px 0 0 16px; padding: 0; }
 .easy-line .spinner { width: 11px; height: 11px; vertical-align: -2px; margin-right: 4px; }
 #easyCard .row { margin-top: 6px; }
+.easy-link { font-size: 11px; margin-top: 2px; overflow-wrap: anywhere; }
+.easy-link a { color: var(--muted); }
+#easyCard button[data-action="genCv"] svg { width: 14px; height: 14px; }
