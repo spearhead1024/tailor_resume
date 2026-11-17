@@ -1,6 +1,6 @@
 {
-  "version": "1.6.0",
+  "version": "1.7.0",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "v1.6.0 \u2014 ChatGPT writes CVs in real ChatGPT tabs, opened in the background (you keep your tab) and closed when done \u2014 no more hidden frames. Every chat it opens is still deleted afterwards, now even when a ChatGPT tab is closed by hand mid-write. Autofill, Remember and the Alt+Shift+F shortcut are removed; the profile card is just \"Details\" (click-to-copy). Fewer permissions.",
-  "built_at": "2026-11-17T14:08:22Z"
+  "changelog": "v1.7.0 \u2014 \u2699 Settings: the ChatGPT connection, which cards each tab shows, and the classic job search (switch + editable saved search URL) \u2014 the tabs keep only what's needed; Easy Bids fits on one screen. Easy Bids: one label, New Job or Duplicate; duplicates are found by company name too (any region, 15 days, \"Acme Inc.\" = \"Acme\"); jobs get the profile's region (its region, or its country). A CV's ChatGPT chat stays open so you can ask it tech questions (Open Chat); it is closed and deleted on Mark as Applied / Report / Skip.",
+  "built_at": "2026-11-17T15:36:06Z"
 }
