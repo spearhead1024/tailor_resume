@@ -2330,6 +2330,27 @@ class Storage:
             row = session.scalar(stmt.limit(1))
             return _normalize_job(dict(row.data or {})) if row else None
 
+    def find_job_by_linkedin_id(self, linkedin_id: str) -> dict | None:
+        """The job whose link points at this LinkedIn posting, whatever form the link was saved in
+        (/jobs/view/<id>, a slug-<id> view link, or a search page with ?currentJobId=<id>). SQL
+        narrows by the id appearing in the normalized URL; the exact id is then checked in Python
+        (so job 123456 never matches 1234567)."""
+        from core.easy_apply import linkedin_job_id
+        lid = str(linkedin_id or '').strip()
+        if not lid.isdigit():
+            return None
+        with session_scope(self.db_path) as session:
+            rows = session.scalars(
+                select(JobRow).where(JobRow.normalized_url.like('%linkedin.com%'),
+                                     JobRow.normalized_url.like(f'%{lid}%'))
+                .order_by(JobRow.submitted_at.desc()).limit(20)
+            ).all()
+            for row in rows:
+                data = dict(row.data or {})
+                if linkedin_job_id(data.get('link') or row.normalized_url or '') == lid:
+                    return _normalize_job(data)
+        return None
+
     def claim_next_pending_job_for_scrape(self) -> dict | None:
         with session_scope(self.db_path) as session:
             row = session.scalar(

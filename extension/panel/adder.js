@@ -1,4 +1,4 @@
-/* "Add job" tab of the side panel — for job_adders (and admins).
+/* "Add Jobs" tab of the side panel — for job_adders (and admins).
  * - The current tab's URL is checked against TailorResume as soon as the tab is shown
  *   (same link / blacklist rules as saving), so a job that is already on file is
  *   flagged before anything is fetched.

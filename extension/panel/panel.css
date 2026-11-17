@@ -308,3 +308,14 @@ button.dl-btn:hover:not(:disabled) { background: #059669; box-shadow: 0 2px 8px 
 /* ── A newer version is installed (Load unpacked + the Windows updater) ──────── */
 .update-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 10px 0; padding: 7px 10px;
   border-radius: 10px; background: var(--success-bg); color: var(--success); font-size: 12.5px; font-weight: 500; }
+
+/* Easy Bids: the LinkedIn job on the tab (panel.js patchEasy) */
+.easy-job { font-size: 12.5px; line-height: 1.35; margin-bottom: 6px; overflow-wrap: anywhere; }
+.easy-line { font-size: 12px; line-height: 1.4; border-radius: 7px; padding: 6px 8px; margin-top: 4px; }
+.easy-line.muted { background: var(--panel-2); color: var(--text-soft); }
+.easy-line.ok { background: var(--success-bg); color: var(--success); }
+.easy-line.warn { background: var(--warning-bg); color: var(--warning); }
+.easy-line.error { background: var(--danger-bg); color: var(--danger); }
+.easy-line ul { margin: 4px 0 0 16px; padding: 0; }
+.easy-line .spinner { width: 11px; height: 11px; vertical-align: -2px; margin-right: 4px; }
+#easyCard .row { margin-top: 6px; }

@@ -1,4 +1,4 @@
-/* Page extractor for the Add job tab (ported from VPS1's Job Adder extension).
+/* Page extractor for the Add Jobs tab (ported from VPS1's Job Adder extension).
  *
  * extractJobFromPage() is injected into the ACTIVE TAB with chrome.scripting
  * (site access, on the user's click), so it must be fully

@@ -28,6 +28,7 @@ from core.job_questions import MAX_LEN, MAX_QUESTIONS, clean_questions, job_ques
 from core.ats_score import analyze_ats_score
 from core.docx_resume_export import build_docx_style_pdf_bundle
 from core.storage import normalize_job_url, tech_stacks_match
+from core import easy_apply
 
 router = APIRouter(prefix="/api/resumes", tags=["resumes"])
 
@@ -512,6 +513,7 @@ def _eligible_bid_items(
             "resume_id": (existing or {}).get("saved_resume_id", ""),
             "ats_score": (existing or {}).get("ats_score", 0),
             "ats": (existing or {}).get("ats") or None,
+            "apply_type": "easy" if easy_apply.is_easy_apply(job.get("link")) else "outside",
         })
     items.sort(key=lambda j: j.get("submitted_at") or "", reverse=True)
     return items
@@ -552,18 +554,20 @@ def _bid_public_profile(p: dict) -> dict:
     }
 
 
-def _is_linkedin(link: str) -> bool:
-    """A posting hosted on LinkedIn (Easy Apply happens there). The extension's Bid tab leaves
-    them out (skip_linkedin=1) — they get their own flow; the web Bid tab still lists them."""
-    try:
-        host = (urlsplit(str(link or "").strip()).hostname or "").lower()
-    except ValueError:
-        return False
-    return host == "linkedin.com" or host.endswith(".linkedin.com")
+def _split_apply_type(jobs: list[dict], skip_linkedin: bool, only_easy: bool) -> list[dict]:
+    """The extension's two bid tabs split the jobs by link (core/easy_apply.py): "Out Bids"
+    (skip_linkedin=1) gets the outside-apply jobs, "Easy Bids" (only_easy=1) the LinkedIn Easy
+    Apply ones. The web Bid tab passes neither and lists both."""
+    if only_easy:
+        return [j for j in jobs if easy_apply.is_easy_apply(j.get("link"))]
+    if skip_linkedin:
+        return [j for j in jobs if not easy_apply.is_easy_apply(j.get("link"))]
+    return jobs
 
 
 @router.get("/bid/profiles")
-def bid_profiles(user: dict = Depends(get_current_user), skip_linkedin: bool = Query(False)):
+def bid_profiles(user: dict = Depends(get_current_user), skip_linkedin: bool = Query(False),
+                 only_easy: bool = Query(False)):
     """Accessible profiles for the Bid tab — full copyable fields + to-bid count."""
     if not has_role(user, "admin", "bidder"):
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -576,9 +580,7 @@ def bid_profiles(user: dict = Depends(get_current_user), skip_linkedin: bool = Q
     # via the indexed profile_id column (≈50 rows each) rather than deserializing
     # all ~3.8k generated resumes per profile — together this took the Bid tab load
     # from ~20s to well under a second.
-    jobs = _biddable_jobs()
-    if skip_linkedin:
-        jobs = [j for j in jobs if not _is_linkedin(j.get("link"))]
+    jobs = _split_apply_type(_biddable_jobs(), skip_linkedin, only_easy)
     out = [
         {
             **_bid_public_profile(p),
@@ -592,14 +594,14 @@ def bid_profiles(user: dict = Depends(get_current_user), skip_linkedin: bool = Q
 
 
 @router.get("/bid")
-def bid_queue(profile_id: str, user: dict = Depends(get_current_user), skip_linkedin: bool = Query(False)):
-    """The ordered Bid queue (jobs to bid) for one profile. skip_linkedin=1: without LinkedIn postings."""
+def bid_queue(profile_id: str, user: dict = Depends(get_current_user), skip_linkedin: bool = Query(False),
+              only_easy: bool = Query(False)):
+    """The ordered Bid queue (jobs to bid) for one profile. skip_linkedin=1: outside-apply jobs only
+    (the extension's Out Bids); only_easy=1: LinkedIn Easy Apply jobs only (Easy Bids)."""
     if not has_role(user, "admin", "bidder"):
         raise HTTPException(status_code=403, detail="Forbidden")
     _check_profile_access(user, profile_id)
-    items = _eligible_bid_items(_get_profile(profile_id))
-    if skip_linkedin:
-        items = [it for it in items if not _is_linkedin(it.get("link"))]
+    items = _split_apply_type(_eligible_bid_items(_get_profile(profile_id)), skip_linkedin, only_easy)
     infos = storage.company_info_for_names([it["company"] for it in items])
     for it in items:
         it["company_info"] = infos.get(it["company"])
@@ -625,6 +627,130 @@ def bid_skip(body: dict, user: dict = Depends(get_current_user)):
                          reason=reason)
     cv_queue.close(storage.db_path, profile_id=profile_id, job_id=job_id)   # its ChatGPT conversation is deleted
     return {"ok": True}
+
+
+# ── Easy Bids: the LinkedIn Easy Apply job open in the bidder's tab ──────────────
+# One lock: two bidders opening the same new posting at once must not both add it.
+_easy_lock = threading.Lock()
+_EASY_REGIONS = {"US", "EU", "LATAM", "ANY"}
+
+
+def _easy_item(job: dict) -> dict:
+    """The job as a Bid-queue item (the panel's shape), plus its company info."""
+    company = job.get("company", "")
+    return {
+        "id": job.get("id", ""),
+        "company": company,
+        "job_title": job.get("job_title", ""),
+        "region": job.get("region", "ANY"),
+        "link": job.get("link", ""),
+        "submitted_at": job.get("submitted_at", ""),
+        "apply_type": "easy" if easy_apply.is_easy_apply(job.get("link")) else "outside",
+        "company_info": storage.company_info_for_names([company]).get(company),
+        "resume_id": "", "ats_score": 0, "ats": None,
+    }
+
+
+def _easy_profile_state(profile: dict, job: dict, item: dict) -> dict:
+    """Where this profile stands on the job: applied / skipped / can't take it (and why) / its CV."""
+    pid, jid = profile.get("id", ""), job.get("id", "")
+    mine = [r for r in storage.get_generated_resumes_for_profile(pid) if r.get("job_id") == jid]
+    applied = next((r for r in mine if r.get("applied_status") == "applied"), None)
+    built = [r for r in mine if r.get("status") == "generated"]
+    latest = max(built, key=lambda r: r.get("created_at") or "", default=None)
+    if latest:
+        item.update(resume_id=latest.get("saved_resume_id", ""), ats_score=latest.get("ats_score", 0),
+                    ats=latest.get("ats") or None)
+    problem = ""
+    if job.get("status") != "approved" or job.get("flagged") or job.get("admin_applied"):
+        problem = "This job is not open for bidding (it was reported, closed or is awaiting approval)."
+    elif not _regions_match(str(job.get("region") or "ANY").upper(), str(profile.get("region") or "ANY").upper()):
+        problem = f"Region mismatch: the job is {job.get('region') or 'ANY'}, {profile.get('name', 'this profile')} is {profile.get('region') or 'ANY'}."
+    elif not tech_stacks_match(job.get("description"), profile.get("tech_stacks") or []):
+        problem = (f"Tech-stack mismatch: none of {profile.get('name', 'this profile')}'s skills "
+                   f"({', '.join(profile.get('tech_stacks') or []) or '—'}) appear in this job.")
+    return {
+        "applied": bool(applied),
+        "applied_at": (applied or {}).get("applied_at", ""),
+        "skipped": jid in storage.skipped_bid_job_ids(pid),
+        "problem": problem,
+    }
+
+
+@router.post("/bid/easy")
+def bid_easy(body: dict, user: dict = Depends(get_current_user)):
+    """Easy Bids (the extension tab for LinkedIn Easy Apply): the job open in the bidder's LinkedIn
+    tab — check it against TailorResume first, and add it when it is new.
+
+    Body: {profile_id, link | linkedin_job_id, company, job_title, description, add (default true)}.
+    Duplicates are looked for first — the same LinkedIn posting (by its job id, however its link was
+    saved), then the same company + title. Found → that job. Not found and add → the SAME rules as
+    the Jobs tab's Add job (required fields, one job per company per region per month, blacklist),
+    then it is added (approved, the profile's region, link https://www.linkedin.com/jobs/view/<id>/).
+
+    Returns {state, match, job, profile, conflicts, message}:
+      existing | added → job (a Bid-queue item, with this profile's CV if it has one) and profile
+                         {applied, applied_at, skipped, problem} — problem: why no CV can be made
+      blocked          → conflicts (same company this month / blacklist), nothing added
+      invalid          → message (e.g. the description is too short), nothing added
+      not_found        → add was false and the posting is not on file"""
+    if not has_role(user, "admin", "bidder"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    body = body or {}
+    pid = str(body.get("profile_id") or "").strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="profile_id is required")
+    _check_profile_access(user, pid)
+    profile = _get_profile(pid)
+    lid = str(body.get("linkedin_job_id") or "").strip() or easy_apply.linkedin_job_id(str(body.get("link") or ""))
+    if not lid.isdigit():
+        raise HTTPException(status_code=400, detail="Not a LinkedIn job — Easy Bids works on LinkedIn job postings only.")
+    # Page text: collapse runs of whitespace, so "Backend  Engineer" finds "Backend Engineer".
+    company = " ".join(str(body.get("company") or "").split())
+    title = " ".join(str(body.get("job_title") or "").split())
+
+    from routers import jobs as J   # the Jobs tab's own submit rules (no import cycle: jobs never imports this)
+    with _easy_lock:
+        job, match = storage.find_job_by_linkedin_id(lid), "linkedin"
+        if not job and company and title:
+            job, match = storage.find_duplicate_job(company, title), "company_title"
+        if job:
+            item = _easy_item(job)
+            return {"state": "existing", "match": match, "job": item, "profile": _easy_profile_state(profile, job, item)}
+        if body.get("add") is False:
+            return {"state": "not_found"}
+
+        region = str(profile.get("region") or "ANY").strip().upper()
+        payload = {"company": company, "job_title": title, "link": easy_apply.canonical_link(lid),
+                   "region": region if region in _EASY_REGIONS else "ANY",
+                   "description": str(body.get("description") or "").strip(), "note": ""}
+        try:
+            payload = J._clean_job_fields(payload)
+        except HTTPException as exc:
+            return {"state": "invalid", "message": str(exc.detail)}
+        conflicts: list[dict] = []
+        try:
+            J._check_company_week(payload)
+        except HTTPException as exc:
+            conflicts.append(exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)})
+        reason = storage.job_block_reason(payload)
+        if reason is not None:
+            conflicts.append({"kind": "blacklist", "message": f"Blocked — {reason} (Settings → Blacklist)."})
+        if conflicts:
+            return {"state": "blocked", "conflicts": conflicts}
+
+        now = _utcnow_iso()
+        payload.update({
+            "id": storage.make_id("job"), "source": "easy_bids", "status": "approved",
+            "application_questions": [], "submitted_at": now, "approved_at": now,
+            "created_by_user_id": user["id"], "created_by_username": user.get("username", ""),
+            "approved_by_user_id": user["id"], "approved_by_username": user.get("username", ""),
+        })
+        if not storage.upsert_job(payload):
+            return {"state": "blocked", "conflicts": [{"kind": "blacklist", "message": "Blocked by the blacklist (Settings → Blacklist)."}]}
+        job = storage.get_job_by_id(payload["id"]) or payload
+    item = _easy_item(job)
+    return {"state": "added", "match": "", "job": item, "profile": _easy_profile_state(profile, job, item)}
 
 
 # ── Application questions: one shared list per job (core/job_questions.py) ──────

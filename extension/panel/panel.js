@@ -1,6 +1,11 @@
-/* TailorResume side panel. Tabs by role: "Bid" (bidders) and "Add job" (job_adders,
- * panel/adder.js); admins get both.
- * Bid — the Bid tab's flow docked beside the job page.
+/* TailorResume side panel. Tabs by role: "Out Bids" and "Easy Bids" (bidders) and "Add Jobs"
+ * (job_adders, panel/adder.js); admins get all three.
+ * Out Bids — jobs that apply on the company's own site, bid one after another from a queue.
+ * Easy Bids — LinkedIn Easy Apply jobs, the SAME view driven by the LinkedIn tab instead of a queue:
+ * the job open on LinkedIn is read (panel/linkedin.js), checked against TailorResume and added when
+ * new (POST /api/resumes/bid/easy), and its CV is made by ChatGPT and saved to Downloads by itself.
+ * The server splits the jobs by link (core/easy_apply.py): each job is in exactly one of the two.
+ * Out Bids — the Bid tab's flow docked beside the job page.
  * With ChatGPT connected (gpt/runner.js), the CV of the job on screen and the next ones is
  * written and built in the background, so opening a job shows its CV ready to download;
  * the job's application questions (shared by all bidders) are answered in the same
@@ -17,6 +22,7 @@
 import { request, getConfig, setSession, clearSession } from '../lib/api.js';
 import { requestSiteAccess, hasSiteAccess, autofillTab, collectAnswers } from './autofill-runner.js';
 import { createAdder } from './adder.js';
+import { linkedinJobId, readLinkedInJob } from './linkedin.js';
 import { gpt, gptSnapshot, onGptChange, requestChatAccess, threadKey } from '../gpt/client.js';
 import { UPDATE_KEY, diskVersion } from '../lib/self-update.js';
 
@@ -58,10 +64,14 @@ const I = {
 };
 
 // ---------- state ----------
+const freshEasy = () => ({ state: 'idle', lid: '', tabId: null, profileId: '', page: null, res: null, error: '' });
 const S = {
   screen: 'loading', user: null,
-  mode: '',            // the tab on screen: '' | bid | add
-  bidStarted: false,   // the Bid view loads on its first show (it opens a job tab when it loads)
+  mode: '',            // the tab on screen: '' | bid (Out Bids) | easy (Easy Bids) | add (Add Jobs)
+  bidView: '',         // which of bid / easy the shared bid view holds now ('' = not loaded yet)
+  easy: freshEasy(),   // Easy Bids: the LinkedIn job on the tab — see easyCheck()
+  extraJob: null,      // Easy Bids: the current job when it is not in the queue (e.g. a stack the queue filters out)
+  autoDl: '',          // Easy Bids: "<job>|<resume>" last saved to Downloads by itself
   gptSnap: null,       // the ChatGPT connection's state + threads, mirrored from chrome.storage
   questions: [],       // the job's application questions (shared by every bidder)
   answers: [],         // this CV's answers to them
@@ -94,9 +104,9 @@ async function api(path, opts) {
   }
 }
 
-// LinkedIn-hosted postings (Easy Apply) are left out of the panel's Bid queue — they get a
-// flow of their own. The web Bid tab still lists them.
-const BID_QUERY = 'skip_linkedin=1';
+// The server splits the jobs by link: Out Bids gets the outside-apply ones, Easy Bids the LinkedIn
+// Easy Apply ones (core/easy_apply.py). The web Bid tab lists both.
+const bidQuery = () => (S.mode === 'easy' ? 'only_easy=1' : 'skip_linkedin=1');
 
 // Bid audit trail — the same actions the web Bid tab records.
 function track(action, job = currentJob()) {
@@ -109,7 +119,7 @@ function track(action, job = currentJob()) {
 
 // ---------- derived ----------
 const selectedProfile = () => S.profiles.find((p) => p.id === S.profileId) || null;
-const currentJob = () => S.queue.find((j) => j.id === S.jobId) || null;
+const currentJob = () => S.queue.find((j) => j.id === S.jobId) || (S.extraJob?.id === S.jobId && S.jobId ? S.extraJob : null);
 
 function comboMatches() {
   const q = S.combo.q.trim().toLowerCase();
@@ -181,6 +191,16 @@ chrome.tabs.onRemoved.addListener((id) => { if (id === jobTabId) setJobTab(null)
 
 async function showJob(job) {
   if (!job?.link) return;
+  if (S.mode === 'easy') {
+    // Easy Bids: on the LinkedIn tab (or a new one) — and it never becomes Out Bids' job tab, so
+    // switching to Out Bids can't navigate the bidder's LinkedIn search away.
+    try {
+      const active = await activeTab();
+      if (active?.id != null && isLinkedIn(active.url)) await chrome.tabs.update(active.id, { url: job.link });
+      else await chrome.tabs.create({ url: job.link, active: true });
+    } catch { /* tab closed mid-way */ }
+    return;
+  }
   try {
     const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
     const jobTab = jobTabId != null ? await chrome.tabs.get(jobTabId).catch(() => null) : null;
@@ -239,17 +259,22 @@ async function activeTab() {
 let panelWindowId = null;
 chrome.windows.getCurrent().then((w) => { panelWindowId = w.id; }).catch(() => {});
 async function followTab(tabId, url) {
-  if (S.screen !== 'main' || S.busy || S.fill.busy || !url) return;
+  if (S.screen !== 'main' || S.mode !== 'bid' || S.busy || S.fill.busy || !url) return;
   const job = jobForUrl(url);
   if (!job) return;
   setJobTab(tabId);                     // a tab showing a queued job is the job tab now
   if (job.id !== S.jobId) { await selectJob(job.id, { open: false }); toast(`Switched to ${job.company}`); }
 }
 chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
-  if (windowId === panelWindowId) chrome.tabs.get(tabId).then((t) => followTab(tabId, t.url)).catch(() => {});
+  if (windowId !== panelWindowId) return;
+  if (S.mode === 'easy') scheduleEasyCheck();
+  else chrome.tabs.get(tabId).then((t) => followTab(tabId, t.url)).catch(() => {});
 });
 chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
-  if (change.url && tab.active && tab.windowId === panelWindowId) followTab(tabId, change.url);
+  if (!tab.active || tab.windowId !== panelWindowId) return;
+  // LinkedIn is a single-page app: picking another job in its list changes only the URL.
+  if (S.mode === 'easy') { if (change.url || change.status === 'complete') scheduleEasyCheck(); }
+  else if (change.url) followTab(tabId, change.url);
 });
 
 // ---------- autofill ----------
@@ -389,7 +414,9 @@ async function login(identifier, password) {
 }
 
 function showLogin(note) {
-  Object.assign(S, { screen: 'login', mode: '', bidStarted: false, profiles: [], queue: [], jobId: '', job: null, resumeId: '', ats: null });
+  Object.assign(S, { screen: 'login', mode: '', bidView: '', profiles: [], queue: [], jobId: '', job: null, extraJob: null,
+    resumeId: '', ats: null, easy: freshEasy(), autoDl: '' });
+  easySeq++;
   adder = null;
   clearSession();
   renderLogin();
@@ -399,18 +426,23 @@ function showLogin(note) {
 // ---------- data ----------
 async function loadProfiles() {
   $('#main').innerHTML = '<div class="empty"><span class="spinner"></span></div>';
+  const view = S.bidView;
   let data;
-  try { data = await api(`/api/resumes/bid/profiles?${BID_QUERY}`); } catch (e) {
+  try { data = await api(`/api/resumes/bid/profiles?${bidQuery()}`); } catch (e) {
     if (e.status === 401) return;        // api() already showed the sign-in screen — don't cover it
+    if (S.bidView !== view) return;
     renderMain();
     if (e.status === 403) setError('The side panel is for bidders and admins.'); else showError(e);
     return;
   }
+  if (S.bidView !== view) return;        // switched to the other bid tab meanwhile — its load wins
   S.profiles = (data.profiles || []).filter((p) => p.status !== 'inactive');
   const { [PROFILE_KEY]: saved } = await chrome.storage.local.get(PROFILE_KEY);
   S.profileId = S.profiles.some((p) => p.id === saved) ? saved : (S.profiles[0]?.id || '');
   renderMain();
-  await loadQueue({ open: true });
+  // Out Bids opens the first job; Easy Bids never navigates — it reads the job on the LinkedIn tab.
+  await loadQueue({ open: S.mode === 'bid' });
+  if (S.mode === 'easy') scheduleEasyCheck(true);
 }
 
 // Re-read the to-bid counts and the queue in place — the current job, the pasted
@@ -419,16 +451,17 @@ async function refresh() {
   if (S.refreshing) return;
   S.refreshing = true; patchRefresh();
   try {
-    const pid = S.profileId;
-    const data = await api(`/api/resumes/bid/profiles?${BID_QUERY}`);
+    const pid = S.profileId, view = S.bidView;
+    const data = await api(`/api/resumes/bid/profiles?${bidQuery()}`);
+    if (S.profileId !== pid || S.bidView !== view) return;   // switched profile / tab meanwhile — that load wins
     S.profiles = (data.profiles || []).filter((p) => p.status !== 'inactive');
-    if (S.profileId !== pid) return;     // the bidder switched profile meanwhile — that load wins
     if (!S.profiles.some((p) => p.id === S.profileId)) {
       S.profileId = S.profiles[0]?.id || '';
       await chrome.storage.local.set({ [PROFILE_KEY]: S.profileId });
     }
     patchProfile(); patchCopy();
     await loadQueue();
+    if (S.mode === 'easy') scheduleEasyCheck(true);
     toast('Refreshed');
   } finally { S.refreshing = false; patchRefresh(); }
 }
@@ -442,11 +475,13 @@ async function selectProfile(id) {
   S.profileId = id;
   // Nothing of the previous profile may survive: its CV would otherwise be attached by Autofill
   // to a form being filled with the new profile's details.
-  Object.assign(S, { queue: [], jobId: '', job: null, resumeId: '', ats: null, atsScore: 0,
-    atsOpen: false, confirm: '', fill: { busy: '', report: null } });
-  patchCopy(); patchBuild();
+  Object.assign(S, { queue: [], jobId: '', job: null, extraJob: null, resumeId: '', ats: null, atsScore: 0,
+    atsOpen: false, confirm: '', fill: { busy: '', report: null }, autoDl: '', easy: freshEasy() });
+  easySeq++;
+  patchCopy(); patchBuild(); patchEasy();
   await chrome.storage.local.set({ [PROFILE_KEY]: id });
-  await loadQueue({ open: true });
+  await loadQueue({ open: S.mode === 'bid' });
+  if (S.mode === 'easy') scheduleEasyCheck(true);   // the same LinkedIn job, for this profile
 }
 
 // Reload the queue. The current job is kept when it's still there; otherwise the
@@ -454,19 +489,21 @@ async function selectProfile(id) {
 // Applied / Report / Skip the bidder lands on the next job.
 async function loadQueue({ open = false } = {}) {
   const prevIdx = S.queue.findIndex((j) => j.id === S.jobId);
-  const pid = S.profileId;
+  const pid = S.profileId, view = S.bidView;
   S.queueLoading = true; patchJob();
   let queue = [];
   try {
-    queue = pid ? await api(`/api/resumes/bid?profile_id=${encodeURIComponent(pid)}&${BID_QUERY}`) : [];
+    queue = pid ? await api(`/api/resumes/bid?profile_id=${encodeURIComponent(pid)}&${bidQuery()}`) : [];
   } catch (e) { if (S.profileId === pid) showError(e); }
-  // A late answer for a profile that is no longer selected must not replace the current queue.
-  if (S.profileId !== pid) return;
+  // A late answer for a profile (or bid tab) that is no longer selected must not replace the current queue.
+  if (S.profileId !== pid || S.bidView !== view) return;
   S.queue = queue;
   S.queueLoading = false;
   const p = selectedProfile(); if (p) p.bid_count = S.queue.length;
   patchProfile();
   if (S.queue.some((j) => j.id === S.jobId)) { patchJob(); patchBuild(); return; }
+  // Easy Bids: the current job follows the LinkedIn tab, never the queue's order.
+  if (S.mode === 'easy') { patchJob(); patchBuild(); return; }
   // The tab already shows a queued job (e.g. the panel opened mid-application): select
   // it instead of navigating the tab away from the bidder's work.
   const tab = open ? await activeTab() : null;
@@ -476,8 +513,9 @@ async function loadQueue({ open = false } = {}) {
   await selectJob(next?.id || '', { open });
 }
 
-async function selectJob(id, { open = true } = {}) {
-  const item = S.queue.find((j) => j.id === id) || null;
+async function selectJob(id, { open = true, item: given = null } = {}) {
+  const item = S.queue.find((j) => j.id === id) || (given?.id === id ? given : null);
+  S.extraJob = item && !S.queue.includes(item) ? item : null;
   Object.assign(S, {
     jobId: item ? id : '', job: null, confirm: '', atsOpen: false, fill: { busy: S.fill.busy, report: null },
     resumeId: item?.resume_id || '', ats: item?.ats || null, atsScore: item?.ats_score || 0,
@@ -491,6 +529,7 @@ async function selectJob(id, { open = true } = {}) {
   patchQA();
   gptPrepare();
   if (S.resumeId) loadAnswers();
+  maybeAutoDownload();
   try {
     const detail = await api(`/api/resumes/bid-job/${encodeURIComponent(id)}`);
     if (S.jobId === id) { S.job = detail; S.questions = detail.questions || []; patchJob(); patchQA(); }
@@ -527,7 +566,21 @@ async function generate() {
     if (S.jobId === jobId && S.profileId === profileId) Object.assign(S, { resumeId: rid, ats: fresh.ats, atsScore: fresh.ats_score });
     track('generate', job);
   } finally { S.busy = ''; patchBuild(); }
-  if (rid && S.jobId === jobId && S.resumeId === rid) await download();   // straight to Downloads, replacing
+  if (rid && S.jobId === jobId && S.resumeId === rid) {
+    S.autoDl = `${jobId}|${rid}`;          // (Easy Bids: this IS the automatic download)
+    await download();                      // straight to Downloads, replacing
+  }
+}
+
+// Easy Bids saves the current job's CV to Downloads by itself — once it is built, or at once when
+// the job already had one — so the file the bidder attaches on LinkedIn is THIS job's CV. Again on
+// coming back to a job (the file was replaced meanwhile); never twice in a row for the same CV.
+function maybeAutoDownload() {
+  if (S.mode !== 'easy' || !S.resumeId || !currentJob() || S.busy) return;
+  const key = `${S.jobId}|${S.resumeId}`;
+  if (S.autoDl === key) return;
+  S.autoDl = key;
+  download().catch(showError);
 }
 
 // Save the CV straight into Downloads, REPLACING a file of the same name — the bidder always
@@ -586,7 +639,13 @@ async function finish(kind, run, note) {
     // Done with this job: the server closes its queue row (its ChatGPT conversation gets deleted).
     if (gptOn()) gpt('sync').catch(() => {});
     setMessage(note(job));
-    await loadQueue({ open: true });
+    if (S.mode === 'easy') {
+      // Easy Bids stays on the bidder's LinkedIn search: the job is done, the next one is
+      // whichever they click there. (The card re-reads the tab: "Applied with …".)
+      S.jobId = ''; S.extraJob = null;
+      await loadQueue({ open: false });
+      scheduleEasyCheck(true);
+    } else await loadQueue({ open: true });
   } finally { S.busy = ''; S.confirm = ''; patchBuild(); }
 }
 
@@ -594,8 +653,8 @@ const markApplied = () => {
   const rid = S.resumeId;                // read before any await — it's THIS job's CV
   if (!rid) { setError('Generate the CV before marking applied.'); return; }
   return finish('apply', async (job) => {
-    // Learn from the form before the tab moves on to the next job.
-    await rememberAnswers({ silent: true });
+    // Learn from the form before the tab moves on to the next job (Out Bids — Easy Bids has no Autofill).
+    if (S.mode === 'bid') await rememberAnswers({ silent: true });
     track('mark_applied', job);
     await api(`/api/resumes/${encodeURIComponent(rid)}/apply`, { method: 'POST' });
   }, (job) => `Applied — ${job.company}.`);
@@ -647,11 +706,13 @@ function renderLogin() {
 const gptOn = () => !!S.gptSnap?.state.enabled;
 const currentThread = () => (S.gptSnap && S.profileId && S.jobId ? S.gptSnap.threads[threadKey(S.profileId, S.jobId)] || null : null);
 
-// The job on screen and the next ones without a CV (5 in all) are written ahead.
+// The job on screen and the next ones without a CV (5 in all) are written ahead. Easy Bids: only
+// the job on the LinkedIn tab — the next one is whichever the bidder clicks there.
 function gptPrepare() {
   if (!gptOn() || !S.profileId || !S.jobId) return;
   const i = Math.max(0, S.queue.findIndex((j) => j.id === S.jobId));
-  const jobs = S.queue.slice(i, i + 20).map((j) => ({ id: j.id, company: j.company, job_title: j.job_title }));
+  const list = S.mode === 'easy' ? [currentJob()].filter(Boolean) : S.queue.slice(i, i + 20);
+  const jobs = list.map((j) => ({ id: j.id, company: j.company, job_title: j.job_title }));
   // The server keeps the queue (3 ahead, skipping jobs with a CV); the worker is told to look.
   if (jobs.length) api('/api/gpt/prepare', { method: 'POST', body: { profile_id: S.profileId, jobs } }).then(() => gpt('sync')).catch(() => {});
 }
@@ -676,13 +737,14 @@ function adoptBuiltCvs() {
       current = true;
     }
   }
-  if (current) { patchBuild(); loadAnswers(); }
+  if (current) { patchBuild(); loadAnswers(); maybeAutoDownload(); }
 }
 let lastWant = '';
 onGptChange(async () => {
   S.gptSnap = await gptSnapshot();
   adoptBuiltCvs();
   patchGptLine();
+  patchEasy();
   // Answers landed (the thread's pending questions shrank): read them again.
   const t = currentThread(), want = JSON.stringify(t?.want || []);
   if (want !== lastWant && S.resumeId) { lastWant = want; loadAnswers(); }
@@ -810,6 +872,136 @@ function patchQA() {
   }).join('');
 }
 
+// ---------- Easy Bids: the LinkedIn Easy Apply job on the tab ----------
+// Whenever the tab shows a LinkedIn job (switching tabs, clicking a job in LinkedIn's list): read
+// it (company, title, description, its apply button), check it against TailorResume — the same
+// posting or company + title — and add it when it is new; then it becomes the current job and its
+// CV is written by ChatGPT and saved to Downloads by itself (maybeAutoDownload). Jobs this profile
+// can't take (applied, skipped, another region / stack, not Easy Apply, a duplicate) are only shown.
+const LINKEDIN_ORIGINS = ['https://www.linkedin.com/*', 'https://linkedin.com/*'];
+const hasLinkedInAccess = () => chrome.permissions.contains({ origins: [LINKEDIN_ORIGINS[0]] }).catch(() => false);
+const isLinkedIn = (url) => /^https:\/\/([^/]+\.)?linkedin\.com\//i.test(url || '');
+let easySeq = 0, easyTimer = 0;
+function scheduleEasyCheck(force = false) {
+  clearTimeout(easyTimer);
+  easyTimer = setTimeout(() => easyCheck({ force }).catch(showError), force ? 0 : 300);
+}
+function setEasy(patch) { Object.assign(S.easy, patch); patchEasy(); }
+
+async function easyCheck({ force = false } = {}) {
+  if (S.mode !== 'easy' || S.screen !== 'main' || !S.profileId) return;
+  const tab = await activeTab();
+  const url = tab?.url || tab?.pendingUrl || '';
+  const lid = linkedinJobId(url);
+  // Not on a LinkedIn job: say so, but keep the current job — the bidder may be in Downloads or Gmail.
+  if (!isLinkedIn(url)) { setEasy({ state: 'nolinkedin', lid: '', tabId: tab?.id ?? null }); return; }
+  if (!lid) { setEasy({ state: 'nojob', lid: '', tabId: tab.id }); return; }
+  const E = S.easy;
+  const settled = !['idle', 'nolinkedin', 'nojob', 'access', 'unreadable', 'error'].includes(E.state);
+  if (!force && settled && E.lid === lid && E.tabId === tab.id && E.profileId === S.profileId) return;   // this job is done
+  if (!(await hasLinkedInAccess())) { setEasy({ state: 'access', lid, tabId: tab.id }); return; }
+  const seq = ++easySeq, pid = S.profileId;
+  const stale = () => seq !== easySeq || S.profileId !== pid || S.mode !== 'easy';
+  setEasy({ state: 'reading', lid, tabId: tab.id, profileId: pid, page: null, res: null, error: '' });
+  let page = null;
+  try {
+    const [r] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: readLinkedInJob, args: [lid] });
+    page = r?.result || null;
+  } catch (e) {
+    if (!stale()) setEasy({ state: 'unreadable', error: String(e?.message || e) });
+    return;
+  }
+  if (stale()) return;                                    // the bidder clicked another job meanwhile
+  if (!page?.ready) { setEasy({ state: 'unreadable', page }); return; }
+  setEasy({ page });
+  // Easy Bids takes Easy Apply jobs only; one already applied to on LinkedIn is only looked up.
+  if (page.apply !== 'easy' && page.apply !== 'applied') { setEasy({ state: 'noteasy' }); if (!S.busy) followEasyJob(null); return; }
+  setEasy({ state: 'checking' });
+  let res;
+  try {
+    res = await api('/api/resumes/bid/easy', { method: 'POST', body: {
+      profile_id: pid, linkedin_job_id: lid, link: url, company: page.company, job_title: page.title,
+      description: page.description, add: page.apply === 'easy' } });
+  } catch (e) {
+    if (!stale()) { setEasy({ state: 'error', error: e?.message || String(e) }); if (e?.status === 0) showError(e); }
+    return;
+  }
+  if (stale()) return;
+  setEasy({ state: res.state === 'not_found' ? 'noteasy' : res.state, res });
+  const p = res.profile || {};
+  const biddable = (res.state === 'added' || res.state === 'existing') && !p.applied && !p.skipped && !p.problem;
+  // A CV still saving / a click in flight: the job changes the moment it ends (unless the tab moved on).
+  for (let i = 0; S.busy && i < 600; i++) { await new Promise((r) => setTimeout(r, 200)); if (stale()) return; }
+  await followEasyJob(biddable ? res.job : null);
+  if (res.state === 'added') loadQueue();                // the new job joins this profile's Easy Bids list
+}
+// The current job follows the LinkedIn tab: the job on it when this profile can bid it, else none.
+async function followEasyJob(item) {
+  if (S.busy) return;                                     // a request for the current job is in flight
+  if (!item) { if (S.jobId) await selectJob('', { open: false }); return; }
+  if (S.jobId === item.id) { maybeAutoDownload(); return; }
+  await selectJob(item.id, { open: false, item });
+  track('open_link', item);                               // the bidder has the posting open on LinkedIn
+}
+async function allowLinkedIn() {
+  const ok = await chrome.permissions.request({ origins: LINKEDIN_ORIGINS }).catch(() => false);   // first await of the click
+  if (!ok) { setError('Easy Bids reads the job on your LinkedIn tab — click Allow again and choose "Allow".'); return; }
+  scheduleEasyCheck(true);
+}
+
+function patchEasy() {
+  const el = $('#easyCard'); if (!el) return;
+  const E = S.easy, page = E.page, res = E.res, p = res?.profile || {};
+  const name = esc(selectedProfile()?.name || 'this profile');
+  const spin = '<span class="spinner"></span>';
+  const line = (cls, html) => `<div class="easy-line ${cls}">${html}</div>`;
+  const job = res?.job;
+  const what = page?.title ? `<div class="easy-job"><strong>${esc(page.company)}</strong> — ${esc(page.title)}${page.location ? ` <span class="muted">· ${esc(page.location)}</span>` : ''}</div>` : '';
+  let body = '';
+  switch (E.state) {
+    case 'idle': body = line('muted', `${spin} Looking at the tab…`); break;
+    case 'nolinkedin': body = line('muted', 'Open LinkedIn Jobs in this tab and click an <b>Easy Apply</b> job — it is checked, added and its CV made here.')
+      + '<div class="row"><button class="secondary sm" data-action="easyOpenLinkedIn">Open LinkedIn Easy Apply jobs</button></div>'; break;
+    case 'nojob': body = line('muted', 'Click a job in LinkedIn\'s list — the job on the right is picked up here.'); break;
+    case 'access': body = line('warn', 'Easy Bids reads the job open on your LinkedIn tab. Allow it once:')
+      + '<div class="row"><button class="sm" data-action="easyAllow">Allow reading LinkedIn</button></div>'; break;
+    case 'reading': body = line('muted', `${spin} Reading the job on LinkedIn…`); break;
+    case 'unreadable': body = line('warn', 'Couldn\'t read this job from the page yet — let it finish loading, then Retry.')
+      + '<div class="row"><button class="secondary sm" data-action="easyRetry">Retry</button></div>'; break;
+    case 'noteasy': body = what + line('warn', {
+      external: 'Not an Easy Apply job — it applies on the company\'s own site. Easy Bids is for Easy Apply only.',
+      closed: 'LinkedIn says this job is no longer accepting applications.',
+      applied: 'You already applied to this job on LinkedIn (it is not in TailorResume).',
+      none: 'No Easy Apply button on this job.',
+    }[page?.apply] || 'Not an Easy Apply job.'); break;
+    case 'checking': body = what + line('muted', `${spin} Checking TailorResume for duplicates…`); break;
+    case 'error': body = what + line('error', `Couldn't check this job — ${esc(E.error)}`)
+      + '<div class="row"><button class="secondary sm" data-action="easyRetry">Retry</button></div>'; break;
+    case 'invalid': body = what + line('error', `Not added — ${esc(res?.message || 'the job is incomplete')}`); break;
+    case 'blocked': body = what + line('error', `<strong>Not added — duplicate:</strong><ul>${(res?.conflicts || []).map((c) => `<li>${esc(c.message || c.kind)}</li>`).join('')}</ul>`); break;
+    case 'added': case 'existing': {
+      const head = E.state === 'added'
+        ? line('ok', `✓ Added to TailorResume · ${esc(job?.region || 'ANY')}`)
+        : line('muted', `Already in TailorResume${res.match === 'company_title' ? ' (same company + title)' : ''} — not added again.`);
+      let st;
+      if (p.applied) st = line('ok', `Applied with ${name}${p.applied_at ? ` on ${esc(String(p.applied_at).slice(0, 10))}` : ''} — nothing more to do.`);
+      else if (p.skipped) st = line('warn', `Skipped for ${name}.`);
+      else if (p.problem) st = line('warn', `${esc(p.problem)} No CV is made for ${name}.`);
+      else if (page?.apply === 'applied') st = line('warn', 'LinkedIn shows this job as applied — Mark as Applied below.');
+      else st = line('muted', S.resumeId ? `CV ready for ${name} — saved to Downloads.` : gptOn()
+        ? `ChatGPT is writing ${name}'s CV — it is saved to Downloads when ready.` : 'Connect ChatGPT below to make the CV automatically — or write it by hand.');
+      body = what + head + st;
+      break;
+    }
+  }
+  // CVs are written automatically only through ChatGPT — offer to connect even before the first job.
+  const st = S.gptSnap?.state || {};
+  const connect = !st.enabled
+    ? `<div class="easy-line warn">CVs are written automatically by ChatGPT (a paid plan) — connect it once.</div>
+       <div class="row"><button class="sm" data-action="gptConnect">Connect ChatGPT</button></div>` : '';
+  el.innerHTML = `<div class="card-head"><span class="card-title">Easy Apply job</span><span class="muted small">auto-added · auto CV</span></div>${body}${connect}`;
+}
+
 // ---------- a newer version is on disk (the updater put it there) ----------
 async function patchUpdateBar() {
   const el = $('#updateBar'); if (!el) return;
@@ -821,13 +1013,14 @@ async function patchUpdateBar() {
 chrome.storage.onChanged.addListener((ch, area) => { if (area === 'local' && UPDATE_KEY in ch) patchUpdateBar(); });
 
 // ---------- tabs by role ----------
-// Bid: bidders and admins (the Bid API's own rule). Add job: job_adders and admins
-// (the Jobs API's rule). Someone with both gets both tabs; the last one used is kept.
+// Out Bids / Easy Bids: bidders and admins (the Bid API's own rule). Add Jobs: job_adders and
+// admins (the Jobs API's rule). The last tab used is kept. (Ids stay bid / add: saved choices.)
 const MODE_KEY = 'panelMode';
 const hasRole = (u, ...roles) => !!u && (roles.includes('admin') && u.is_admin || roles.some((r) => (u.roles || []).includes(r)));
 const MODES = [
-  { id: 'bid', label: 'Bid', allowed: (u) => hasRole(u, 'admin', 'bidder') },
-  { id: 'add', label: 'Add job', allowed: (u) => hasRole(u, 'admin', 'job_adder') },
+  { id: 'bid', label: 'Out Bids', allowed: (u) => hasRole(u, 'admin', 'bidder') },
+  { id: 'easy', label: 'Easy Bids', allowed: (u) => hasRole(u, 'admin', 'bidder') },
+  { id: 'add', label: 'Add Jobs', allowed: (u) => hasRole(u, 'admin', 'job_adder') },
 ];
 const availableModes = () => MODES.filter((m) => m.allowed(S.user)).map((m) => m.id);
 
@@ -853,7 +1046,7 @@ async function startMain() {
   renderFrame(modes);
   patchUpdateBar();
   const { [MODE_KEY]: saved } = await chrome.storage.local.get(MODE_KEY).catch(() => ({}));
-  // The Autofill shortcut was pressed on a job page: that is Bid's job.
+  // The Autofill shortcut was pressed on a job page: that is Out Bids' job.
   const { [AUTOFILL_REQ]: req } = await chrome.storage.session.get(AUTOFILL_REQ).catch(() => ({}));
   const mode = req && modes.includes('bid') ? 'bid' : (modes.includes(saved) ? saved : modes[0]);
   await setMode(mode);
@@ -884,21 +1077,31 @@ function renderFrame(modes) {
   };
 }
 
+// Out Bids and Easy Bids share one view (#bidView): the same cards, for the outside-apply jobs or
+// the Easy Apply ones. Switching between them starts the view fresh for the other kind of job.
 async function setMode(mode) {
   if (!availableModes().includes(mode)) return;
   S.mode = mode;
   chrome.storage.local.set({ [MODE_KEY]: mode }).catch(() => {});
   document.querySelectorAll('.modes .mode').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.mode === mode)));
-  $('#bidView').hidden = mode !== 'bid';
+  const bidLike = mode === 'bid' || mode === 'easy';
+  $('#bidView').hidden = !bidLike;
   $('#addView').hidden = mode !== 'add';
   if (mode !== 'add') adder?.hide();   // its tab-URL checks run only while it is on screen
-  if (mode === 'bid' && !S.bidStarted) {
-    S.bidStarted = true;
-    renderMain(); loadShortcut();
+  if (bidLike && S.bidView !== mode) {
+    const first = !S.bidView;
+    S.bidView = mode;
+    Object.assign(S, { queue: [], jobId: '', job: null, extraJob: null, resumeId: '', ats: null, atsScore: 0, atsOpen: false,
+      confirm: '', fill: { busy: '', report: null }, questions: [], answers: [], qaDraft: null, manual: false,
+      autoDl: '', easy: freshEasy() });
+    easySeq++;
+    pdfCache = { id: '', promise: null, url: '' };
+    renderMain();
+    if (first) loadShortcut();
     await loadProfiles();
   } else if (mode === 'add') {
     await getAdder().show($('#addView'));
-  }
+  } else if (mode === 'easy') scheduleEasyCheck(true);
 }
 
 function renderNoAccess() {
@@ -925,6 +1128,7 @@ function renderMain() {
           <button class="icon secondary" id="refreshBtn" data-action="refresh" title="Refresh profiles and jobs">${I.refresh}</button>
         </div>
         <section class="card" id="copyCard"></section>
+        ${S.mode === 'easy' ? '<section class="card" id="easyCard"></section>' : ''}
       </div>
       <div class="col">
         <section class="card" id="jobCard">
@@ -941,7 +1145,7 @@ function renderMain() {
     </main>`;
   $('#profileSelect').addEventListener('change', (e) => { setError(''); setMessage(''); selectProfile(e.target.value); });
   wireCombo();
-  patchAlerts(); patchProfile(); patchJob(); patchBuild(); patchCopy(); patchQA();
+  patchAlerts(); patchProfile(); patchJob(); patchBuild(); patchCopy(); patchQA(); patchEasy();
 }
 
 // The job box shows the current job ("Company — Title") until you click into it;
@@ -988,14 +1192,14 @@ function patchAlerts() {
 function patchProfile() {
   const sel = $('#profileSelect'); if (!sel) return;
   sel.innerHTML = S.profiles.length
-    ? S.profiles.map((p) => `<option value="${esc(p.id)}" ${p.id === S.profileId ? 'selected' : ''}>${esc(p.name)} · ${p.bid_count ?? 0} to bid</option>`).join('')
+    ? S.profiles.map((p) => `<option value="${esc(p.id)}" ${p.id === S.profileId ? 'selected' : ''}>${esc(p.name)} · ${p.bid_count ?? 0} ${S.mode === 'easy' ? 'Easy Apply ' : ''}to bid</option>`).join('')
     : '<option>No profiles assigned to you</option>';
   patchLocks();
 }
 
 function patchCombo() {
   const list = $('#jobList'), input = $('#jobSearch'); if (!list) return;
-  input.placeholder = S.queueLoading ? 'Loading jobs…' : `Search ${S.queue.length} job${S.queue.length === 1 ? '' : 's'} by company or title…`;
+  input.placeholder = S.queueLoading ? 'Loading jobs…' : `Search ${S.queue.length} ${S.mode === 'easy' ? 'Easy Apply ' : ''}job${S.queue.length === 1 ? '' : 's'} by company or title…`;
   patchLocks();
   if (document.activeElement !== input) input.value = jobLabel(currentJob());
   list.hidden = !S.combo.open || !S.queue.length;
@@ -1022,7 +1226,8 @@ function patchJob() {
   const el = $('#jobLine'); if (!el) return;
   const j = currentJob();
   if (!j) {
-    el.innerHTML = `<div class="empty">${S.queueLoading ? '<span class="spinner"></span>' : (S.profileId ? 'No jobs left to bid for this profile.' : '')}</div>`;
+    el.innerHTML = `<div class="empty">${S.queueLoading ? '<span class="spinner"></span>' : !S.profileId ? ''
+      : S.mode === 'easy' ? 'No job selected — click an Easy Apply job on LinkedIn, or pick one above.' : 'No jobs left to bid for this profile.'}</div>`;
     return;
   }
   const info = S.job?.company_info || j.company_info;
@@ -1064,7 +1269,8 @@ function patchBuild() {
   const el = $('#buildCard'); if (!el) return;
   const j = currentJob();
   el.hidden = !j;
-  if (!j) return;
+  // No job (Easy Bids between jobs, or an empty queue): still unlock the pickers and drop the preview.
+  if (!j) { patchPreview(); patchLocks(); patchEasy(); return; }
   const prev = $('#jsonInput')?.value ?? '';
   // Reasons typed into an open Report / Skip box survive a re-render (e.g. a refresh).
   const reasons = {};
@@ -1119,6 +1325,7 @@ function patchBuild() {
   if (S.confirm === 'skip' && !b && !reasons.skipReason) $('#skipReason')?.focus();
   patchPreview();
   patchLocks();
+  patchEasy();
 }
 
 // The generated CV, previewed at the bottom of the panel (Chrome's PDF viewer, from
@@ -1173,7 +1380,7 @@ async function takeAutofillRequest() {
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === 'autofill' && S.screen === 'main' && availableModes().includes('bid')) {
     (async () => {
-      if (S.mode !== 'bid') await setMode('bid');   // Autofill belongs to the Bid tab
+      if (S.mode !== 'bid') await setMode('bid');   // Autofill belongs to the Out Bids tab
       if (await takeAutofillRequest() && !S.fill.busy) await autofill({ fromShortcut: true });
     })().catch(showError);
   }
@@ -1185,6 +1392,13 @@ function patchCopy() {
   el.hidden = !p;
   if (!p) return;
   const { busy, report } = S.fill, spin = '<span class="spinner"></span>';
+  const grid = `<div class="copy-grid">${copyFields(p).map(([label, value, icon], i) => `
+      <span class="copy-cell"><button class="copy-btn" data-action="copyField" data-i="${i}" ${value ? '' : 'disabled'} title="${esc(label)}${value ? ': ' + esc(value) : ' — not set'}" aria-label="Copy ${esc(label)}">${icon}</button><span class="lbl">${esc(label)}</span></span>`).join('')}</div>`;
+  if (S.mode === 'easy') {   // Easy Apply is filled on LinkedIn: click-to-copy details only, no Autofill / Remember
+    el.innerHTML = `<div class="card-head"><span class="card-title ellipsis" title="${esc(p.name)} Details">${esc(p.name)} Details</span></div>${grid}`;
+    patchLocks();
+    return;
+  }
   const CV_NOTE = { attached: 'CV attached', already: 'CV already attached', missing: 'generate the CV to attach it', failed: 'attach the CV by hand' };
   const required = (report?.unfilled || []).filter((u) => u.required);
   const optional = (report?.unfilled || []).length - required.length;
@@ -1205,8 +1419,7 @@ function patchCopy() {
         ${optional ? `<div class="muted small">${optional} optional field${optional === 1 ? '' : 's'} left empty</div>` : ''}
         ${report.note ? `<div class="small" style="color:var(--warning)">${esc(report.note)}</div>` : ''}
       </div>` : ''}
-    <div class="copy-grid">${copyFields(p).map(([label, value, icon], i) => `
-      <span class="copy-cell"><button class="copy-btn" data-action="copyField" data-i="${i}" ${value ? '' : 'disabled'} title="${esc(label)}${value ? ': ' + esc(value) : ' — not set'}" aria-label="Copy ${esc(label)}">${icon}</button><span class="lbl">${esc(label)}</span></span>`).join('')}</div>`;
+    ${grid}`;
   patchLocks();
 }
 
@@ -1257,6 +1470,9 @@ async function onClick(e) {
       case 'setShortcut': e.preventDefault(); await chrome.tabs.create({ url: 'chrome://extensions/shortcuts' }); break;
       case 'skipReason': { const ta = $('#skipReason'); if (ta) { ta.value = t.dataset.r; ta.focus(); } break; }
       case 'autofill': await autofill(); break;
+      case 'easyAllow': await allowLinkedIn(); break;
+      case 'easyRetry': scheduleEasyCheck(true); break;
+      case 'easyOpenLinkedIn': await chrome.tabs.create({ url: 'https://www.linkedin.com/jobs/search/?f_AL=true' }); break;
       case 'remember': await rememberAnswers(); break;
       case 'copyField': {
         const f = copyFields(selectedProfile())[Number(t.dataset.i)];

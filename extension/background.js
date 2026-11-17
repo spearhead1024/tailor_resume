@@ -1,4 +1,4 @@
-// Service worker (module). The extension is the docked side panel (Bid / Add job tabs) —
+// Service worker (module). The extension is the docked side panel (Out Bids / Easy Bids / Add Jobs tabs) —
 // the panel (panel/panel.js) talks to the API itself via lib/api.js. The worker makes the
 // toolbar button open that panel, relays the Autofill shortcut, runs the ChatGPT connection
 // (gpt/runner.js — ChatGPT in hidden frames, even while the panel is closed) and restarts a
