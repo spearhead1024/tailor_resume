@@ -1,6 +1,6 @@
 {
-  "version": "1.4.1",
+  "version": "1.5.0",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "v1.4.1 \u2014 Easy Bids checks first, adds on Gen CV: when the LinkedIn tab shows another job it is read and checked for duplicates (same LinkedIn job id, same company + title, same company this month) \u2014 nothing is added and no CV is written just by looking. Easy Apply jobs only. The new Gen CV button adds the job if it is new (stored with its https://www.linkedin.com/jobs/view/<id>/ link), has ChatGPT write the CV and saves it to Downloads by itself \u2014 at once when the job already has a CV.",
-  "built_at": "2026-11-17T13:03:45Z"
+  "changelog": "v1.5.0 \u2014 One extension: LinkedIn's classic job search is now kept by TailorResume itself (merged from Classic Job Search Keeper \u2014 remove that extension). When LinkedIn opens its AI job search, the tab goes back to the classic search with your last classic filters; never while an application form is open; after 2 tries LinkedIn's AI search is left alone for 10 minutes. In Easy Bids: one switch, your saved search and Open saved search.",
+  "built_at": "2026-11-17T13:21:55Z"
 }
