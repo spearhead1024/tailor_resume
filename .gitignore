@@ -14,6 +14,7 @@ requirements.md
 .vscode
 tmp/backend/.env
 backend/.env
+/.env
 data/extension/keys/
 # Web Push: the VAPID private key is a SECRET; subscriptions/state are per-deploy runtime data.
 data/vapid_private.pem
@@ -57,3 +58,5 @@ Fonts/
 
 # CI/CD deploy state + logs (ops/deploy.sh)
 data/deploy/
+
+
