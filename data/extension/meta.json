@@ -1,6 +1,6 @@
 {
-  "version": "1.10.0",
+  "version": "1.10.1",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "Out Bids: a fixed set of 3 jobs (no more jumps); ChatGPT project per profile (Settings); done chats deleted in their own tab",
-  "built_at": "2026-11-18T14:28:12Z"
+  "changelog": "Classic job search fixed: switches back from AI search even without the LinkedIn connection",
+  "built_at": "2026-11-18T14:45:13Z"
 }
