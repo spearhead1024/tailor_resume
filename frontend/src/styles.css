@@ -543,6 +543,8 @@ tbody tr:hover td { background: var(--panel-2); color: var(--text); }
   border: 1px solid var(--border);
   color: var(--muted);
 }
+.pill.apply-easy { background: var(--accent-glow); color: var(--st-info-fg); border-color: rgba(59,130,246,0.35); }
+.pill.apply-out  { background: var(--panel-2); color: var(--muted); border-color: var(--border); }
 .pill.approved { background: rgba(16,185,129,0.1); color: var(--st-success-fg); border-color: rgba(16,185,129,0.3); }
 .pill.pending  { background: rgba(245,158,11,0.1); color: var(--st-warning-fg); border-color: rgba(245,158,11,0.3); }
 .pill.rejected { background: rgba(239,68,68,0.1);  color: var(--st-danger-fg); border-color: rgba(239,68,68,0.3); }
@@ -753,6 +755,9 @@ tbody tr:hover td { background: var(--panel-2); color: var(--text); }
   display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 999px;
   font-size: 0.7rem; font-weight: 500; color: var(--muted); border: 1px solid var(--border);
 }
+.metrics-table .metrics-weekend { background: color-mix(in srgb, var(--panel-2) 55%, transparent); }
+.metrics-easy { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 999px; font-size: 0.7rem; font-weight: 600;
+  color: var(--st-info-fg); background: var(--accent-glow); vertical-align: 1px; }
 .metrics-grand-total td {
   background: var(--panel-3);
   color: var(--text);

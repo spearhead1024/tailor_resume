@@ -4,7 +4,8 @@ import { useUrlState, useOnChange } from '../lib/urlState';
 import { api } from '../api/client';
 import { useAuth, hasRole } from '../lib/auth';
 import { useToast } from '../lib/toast';
-import { etDateLong, etDateShort, etDateTime, etDateKey, todayETKey } from '../lib/etTime';
+import { etDateShort, etDateTime, workDayKey, workDayLong, todayWorkDayKey } from '../lib/etTime';
+import { ApplyBadge, ApplyTypeSelect } from '../lib/ApplyBadge';
 import CompanyBadge from '../lib/CompanyBadge';
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
@@ -48,8 +49,6 @@ function formatJobError(err: any, fallback: string): string {
   if (d && typeof d === 'object' && d.message) return d.message;
   return err?.message || fallback;
 }
-
-function formatDay(iso: string): string { return etDateLong(iso, 'Unknown date'); }
 
 // Status dropdown and Edit button share one size so the row's actions line up.
 const JOB_ACTION_CTRL: React.CSSProperties = {
@@ -142,9 +141,10 @@ export default function Jobs() {
   const [companyFilter, setCompanyFilter] = useUrlState('company', '');
   // Admin-only: one adder's jobs (the "Added by" column). ADDED_BY_NONE = jobs with no adder on record.
   const [addedByFilter, setAddedByFilter] = useUrlState('added_by', '');
-  // Default to today (ET) so the Jobs tab opens on today's intake.
-  const [dateFrom, setDateFrom] = useUrlState('from', todayETKey());
-  const [dateTo, setDateTo] = useUrlState('to', todayETKey());
+  // Dates are WORK DAYS (5pm JST → 5pm JST, like Metrics and Applied). Default: today's intake.
+  const [dateFrom, setDateFrom] = useUrlState('from', todayWorkDayKey());
+  const [dateTo, setDateTo] = useUrlState('to', todayWorkDayKey());
+  const [applyFilter, setApplyFilter] = useUrlState('apply', '');   // 'easy' / 'out' / '' = both
   const [reportedOnly, setReportedOnly] = useUrlState('reported', false);
   const [page, setPage] = useUrlState('page', 1);
   const [pageSize, setPageSize] = useUrlState('size', 20);
@@ -168,7 +168,7 @@ export default function Jobs() {
   }, [query]);
 
   // Back to page 1 whenever a filter changes (not on load — the URL's page stands).
-  useOnChange([debouncedQuery, statusFilter, regionFilter, companyFilter, addedByFilter, dateFrom, dateTo, reportedOnly, pageSize], () => setPage(1));
+  useOnChange([debouncedQuery, statusFilter, regionFilter, companyFilter, addedByFilter, dateFrom, dateTo, applyFilter, reportedOnly, pageSize], () => setPage(1));
 
   // Every filter EXCEPT Added by — also what the "Added by" counts are computed within, so each
   // option's count is exactly what picking it would list.
@@ -182,9 +182,10 @@ export default function Jobs() {
     if (debouncedQuery) sp.set('q', debouncedQuery);
     if (dateFrom) sp.set('date_from', dateFrom);
     if (dateTo) sp.set('date_to', dateTo);
+    if (applyFilter) sp.set('apply', applyFilter);
     if (reportedOnly) sp.set('reported', 'true');
     return sp.toString();
-  }, [statusFilter, regionFilter, companyFilter, debouncedQuery, dateFrom, dateTo, reportedOnly]);
+  }, [statusFilter, regionFilter, companyFilter, debouncedQuery, dateFrom, dateTo, applyFilter, reportedOnly]);
   const params = useMemo(() => {
     const sp = new URLSearchParams(filterParams);
     if (isAdmin && addedByFilter) sp.set('added_by', addedByFilter);
@@ -303,11 +304,11 @@ export default function Jobs() {
   };
   const bulkDelete = () => { if (!confirm(`Delete ${selected.size} selected job(s)?`)) return; runBulk('Deleted', (id) => api.delete(`/api/jobs/${id}`)); };
 
-  // Group the current page by the day each job was added (ET).
+  // Group the current page by the WORK DAY each job was added (5pm JST → 5pm JST, like Metrics).
   const groups = useMemo(() => {
     const keyOf = (job: any): { key: string; label: string } => {
-      const ts = job.submitted_at || job.approved_at || '';
-      return { key: etDateKey(ts), label: formatDay(ts) };
+      const key = workDayKey(job.submitted_at || job.approved_at || '');
+      return { key, label: workDayLong(key) };
     };
     const out: { key: string; label: string; jobs: any[] }[] = [];
     for (const job of jobs) {
@@ -355,14 +356,14 @@ export default function Jobs() {
 
   // "Today" resets dates to today (the default view); "all dates" clears them.
   function resetToToday() {
-    setQuery(''); setRegionFilter(''); setCompanyFilter(''); setAddedByFilter('');
-    setDateFrom(todayETKey()); setDateTo(todayETKey());
+    setQuery(''); setRegionFilter(''); setCompanyFilter(''); setAddedByFilter(''); setApplyFilter('');
+    setDateFrom(todayWorkDayKey()); setDateTo(todayWorkDayKey());
   }
   function showAllDates() { setDateFrom(''); setDateTo(''); }
 
-  const today = todayETKey();
+  const today = todayWorkDayKey();
   const isTodayOnly = dateFrom === today && dateTo === today;
-  const hasExtraFilters = !!(regionFilter || companyFilter || addedByFilter || query || !isTodayOnly);
+  const hasExtraFilters = !!(regionFilter || companyFilter || addedByFilter || applyFilter || query || !isTodayOnly);
 
   return (
     <div>
@@ -400,6 +401,7 @@ export default function Jobs() {
           <option value="">All regions</option>
           <RegionOptions />
         </select>
+        <ApplyTypeSelect value={applyFilter} onChange={setApplyFilter} style={{ ...FILTER, width: 112 }} />
         {isAdmin && <label htmlFor="jobs-added-by" style={FILTER_LABEL}>Added by</label>}
         {isAdmin && (
           <select id="jobs-added-by" value={addedByFilter} onChange={(e) => setAddedByFilter(e.target.value)}
@@ -430,12 +432,12 @@ export default function Jobs() {
           </span>
         )}
         <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} style={{ ...FILTER, width: 130 }}
-          title="Added from (ET date)" aria-label="Added from" />
+          title="Added from — a work day: 5pm JST → 5pm JST, the same day as Metrics and Applied" aria-label="Added from" />
         <span style={FILTER_LABEL}>–</span>
         <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} style={{ ...FILTER, width: 130 }}
-          title="Added to (ET date)" aria-label="Added to" />
+          title="Added to — a work day: 5pm JST → 5pm JST, the same day as Metrics and Applied" aria-label="Added to" />
         <button className={isTodayOnly ? '' : 'secondary'} onClick={resetToToday}
-          style={FILTER_BTN} title="Show only today's jobs (ET)">Today</button>
+          style={FILTER_BTN} title="Show only today's jobs (today's work day: since 5pm JST)">Today</button>
         {(dateFrom || dateTo) && (
           <button className="secondary" onClick={showAllDates} style={FILTER_BTN} title="Remove the date filter">All dates</button>
         )}
@@ -550,7 +552,7 @@ export default function Jobs() {
                     onChange={toggleAll} />
                 </th>
               )}
-              <th>Company</th><th style={{ width: '22%' }}>Job title</th><th>Region</th><th>Status</th>
+              <th>Company</th><th style={{ width: '22%' }}>Job title</th><th>Region</th><th>Apply</th><th>Status</th>
               <th style={{ whiteSpace: 'nowrap' }}>AddedAt</th>
               {isAdmin && <th style={{ whiteSpace: 'nowrap' }}>Added by</th>}
               {isAdmin && <th></th>}
@@ -560,7 +562,7 @@ export default function Jobs() {
             {groups.map((group) => (
               <React.Fragment key={group.key}>
                 <tr>
-                  <td colSpan={isAdmin ? 8 : 5} style={{
+                  <td colSpan={isAdmin ? 9 : 6} style={{
                     padding: '0.5rem 0.75rem', fontWeight: 600, fontSize: '0.85rem',
                     color: 'var(--muted)', background: 'var(--panel-2)', borderTop: '2px solid var(--border)',
                   }}>
@@ -587,6 +589,7 @@ export default function Jobs() {
                       </td>
                       <td style={{ maxWidth: 260, overflowWrap: 'anywhere' }}>{job.link ? <a href={job.link} target="_blank" rel="noreferrer">{job.job_title}</a> : job.job_title}</td>
                       <td>{job.region}</td>
+                      <td><ApplyBadge type={job.apply_type} /></td>
                       <td><span className={`pill ${job.status}`}>{job.status}</span></td>
                       <td style={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }} title="US Eastern time">{etDateTime(job.submitted_at || job.approved_at)}</td>
                       {isAdmin && (
@@ -619,7 +622,7 @@ export default function Jobs() {
                     </tr>
                     {job.flagged && (job.reports?.length || 0) > 0 && (
                       <tr>
-                        <td colSpan={isAdmin ? 8 : 5} style={{ padding: '0.75rem 1rem', background: 'rgba(220,38,38,0.06)', borderBottom: '1px solid var(--border)' }}>
+                        <td colSpan={isAdmin ? 9 : 6} style={{ padding: '0.75rem 1rem', background: 'rgba(220,38,38,0.06)', borderBottom: '1px solid var(--border)' }}>
                           <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: 12 }}>
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <div style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--danger,#dc2626)', marginBottom: 4 }}>
@@ -656,7 +659,7 @@ export default function Jobs() {
                     )}
                     {editingId === job.id && (
                       <tr>
-                        <td colSpan={isAdmin ? 8 : 5} style={{ padding: '1rem', background: 'var(--panel-2)' }}>
+                        <td colSpan={isAdmin ? 9 : 6} style={{ padding: '1rem', background: 'var(--panel-2)' }}>
                           <div className="row">
                             <div className="field"><label>Company{REQ}</label><input value={editDraft.company} onChange={(e) => setEditDraft({ ...editDraft, company: e.target.value })} /></div>
                             <div className="field"><label>Job title{REQ}</label><input value={editDraft.job_title} onChange={(e) => setEditDraft({ ...editDraft, job_title: e.target.value })} /></div>

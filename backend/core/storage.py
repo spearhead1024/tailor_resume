@@ -63,15 +63,33 @@ _ADDED_BY_SQL = JobRow.data['created_by_username'].as_string()
 ADDED_BY_NONE = '__none__'
 
 
+def _is_easy_link(link: str) -> bool:
+    from core.easy_apply import is_easy_apply
+    return is_easy_apply(link)
+
+
+def _easy_link_sql():
+    """SQL for core/easy_apply.is_easy_apply(job.link): a LinkedIn link naming a job (checked
+    equal to the Python rule on every job)."""
+    from sqlalchemy import func, or_
+    lk = func.lower(func.coalesce(JobRow.data['link'].as_string(), ''))
+    return lk.like('%linkedin.com/%') & or_(lk.like('%/jobs/view/%'), lk.like('%currentjobid=%'))
+
+
 def _job_filter_conditions(*, status: str = '', region: str = '', company: str = '', q: str = '',
                            date_from: datetime | None = None, date_to: datetime | None = None,
-                           reported: bool = False, created_by: str = '', added_by: str = '') -> list:
+                           reported: bool = False, created_by: str = '', added_by: str = '',
+                           apply_type: str = '') -> list:
     """SQL WHERE conditions for the Jobs tab's filters — shared by the job list, its status
     counts and the "Added by" counts, so every number on the tab means the same filtered set.
-    Dates are naive-UTC bounds: date_from inclusive, date_to exclusive."""
+    Dates are naive-UTC bounds: date_from inclusive, date_to exclusive. apply_type 'easy' / 'out':
+    LinkedIn Easy Apply jobs (a LinkedIn job link) or the others — core/easy_apply.is_easy_apply."""
     from sqlalchemy import func, or_
 
     conds = []
+    if apply_type in ('easy', 'out'):
+        easy = _easy_link_sql()
+        conds.append(easy if apply_type == 'easy' else ~easy)
     if status:
         conds.append(JobRow.status == status)
     if reported:
@@ -1920,6 +1938,7 @@ class Storage:
         reported: bool = False,
         created_by: str = '',
         added_by: str = '',
+        apply_type: str = '',
         page: int = 1,
         page_size: int = 20,
     ) -> dict:
@@ -1940,7 +1959,7 @@ class Storage:
             return _job_filter_conditions(
                 status=status if include_status else '', region=region, company=company, q=q,
                 date_from=date_from, date_to=date_to, reported=reported,
-                created_by=created_by, added_by=added_by)
+                created_by=created_by, added_by=added_by, apply_type=apply_type)
 
         page = max(1, int(page or 1))
         page_size = max(1, min(int(page_size or 20), 200))
@@ -1976,6 +1995,7 @@ class Storage:
                     'company': d.get('company', ''),
                     'job_title': d.get('job_title', ''),
                     'link': d.get('link', ''),
+                    'apply_type': 'easy' if _is_easy_link(d.get('link', '')) else 'out',
                     'region': d.get('region', 'ANY'),
                     'status': d.get('status', 'approved'),
                     'submitted_at': d.get('submitted_at', ''),
@@ -2020,6 +2040,12 @@ class Storage:
                 if v:
                     names.add(v)
         return names
+
+    def job_submitted_index(self) -> dict[str, str]:
+        """{job_id: submitted_at ISO} for every job — light (two columns), for day-of-adding filters."""
+        with session_scope(self.db_path) as session:
+            return {i: (t.strftime('%Y-%m-%dT%H:%M:%SZ') if t else '')
+                    for i, t in session.execute(select(JobRow.id, JobRow.submitted_at)).all()}
 
     def job_adders(self, **filters) -> list[dict]:
         """The Jobs tab's "Added by" options: everyone with a live account who added a job in the

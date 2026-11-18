@@ -63,3 +63,28 @@ export function userDateTime(iso: string, tz?: string, fallback = '—'): string
   try { return d.toLocaleString('en-US', { ...opts, timeZone: tz || undefined }); }
   catch { return d.toLocaleString('en-US', opts); }   // unknown zone id → browser zone
 }
+
+// ── The WORK DAY: 5pm JST → 5pm JST (08:00 UTC), labelled by the date it starts on ──
+// The one "day" every tab counts by — Metrics (backend routers/metrics.py `_metrics_day`), Applied
+// and Jobs — so a day's numbers agree from tab to tab. ("Mon 17" = Mon 17 5pm JST → Tue 18 5pm JST.)
+const WORK_DAY_START_UTC_MS = 8 * 3600_000;
+
+/** The work day ("YYYY-MM-DD") an instant falls in. */
+export function workDayKey(iso: string): string {
+  const d = safeDate(iso);
+  return d ? new Date(d.getTime() - WORK_DAY_START_UTC_MS).toISOString().slice(0, 10) : '';
+}
+
+/** Today's work day. */
+export function todayWorkDayKey(): string {
+  return new Date(Date.now() - WORK_DAY_START_UTC_MS).toISOString().slice(0, 10);
+}
+
+/** "Mon, November 17, 2026" for a work-day key. */
+export function workDayLong(key: string, fallback = 'Unknown date'): string {
+  const [y, m, d] = String(key || '').split('-').map(Number);
+  if (!y || !m || !d) return fallback;
+  return new Date(Date.UTC(y, m - 1, d, 12)).toLocaleDateString('en-US', {
+    timeZone: 'UTC', weekday: 'short', year: 'numeric', month: 'long', day: 'numeric',
+  });
+}

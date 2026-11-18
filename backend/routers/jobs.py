@@ -14,31 +14,27 @@ require_jobs_access = require_role("admin", "job_adder")
 from schemas import JobUpsertRequest
 from core.job_questions import clean_questions
 
-try:
-    from zoneinfo import ZoneInfo
-    _ET = ZoneInfo("America/New_York")
-except Exception:  # pragma: no cover
-    _ET = timezone(timedelta(hours=-5))  # type: ignore[arg-type]
 
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _et_date_to_utc(date_str: str, *, end: bool = False) -> datetime | None:
-    """Interpret a 'YYYY-MM-DD' string as an ET calendar date and return the
-    naive-UTC datetime for its start (or the start of the NEXT day if end)."""
+def _work_day_to_utc(date_str: str, *, end: bool = False) -> datetime | None:
+    """A 'YYYY-MM-DD' WORK DAY → its naive-UTC start (or the next day's start if end).
+
+    A work day runs 5pm JST → 5pm JST (08:00 UTC), labelled by the date it starts on — the same
+    day as the Metrics and Applied tabs (routers/metrics.py `_metrics_day`), so a day's numbers
+    agree on every tab."""
     s = str(date_str or "").strip()
     if not s:
         return None
     try:
         y, m, d = (int(x) for x in s.split("-"))
-        et_midnight = datetime(y, m, d, tzinfo=_ET)
+        start = datetime(y, m, d, 8, 0)          # 5pm JST = 08:00 UTC
     except (ValueError, TypeError):
         return None
-    if end:
-        et_midnight = et_midnight + timedelta(days=1)
-    return et_midnight.astimezone(timezone.utc).replace(tzinfo=None)
+    return start + timedelta(days=1) if end else start
 
 
 # Guards against overlapping manual + scheduled sync runs.
@@ -201,6 +197,7 @@ def list_jobs(
     date_to: str = Query(""),
     reported: bool = Query(False),
     added_by: str = Query(""),
+    apply: str = Query(""),        # 'easy' (LinkedIn Easy Apply) / 'out' / '' = both
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     user: dict = Depends(get_current_user),
@@ -220,9 +217,10 @@ def list_jobs(
         region=region,
         company=company,
         q=q,
-        date_from=_et_date_to_utc(date_from),
-        date_to=_et_date_to_utc(date_to, end=True),
+        date_from=_work_day_to_utc(date_from),
+        date_to=_work_day_to_utc(date_to, end=True),
         reported=reported,
+        apply_type=apply,
         created_by=created_by,
         added_by=added_by if is_admin else "",   # a job_adder's list is already just their own
         page=page,
@@ -239,6 +237,7 @@ def list_job_adders(
     date_from: str = Query(""),
     date_to: str = Query(""),
     reported: bool = Query(False),
+    apply: str = Query(""),
     user: dict = Depends(require_role("admin")),
 ):
     """Options for the Jobs tab's "Added by" filter: [{name, count}], counted within the same
@@ -246,8 +245,8 @@ def list_job_adders(
     that adder would show. name '' = no adder on record. Admin only, like the Added by column."""
     return storage.job_adders(
         status=status, region=region, company=company, q=q,
-        date_from=_et_date_to_utc(date_from), date_to=_et_date_to_utc(date_to, end=True),
-        reported=reported)
+        date_from=_work_day_to_utc(date_from), date_to=_work_day_to_utc(date_to, end=True),
+        reported=reported, apply_type=apply)
 
 
 @router.post("/sync-now")

@@ -30,7 +30,8 @@ function saveHiddenUsers(ids: string[]) {
 // One-time cleanup: drop the legacy keys so they can't linger.
 try { for (const k of ['metrics_selected_users', 'metrics_hidden_users_v2']) localStorage.removeItem(k); } catch { /* */ }
 
-type Cell = { applied: number; total: number };
+// easy: how many of `applied` went through LinkedIn Easy Apply.
+type Cell = { applied: number; total: number; easy?: number };
 type Row = {
   user_id: string;
   username: string;
@@ -41,7 +42,7 @@ type Row = {
   week: Cell;
   lifetime: Cell;
 };
-type JobCell = { uploaded: number; approved: number; rejected: number };
+type JobCell = { uploaded: number; approved: number; rejected: number; easy?: number };
 type JobRow = { user_id: string; username: string; daily: JobCell[]; week: JobCell; lifetime: JobCell };
 type MetricsResponse = {
   week_start: string;
@@ -108,12 +109,26 @@ function formatRange(start: string, end: string): string {
   return `${fmt(start)} – ${fmt(end)}`;
 }
 
+/** Saturday / Sunday (a "YYYY-MM-DD" day key). */
+function isWeekend(iso: string): boolean {
+  const [y, m, d] = iso.split('-').map(Number);
+  const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  return dow === 0 || dow === 6;
+}
+
+/** "E 3": how many went through LinkedIn Easy Apply (hidden when none). */
+function EasyTag({ n }: { n?: number }) {
+  if (!n) return null;
+  return <span className="metrics-easy" title={`${n} through LinkedIn Easy Apply`}>E {n}</span>;
+}
+
 function CellView({ cell }: { cell: Cell }) {
   const empty = cell.total === 0 && cell.applied === 0;
   return (
     <span style={{ fontVariantNumeric: 'tabular-nums', color: empty ? 'var(--muted)' : 'var(--text-soft)' }}>
       <strong style={{ color: cell.applied > 0 ? 'var(--text)' : 'var(--muted)' }}>{cell.applied}</strong>
       <span style={{ color: 'var(--muted)' }}> / {cell.total}</span>
+      <EasyTag n={cell.easy} />
     </span>
   );
 }
@@ -125,6 +140,7 @@ function JobCellView({ cell }: { cell: JobCell }) {
       <strong style={{ color: empty ? 'var(--muted)' : 'var(--text)' }}>{cell.uploaded}</strong>
       {cell.approved > 0 && <span style={{ color: 'var(--metric-ok, #16a34a)', marginLeft: 4 }}>✓{cell.approved}</span>}
       {cell.rejected > 0 && <span style={{ color: 'var(--metric-bad, #dc2626)', marginLeft: 4 }}>✗{cell.rejected}</span>}
+      <EasyTag n={cell.easy} />
     </span>
   );
 }
@@ -135,6 +151,7 @@ function sumApplied(cells: Cell[]): Cell {
   return {
     applied: cells.reduce((a, c) => a + c.applied, 0),
     total:   cells.reduce((a, c) => a + c.total, 0),
+    easy:    cells.reduce((a, c) => a + (c.easy || 0), 0),
   };
 }
 
@@ -307,6 +324,7 @@ export default function Metrics() {
       uploaded: cells.reduce((a, c) => a + c.uploaded, 0),
       approved: cells.reduce((a, c) => a + c.approved, 0),
       rejected: cells.reduce((a, c) => a + c.rejected, 0),
+      easy: cells.reduce((a, c) => a + (c.easy || 0), 0),
     });
     return {
       daily: Array.from({ length: days }, (_, i) => sumCells(jobRows.map((r) => r.daily[i]))),
@@ -326,9 +344,12 @@ export default function Metrics() {
   const allCols = leadCols + (showApps ? appCols : 0) + (showJobs ? jobCols : 0);
   const centered = { textAlign: 'center' as const };
   // The first column of the Jobs-added group carries the rule that separates the two groups.
-  const jobSec = (i: number) => (showApps && i === 0 ? 'metrics-sec' : undefined);
+  const jobSec = (i: number) => cls(showApps && i === 0 && 'metrics-sec', wk(i));
+  // Saturday / Sunday columns are shaded: jobs are added (and applied) on weekends too.
+  const wk = (i: number) => (i < nDays && isWeekend(data.days[i]) ? 'metrics-weekend' : '');
+  const cls = (...c: (string | undefined | false)[]) => c.filter(Boolean).join(' ') || undefined;
   const dayHeads = (sec: boolean) => data.days.map((d, i) => (
-    <th key={d} className={sec && i === 0 ? 'metrics-sec' : undefined} style={centered}>{shortDay(d)}</th>
+    <th key={d} className={cls(sec && i === 0 && 'metrics-sec', wk(i))} style={centered}>{shortDay(d)}</th>
   ));
   const jobCells = (r: JobRow | null, rowSpan: number) => r
     ? [...r.daily, r.week].map((c, i) => (
@@ -378,12 +399,12 @@ export default function Metrics() {
               {showApps && <th rowSpan={2}>Profile</th>}
               {showApps && (
                 <th colSpan={appCols} className="metrics-group-head">
-                  📨 Applications<small>applied / total To-Do</small>
+                  📨 Applications<small>applied / total To-Do · <span className="metrics-easy" style={{ marginLeft: 0 }}>E</span> = Easy Apply · by the day the job was added</small>
                 </th>
               )}
               {showJobs && (
                 <th colSpan={jobCols} className={`metrics-group-head${showApps ? ' metrics-sec' : ''}`}>
-                  📥 Jobs added<small>uploaded ( ✓ approved · ✗ rejected )</small>
+                  📥 Jobs added<small>uploaded ( ✓ approved · ✗ rejected · <span className="metrics-easy" style={{ marginLeft: 0 }}>E</span> Easy Apply )</small>
                 </th>
               )}
             </tr>
@@ -424,7 +445,7 @@ export default function Metrics() {
                         {r.profile_name}
                         {!r.assigned && <span className="metrics-tag">not assigned</span>}
                       </td>
-                      {r.daily.map((c, k) => <td key={k} style={centered}><CellView cell={c} /></td>)}
+                      {r.daily.map((c, k) => <td key={k} className={cls(wk(k))} style={centered}><CellView cell={c} /></td>)}
                       <td style={centered}><CellView cell={r.week} /></td>
                     </>
                   );
@@ -437,7 +458,7 @@ export default function Metrics() {
                   return (
                     <>
                       <td><em>{b.username} — total</em></td>
-                      {daily.map((c, k) => <td key={k} style={centered}><CellView cell={c} /></td>)}
+                      {daily.map((c, k) => <td key={k} className={cls(wk(k))} style={centered}><CellView cell={c} /></td>)}
                       <td style={centered}><CellView cell={sumApplied(b.apps.map((x) => x.week))} /></td>
                     </>
                   );
@@ -458,7 +479,7 @@ export default function Metrics() {
               <tr className="metrics-grand-total">
                 <td colSpan={leadCols}><strong>GRAND TOTAL</strong></td>
                 {showApps && (appsTotals
-                  ? <>{appsTotals.daily.map((c, i) => <td key={`a${i}`} style={centered}><CellView cell={c} /></td>)}
+                  ? <>{appsTotals.daily.map((c, i) => <td key={`a${i}`} className={cls(wk(i))} style={centered}><CellView cell={c} /></td>)}
                       <td style={centered}><CellView cell={appsTotals.week} /></td></>
                   : <td colSpan={appCols} />)}
                 {showJobs && (jobTotals

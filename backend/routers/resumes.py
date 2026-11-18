@@ -250,6 +250,8 @@ def search_applied_resumes(
     date_to: str = Query(""),
     tz: str = Query(""),          # IANA zone the dates are in (Applied: Etc/GMT-9, i.e. GMT+9)
     day_start: int = Query(0, ge=0, le=23),   # the hour a day starts at in `tz` (Applied: 17 = 5pm)
+    date_by: str = Query("applied"),   # 'applied' (the day it was applied) / 'added' (the day the JOB was added — Metrics' day)
+    apply: str = Query(""),            # 'easy' (LinkedIn Easy Apply) / 'out' / '' = both
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=200),
     user: dict = Depends(get_current_user),
@@ -275,6 +277,10 @@ def search_applied_resumes(
 
     ql = q.strip().lower()
     bl = bidder.strip().lower()
+    by_added = date_by == "added" and bool(date_from or date_to)
+    # The day each job was ADDED — what the Metrics grid buckets an apply by (its coverage of the
+    # day's intake). VPS_1's applies aren't in Metrics and have no local job, so they drop out.
+    added_at = storage.job_submitted_index() if by_added else {}
 
     rows: list[dict] = []
     facet_profiles: dict[str, str] = {}
@@ -298,7 +304,15 @@ def search_applied_resumes(
             continue
         if bl and who.lower() != bl:
             continue
-        applied_day = _et_day(r.get("applied_at") or r.get("created_at"), day_tz, day_start)
+        kind = "easy" if easy_apply.is_easy_apply(r.get("job_link") or "") else "out"
+        if apply in ("easy", "out") and kind != apply:
+            continue
+        if by_added:
+            applied_day = _et_day(added_at.get(r.get("job_id") or "", ""), day_tz, day_start)
+            if not applied_day:
+                continue
+        else:
+            applied_day = _et_day(r.get("applied_at") or r.get("created_at"), day_tz, day_start)
         if date_from and applied_day and applied_day < date_from:
             continue
         if date_to and applied_day and applied_day > date_to:
@@ -320,6 +334,8 @@ def search_applied_resumes(
             "job_title": r.get("job_title") or "",
             "job_link": r.get("job_link") or "",
             "job_region": r.get("job_region") or "",
+            "job_added_at": added_at.get(r.get("job_id") or "", "") if by_added else "",
+            "apply_type": kind,
             "profile_id": pid,
             "profile_name": profiles.get(pid, {}).get("name", ""),
             "bidder": who,
@@ -337,6 +353,7 @@ def search_applied_resumes(
         # both sources.
         for a in storage.get_vps1_applications(status="applied"):
             row = vps1_adapt.applied_row(a)
+            row["apply_type"] = "easy" if easy_apply.is_easy_apply(row.get("job_link") or "") else "out"
             who = str(row["bidder"]).strip()
 
             # facets first (built from the full applied set, like the local loop above)
@@ -346,6 +363,10 @@ def search_applied_resumes(
                 facet_bidders.add(who)
 
             # filters — same semantics as the local block
+            if by_added:
+                continue
+            if apply in ("easy", "out") and row["apply_type"] != apply:
+                continue
             if profile_id and row["profile_id"] != profile_id:
                 continue
             if bl and who.lower() != bl:

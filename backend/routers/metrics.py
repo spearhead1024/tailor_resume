@@ -6,7 +6,8 @@ the UI can render the `applied / total` fraction.
 
 Query params:
     week_start: ISO date (YYYY-MM-DD) of the Monday of the target week.
-                Defaults to the current week.
+                Defaults to the current week. The week is Mon..Sun (7 days); every cell
+                also carries `easy` — the part done through LinkedIn Easy Apply.
 
 Response shape::
 
@@ -40,6 +41,7 @@ from datetime import date, datetime, timedelta, timezone
 from fastapi import APIRouter, Depends
 from auth import get_current_user, storage
 from core.storage import tech_stacks_match
+from core.easy_apply import is_easy_apply
 
 # The Metrics day starts at 5pm JST (UTC+9, no daylight saving) and runs to 5pm JST the next
 # day — i.e. 08:00 UTC, which is 3am EST / 4am EDT, so a US working day sits wholly inside one
@@ -94,11 +96,12 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
     """Role-aware metrics for one calendar week (Mon..Sun)."""
     is_admin = bool(user.get("is_admin"))
 
-    # Workweek = Mon..Fri only (the team doesn't work weekends).
+    # The whole week, Mon..Sun: jobs are added on weekends too (and applied on Monday), so a
+    # Saturday / Sunday intake must show — Mon..Fri alone silently dropped them.
     requested = _parse_iso_date(week_start) if week_start else None
     monday = _monday_of(requested or _today())
-    friday = monday + timedelta(days=4)
-    days = [monday + timedelta(days=i) for i in range(5)]
+    sunday = monday + timedelta(days=6)
+    days = [monday + timedelta(days=i) for i in range(7)]
     day_strs = [d.isoformat() for d in days]
 
     # Pull data
@@ -159,8 +162,10 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
     # `applies_by_profile` unions every applier (incl. an admin helping out) per
     # profile for the admin grand total below. Count UNIQUE JOBS (deduped by
     # job_id) so regenerated resumes don't inflate the count.
+    # `easy_*`: the subset applied through LinkedIn Easy Apply (a LinkedIn job link — core/easy_apply).
     def _new_bucket() -> dict:
-        return {"daily": defaultdict(set), "week_jobs": set(), "lifetime_jobs": set()}
+        return {"daily": defaultdict(set), "week_jobs": set(), "lifetime_jobs": set(),
+                "easy_daily": defaultdict(set), "easy_week": set(), "easy_lifetime": set()}
     applies: dict[tuple[str, str], dict] = defaultdict(_new_bucket)
     applies_by_profile: dict[str, dict] = defaultdict(_new_bucket)
     for r in resumes:
@@ -183,12 +188,19 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
         job_added = _day_str(job.get("submitted_at"))
         if not job_added:
             continue
+        easy = is_easy_apply(job.get("link") or "")
         for b in (applies[(applier, pid)], applies_by_profile[pid]):
             b["lifetime_jobs"].add(job_id)
+            if easy:
+                b["easy_lifetime"].add(job_id)
             if job_added in day_strs:
                 b["daily"][job_added].add(job_id)
-            if monday.isoformat() <= job_added <= friday.isoformat():
+                if easy:
+                    b["easy_daily"][job_added].add(job_id)
+            if monday.isoformat() <= job_added <= sunday.isoformat():
                 b["week_jobs"].add(job_id)
+                if easy:
+                    b["easy_week"].add(job_id)
 
     # Compose rows. For each user, one row per assigned profile — plus one per profile they
     # applied on THIS WEEK without being assigned to it. Admins work jobs on any profile, never
@@ -223,7 +235,7 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
                     continue
                 if submitted in day_strs:
                     p_added_per_day[submitted] += 1
-                if monday.isoformat() <= submitted <= friday.isoformat():
+                if monday.isoformat() <= submitted <= sunday.isoformat():
                     p_added_in_week += 1
             p_added_lifetime = len(profile_jobs)
             rows.append({
@@ -233,11 +245,12 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
                 "profile_name": prof.get("name", ""),
                 "assigned": pid in assigned,
                 "daily": [
-                    {"applied": len(b["daily"].get(d, ())), "total": p_added_per_day.get(d, 0)}
+                    {"applied": len(b["daily"].get(d, ())), "total": p_added_per_day.get(d, 0),
+                     "easy": len(b["easy_daily"].get(d, ()))}
                     for d in day_strs
                 ],
-                "week":     {"applied": len(b["week_jobs"]),     "total": p_added_in_week},
-                "lifetime": {"applied": len(b["lifetime_jobs"]), "total": p_added_lifetime},
+                "week":     {"applied": len(b["week_jobs"]),     "total": p_added_in_week, "easy": len(b["easy_week"])},
+                "lifetime": {"applied": len(b["lifetime_jobs"]), "total": p_added_lifetime, "easy": len(b["easy_lifetime"])},
             })
             # Capture this profile's denominator once for the grand total.
             profile_denominator[pid] = {
@@ -251,7 +264,7 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
 
     payload: dict = {
         "week_start": monday.isoformat(),
-        "week_end":   friday.isoformat(),
+        "week_end":   sunday.isoformat(),
         "days":       day_strs,
         "rows":       rows,
     }
@@ -265,16 +278,19 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
         shown = list(profile_denominator.keys())
         totals_daily = [
             {"applied": sum(len(applies_by_profile[pid]["daily"].get(d, ())) for pid in shown),
-             "total":   sum(profile_denominator[pid]["daily"][d] for pid in shown)}
+             "total":   sum(profile_denominator[pid]["daily"][d] for pid in shown),
+             "easy":    sum(len(applies_by_profile[pid]["easy_daily"].get(d, ())) for pid in shown)}
             for d in day_strs
         ]
         totals_week = {
             "applied": sum(len(applies_by_profile[pid]["week_jobs"]) for pid in shown),
             "total":   sum(profile_denominator[pid]["week"] for pid in shown),
+            "easy":    sum(len(applies_by_profile[pid]["easy_week"]) for pid in shown),
         }
         totals_lifetime = {
             "applied": sum(len(applies_by_profile[pid]["lifetime_jobs"]) for pid in shown),
             "total":   sum(profile_denominator[pid]["lifetime"] for pid in shown),
+            "easy":    sum(len(applies_by_profile[pid]["easy_lifetime"]) for pid in shown),
         }
         payload["totals"] = {
             "daily":    totals_daily,
@@ -288,13 +304,15 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
     # (their adder is a VPS1 account), so they're excluded; deleted jobs don't count
     # as an "upload".
     def _zero_job() -> dict:
-        return {"uploaded": 0, "approved": 0, "rejected": 0}
+        return {"uploaded": 0, "approved": 0, "rejected": 0, "easy": 0}
 
     def _new_job_bucket() -> dict:
         return {"daily": defaultdict(_zero_job), "week": _zero_job(), "lifetime": _zero_job()}
 
-    def _bump(cell: dict, st: str) -> None:
+    def _bump(cell: dict, st: str, easy: bool) -> None:
         cell["uploaded"] += 1
+        if easy:
+            cell["easy"] += 1
         if st == "approved":
             cell["approved"] += 1
         elif st == "rejected":
@@ -312,11 +330,12 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
         if not added:
             continue
         b = job_buckets[uid]
-        _bump(b["lifetime"], st)
+        easy = is_easy_apply(j.get("link") or "")
+        _bump(b["lifetime"], st, easy)
         if added in day_strs:
-            _bump(b["daily"][added], st)
-        if monday.isoformat() <= added <= friday.isoformat():
-            _bump(b["week"], st)
+            _bump(b["daily"][added], st, easy)
+        if monday.isoformat() <= added <= sunday.isoformat():
+            _bump(b["week"], st, easy)
 
     # One row per job_adder, and per anyone else who added a job THIS WEEK (an admin adding jobs
     # by hand used to count nowhere). Admins see all; everyone else sees themselves, because
@@ -346,6 +365,7 @@ def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
                 out["uploaded"] += c["uploaded"]
                 out["approved"] += c["approved"]
                 out["rejected"] += c["rejected"]
+                out["easy"] += c["easy"]
             return out
         payload["job_totals"] = {
             "daily":    [_sum_job([r["daily"][i] for r in job_rows]) for i in range(len(day_strs))],
