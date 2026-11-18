@@ -66,7 +66,9 @@ def prepare(body: dict, user: dict = Depends(_bidder)):
     with_cv = {r.get("job_id") for r in storage.get_generated_resumes_for_profile(pid) if r.get("status") == "generated"}
     # Out Bids (mode "out"): ChatGPT chats only for the job on screen + the next 2 (Q.AHEAD).
     cap = str((body or {}).get("mode") or "") == "out"
-    return {"threads": Q.prepare(storage.db_path, user, pid, jobs, lambda jid: jid in with_cv, cap_chats=cap)}
+    # Out Bids leaves the Easy Apply jobs' CVs and chats alone (Easy Bids' Gen CV work).
+    spare = storage.easy_job_ids if cap else (lambda ids: set())
+    return {"threads": Q.prepare(storage.db_path, user, pid, jobs, lambda jid: jid in with_cv, cap_chats=cap, spare=spare)}
 
 
 @router.put("/project")

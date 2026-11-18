@@ -2363,6 +2363,14 @@ class Storage:
             row = session.get(JobRow, match_id)
             return _normalize_job(dict(row.data or {})) if row else None
 
+    def easy_job_ids(self, job_ids) -> set[str]:
+        """Of these job ids, the Easy Apply ones (core/easy_apply.is_easy_apply on their link)."""
+        ids = [str(i) for i in (job_ids or []) if i]
+        if not ids:
+            return set()
+        with session_scope(self.db_path) as session:
+            return set(session.scalars(select(JobRow.id).where(JobRow.id.in_(ids), _easy_link_sql())).all())
+
     def find_job_by_url(self, url: str, exclude_job_id: str = '') -> dict | None:
         normalized = normalize_job_url(url)
         if not normalized:

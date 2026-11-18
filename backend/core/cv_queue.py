@@ -122,7 +122,8 @@ def _expire(session, user_id: str) -> None:
 
 
 # ---------- what the panel asks for ----------
-def prepare(db_path, user: dict, profile_id: str, jobs: list[dict], has_cv, *, cap_chats: bool = False) -> list[dict]:
+def prepare(db_path, user: dict, profile_id: str, jobs: list[dict], has_cv, *, cap_chats: bool = False,
+            spare=lambda ids: set()) -> list[dict]:
     """The bidder is on jobs[0]; jobs[1:] come next. The window is the job on screen and the
     next ones — AHEAD jobs in all, by POSITION — and those of them without a CV yet
     (has_cv(job_id)) are queued. (Skipping jobs that already have a CV before counting used to
@@ -133,19 +134,30 @@ def prepare(db_path, user: dict, profile_id: str, jobs: list[dict], has_cv, *, c
     cap_chats (Out Bids): ChatGPT chats stay open only for those AHEAD jobs — a job passed by keeps
     its CV and answers, but its chat (and so its tab) is closed; a question asked later gets a new
     chat. So Out Bids never has more than AHEAD ChatGPT tabs. (Easy Bids keeps a CV's chat until the
-    job is done: its jobs are the ones the bidder pressed Gen CV for.)"""
+    job is done: its jobs are the ones the bidder pressed Gen CV for.)
+
+    spare(job_ids) → the ids this call must leave alone: Out Bids passes the Easy Apply jobs, so the
+    panel switching to Out Bids (by itself, as the bidder changes tabs) never drops a CV that Gen CV
+    asked for in Easy Bids, nor its chat."""
     window = [j for j in jobs[:AHEAD] if not has_cv(j["id"])]
     keep = {(profile_id, j["id"]) for j in window}
     in_view = {(profile_id, j["id"]) for j in jobs[:AHEAD]}
+    uid = user.get("id", "")
+    with session_scope(db_path) as session:      # (looked up before the write lock is taken)
+        mine = set(session.scalars(select(CvQueueRow.job_id).where(CvQueueRow.user_id == uid)).all())
+    spared = spare(mine) if mine else set()
     with session_scope(db_path) as session:
         _write_lock(session)
-        uid = user.get("id", "")
         for r in session.scalars(select(CvQueueRow).where(CvQueueRow.user_id == uid, CvQueueRow.stage == "queued")).all():
+            if r.job_id in spared:
+                continue
             if (r.profile_id, r.job_id) not in keep and not r.work and not (r.want or []):
                 _drop_chat(session, r)
                 session.delete(r)
         if cap_chats:
             for r in session.scalars(select(CvQueueRow).where(CvQueueRow.user_id == uid, CvQueueRow.stage.in_(("ready", "failed")))).all():
+                if r.job_id in spared:
+                    continue
                 if (r.profile_id, r.job_id) not in in_view and not r.work and not (r.want or []):
                     _drop_chat(session, r)          # the CV and its answers stay
                     session.delete(r)

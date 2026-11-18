@@ -488,7 +488,7 @@ async function selectJob(id, { open = true, item: given = null } = {}) {
     resumeId: item?.resume_id || '', ats: item?.ats || null, atsScore: item?.ats_score || 0,
   });
   const ta = $('#jsonInput'); if (ta) ta.value = '';
-  patchJob(); patchBuild();
+  patchJob(); patchBuild(); saveGen();
   if (!item) return;
   if (open) showJob(item);
   S.questions = []; S.answers = []; S.qaDraft = null; S.qaEditing = false; S.manual = false;
@@ -545,14 +545,32 @@ async function generate() {
 // come back to it.
 // The Gen CV requests still waiting for their CV are kept in session storage: closing the panel
 // before ChatGPT is done no longer loses the automatic download — the reopened panel saves it.
+// The job being worked on (easyPinned) is kept there too: when the panel comes back to Easy Bids —
+// reopened, or after it switched to Out Bids by itself for another page — that job is on screen
+// again, even if LinkedIn has moved on, and its CV is saved once it is ready.
+// Only Easy Bids writes it (Out Bids' Generate must not wipe Easy Bids' requests).
 const GEN_KEY = 'panelGen';
-const saveGen = () => chrome.storage.session.set({ [GEN_KEY]: { profileId: S.profileId, items: [...S.gen.values()] } }).catch(() => {});
+const pinItem = (j) => (j ? { id: j.id, company: j.company || '', job_title: j.job_title || '' } : null);
+function saveGen() {
+  if (S.bidView !== 'easy' || !S.profileId) return;
+  const cur = easyPinned() ? pinItem(currentJob()) : null;
+  chrome.storage.session.set({ [GEN_KEY]: { profileId: S.profileId, items: [...S.gen.values()], cur } }).catch(() => {});
+}
 async function restoreGen() {
   if (S.mode !== 'easy') return;
+  const pid = S.profileId;
   const g = (await chrome.storage.session.get(GEN_KEY).catch(() => ({})))[GEN_KEY];
-  if (!g || g.profileId !== S.profileId || !Array.isArray(g.items) || !g.items.length) return;
-  for (const it of g.items) if (it?.id && !S.gen.has(it.id)) S.gen.set(it.id, it);
-  gptPrepare(); patchEasy(); maybeAutoDownload();
+  if (!g || g.profileId !== pid || S.profileId !== pid || S.mode !== 'easy') return;
+  for (const it of Array.isArray(g.items) ? g.items : []) if (it?.id && !S.gen.has(it.id)) S.gen.set(it.id, it);
+  const cur = g.cur?.id ? g.cur : null;
+  if (cur && !S.jobId && !S.busy) {
+    // Back on the job being worked on (its CV from the queue row, or from ChatGPT's thread).
+    const item = S.queue.find((j) => j.id === cur.id) || cur;
+    await selectJob(cur.id, { open: false, item });
+    adoptBuiltCvs();
+  }
+  if (S.gen.size) gptPrepare();
+  patchEasy(); maybeAutoDownload();
 }
 function maybeAutoDownload() {
   if (S.mode !== 'easy' || !S.resumeId || !currentJob() || S.busy || !S.gen.has(S.jobId)) return;
@@ -592,7 +610,7 @@ async function finish(kind, run, note) {
     if (S.mode === 'easy') {
       // Easy Bids stays on the bidder's LinkedIn search: the job is done, the next one is
       // whichever they click there. (The card re-reads the tab: "Applied with …".)
-      S.jobId = ''; S.extraJob = null;
+      S.jobId = ''; S.extraJob = null; saveGen();
       await loadQueue({ open: false });
       scheduleEasyCheck(true);
     } else {
@@ -715,7 +733,7 @@ function adoptBuiltCvs() {
       current = true;
     }
   }
-  if (current) { patchBuild(); loadAnswers(); maybeAutoDownload(); }
+  if (current) { patchBuild(); loadAnswers(); saveGen(); maybeAutoDownload(); }
 }
 let lastWant = '';
 onGptChange(async () => {
@@ -1512,6 +1530,9 @@ async function setMode(mode) {
     pdfCache = { id: '', promise: null, url: '' };
     renderMain();
     await loadProfiles();
+    // Back in Easy Bids: its Gen CV requests and the job being worked on (kept while the panel
+    // showed Out Bids) come back — a CV ChatGPT finished meanwhile is saved to Downloads now.
+    if (mode === 'easy' && !S.starting) await restoreGen();
   } else if (mode === 'add') {
     await getAdder().show($('#addView'));
   } else if (mode === 'easy') scheduleEasyCheck(true);
