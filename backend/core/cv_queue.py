@@ -24,7 +24,7 @@ from core.db import session_scope
 from core.db.models import CvQueueRow, GptChatRow
 from core.storage import _write_lock
 
-AHEAD = 3                                   # CVs prepared ahead: the job on screen + the next 2
+AHEAD = 3                                   # Out Bids: CVs prepared for the job on screen + the next 2 — never further
 MAX_ATTEMPTS = 2
 LEASE = {"write": timedelta(minutes=12), "answer": timedelta(minutes=6), "delete": timedelta(minutes=4)}
 IDLE_CLOSE = timedelta(hours=2)             # a ready / failed row nobody touched → its conversation is deleted
@@ -113,10 +113,13 @@ def _expire(session, user_id: str) -> None:
 
 # ---------- what the panel asks for ----------
 def prepare(db_path, user: dict, profile_id: str, jobs: list[dict], has_cv) -> list[dict]:
-    """The bidder is on jobs[0]; jobs[1:] come next. Queue the first AHEAD of them that have
-    no CV yet (has_cv(job_id)). Queued work of this bidder outside that window (another
-    profile, jobs passed by) is dropped — nothing was sent to ChatGPT for it."""
-    window = [j for j in jobs if not has_cv(j["id"])][:AHEAD]
+    """The bidder is on jobs[0]; jobs[1:] come next. The window is the job on screen and the
+    next ones — AHEAD jobs in all, by POSITION — and those of them without a CV yet
+    (has_cv(job_id)) are queued. (Skipping jobs that already have a CV before counting used to
+    slide the window further and further down the list: ChatGPT kept writing CVs ahead without
+    end.) Queued work of this bidder outside that window (another profile, jobs passed by) is
+    dropped — nothing was sent to ChatGPT for it."""
+    window = [j for j in jobs[:AHEAD] if not has_cv(j["id"])]
     keep = {(profile_id, j["id"]) for j in window}
     with session_scope(db_path) as session:
         _write_lock(session)

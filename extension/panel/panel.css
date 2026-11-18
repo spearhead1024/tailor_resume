@@ -275,3 +275,6 @@ textarea.desc { min-height: 150px; font-size: 12px; }
 .login .hero img { width: 40px; height: 40px; border-radius: 10px; }
 .login label { display: grid; gap: 4px; font-size: 12px; font-weight: 500; color: var(--muted); }
 .login button[type="submit"] { height: var(--h-lg); }
+
+/* ✕ — close the panel (topbar on the main screens; the corner on sign-in) */
+.corner-close { position: fixed; top: 8px; right: 8px; z-index: 40; }

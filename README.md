@@ -63,6 +63,15 @@ One side panel (`extension/panel/`), tabs by role: **Out Bids** and **Easy Bids*
   which cards each tab shows, LinkedIn's classic job search (`lib/classic.js`, kept instead of the AI search),
   and Update Now.
 - The layout is one fluid column (centred past 600px), so it works from Chrome's narrowest side panel up.
+- **✕** (top right, every screen) closes the panel — `chrome.sidePanel.close()` in the side panel, or the
+  tab / window it was opened in — for browsers that draw no close button of their own.
+- **Out Bids** has ChatGPT write CVs for the job on screen and the next 2 only (`core/cv_queue.AHEAD = 3`,
+  counted by position in the list).
+
+**Easy vs Out in the web app**: Jobs and Applied show an *Easy* / *Out* label and filter; Metrics shows
+how many applies (and jobs added) were Easy Apply (`E n`). Metrics, Applied and Jobs all count a day as
+the 5pm JST → 5pm JST work day, and the Metrics week is Mon–Sun. Applied's *Job added on* lists exactly
+what a Metrics cell counts (Metrics files an apply under the day its job was added).
 
 To try changes without packing or installing it:
 

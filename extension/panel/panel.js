@@ -40,6 +40,7 @@ function toast(text, ms = 1800) {
 // ---------- icons ----------
 const svg = (body) => `<svg viewBox="0 0 24 24">${body}</svg>`;
 const I = {
+  close: svg('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>'),
   // Application details — name / email / phone / street / ZIP are VPS1's glyphs.
   name: svg('<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>'),
   email: svg('<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>'),
@@ -610,8 +611,28 @@ const finishSkip = (reason) => finish('skip', async (job) => {
 }, (job) => `Skipped — ${job.company}.`);
 
 // ---------- rendering ----------
+// ---------- closing the panel ----------
+// Our own ✕ (top right on every screen): not every browser shows a close button on a side panel
+// (Chrome's own header can be hidden, other Chromium browsers draw none). In the side panel (it is
+// no tab): chrome.sidePanel.close() (Chrome 141+), else window.close(). Opened as a tab or in its
+// own window instead: that tab is closed.
+const CORNER_CLOSE = `<button class="icon ghost corner-close" data-action="closePanel" title="Close the panel" aria-label="Close the panel">${I.close}</button>`;
+async function closePanel() {
+  const tab = await chrome.tabs.getCurrent().catch(() => null);
+  if (tab?.id != null) { await chrome.tabs.remove(tab.id).catch(() => window.close()); return; }
+  try {
+    if (chrome.sidePanel?.close) {
+      const win = await chrome.windows.getCurrent();
+      await chrome.sidePanel.close({ windowId: win.id });
+      return;
+    }
+  } catch { /* an older Chrome */ }
+  window.close();
+}
+
 function renderLogin() {
   $('#app').innerHTML = `
+    ${CORNER_CLOSE}
     <div class="login">
       <div class="hero"><img src="../icons/icon128.png" alt=""><strong>TailorResume</strong><span class="muted small">Sign in to bid from the side panel</span></div>
       <div id="alerts"></div>
@@ -628,6 +649,7 @@ function renderLogin() {
     try { await login(String(f.get('identifier')).trim(), String(f.get('password'))); }
     catch (err) { showError(err); btn.disabled = false; btn.textContent = 'Sign in'; }
   });
+  $('#app').onclick = onClick;      // the close button
   patchAlerts();
 }
 
@@ -635,7 +657,8 @@ function renderLogin() {
 const gptOn = () => !!S.gptSnap?.state.enabled;
 const currentThread = () => (S.gptSnap && S.profileId && S.jobId ? S.gptSnap.threads[threadKey(S.profileId, S.jobId)] || null : null);
 
-// The job on screen and the next ones without a CV (5 in all) are written ahead. Easy Bids: only the
+// Out Bids: the job on screen and the next 2 (3 in all — core/cv_queue.AHEAD) get their CVs written
+// ahead, never further down the list. Easy Bids: only the
 // jobs Gen CV was pressed for (the one on screen first) — nothing is written just by looking at a job.
 function gptPrepare() {
   if (!gptOn() || !S.profileId) return;
@@ -643,7 +666,7 @@ function gptPrepare() {
   const i = Math.max(0, S.queue.findIndex((j) => j.id === S.jobId));
   const list = S.mode === 'easy'
     ? [...S.gen.values()].sort((a, b) => (b.id === S.jobId) - (a.id === S.jobId))
-    : S.queue.slice(i, i + 20);
+    : S.queue.slice(i, i + 3);
   const jobs = list.map((j) => ({ id: j.id, company: j.company, job_title: j.job_title }));
   // The server keeps the queue (3 ahead, skipping jobs with a CV); the worker is told to look.
   if (jobs.length) api('/api/gpt/prepare', { method: 'POST', body: { profile_id: S.profileId, jobs } }).then(() => gpt('sync')).catch(() => {});
@@ -1334,6 +1357,7 @@ function renderFrame(modes) {
       <span class="who ellipsis" title="${esc(u.full_name || u.username || '')} · TailorResume Assistant v${esc(chrome.runtime.getManifest().version)}">${esc(u.username || '')}</span>
       <button class="icon secondary" id="settingsBtn" data-action="settings" title="Settings — ChatGPT, what to show, classic job search, updates">${I.gear}</button>
       <button class="icon secondary" data-action="logout" title="Sign out">${I.logout}</button>
+      <button class="icon ghost" data-action="closePanel" title="Close the panel (open it again with the TailorResume icon)" aria-label="Close the panel">${I.close}</button>
     </header>
     <div class="update-bar" id="updateBar" hidden></div>
     <div id="settingsView" hidden></div>
@@ -1375,6 +1399,7 @@ function renderNoAccess() {
   S.screen = 'noaccess';
   const u = S.user || {};
   $('#app').innerHTML = `
+    ${CORNER_CLOSE}
     <div class="login">
       <div class="hero"><img src="../icons/icon128.png" alt=""><strong>TailorResume</strong></div>
       <div class="alert error"><span>This panel is for bidders and job adders. <b>${esc(u.username || 'Your account')}</b> has neither role — ask an admin.</span></div>
@@ -1652,6 +1677,7 @@ async function onClick(e) {
   try {
     switch (a) {
       case 'mode': if (t.dataset.mode !== S.mode) await setMode(t.dataset.mode); break;
+      case 'closePanel': await closePanel(); break;
       case 'gptConnect': await connectGpt(); break;
       case 'gptContinue': await gpt('continue'); break;
       case 'restartExt': chrome.runtime.reload(); break;
