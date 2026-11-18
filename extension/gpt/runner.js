@@ -96,9 +96,26 @@ export async function ensureDriver() {
     id: DRIVER_ID, matches: CHAT_ORIGINS, js: ['gpt/driver.js'], allFrames: true, runAt: 'document_idle', persistAcrossSessions: true,
   }]);
 }
+// ONE ChatGPT tab (PARALLEL = 1): the next task goes to the tab already open — it loads the new
+// chat (or, for answers in the chat it is on, is just poked: see startWork) — instead of a new tab.
+// The tab the bidder is looking at is left alone.
+async function takeIdleTab(url) {
+  const kept = Object.entries(await keptTabs()).sort((a, b) => (b[1].at || 0) - (a[1].at || 0));
+  for (const [key, v] of kept) {
+    const t = await chrome.tabs.get(v.tabId).catch(() => null);
+    if (!t || t.active) continue;
+    await withKept(async (all) => { delete all[key]; });
+    await withTabs(async (set) => { set.add(t.id); });
+    await chrome.tabs.update(t.id, { url }).catch(() => {});
+    return t.id;
+  }
+  return null;
+}
 async function openFrame(url) {
   await ensureDriver();
+  const reused = await takeIdleTab(url);
   await makeRoom();
+  if (reused != null) return frameOfTab(reused);
   // In the background (the bidder's focus stays where it is), right NEXT TO the bidder's current tab
   // — where it is seen, not at the far end of a long tab strip.
   const [cur] = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => []);
@@ -142,8 +159,10 @@ async function keepTab(frame, key, conversation) {
 async function makeRoom() {
   const working = Object.keys(await read(FRAMES, {})).length + ((await state()).checkFrame ? 1 : 0);
   const keep = Math.max(0, PARALLEL - 1 - working);
+  const active = new Set((await chrome.tabs.query({ active: true }).catch(() => [])).map((t) => t.id));
   const gone = await withKept(async (all) => {
-    const old = Object.entries(all).sort((a, b) => (a[1].at || 0) - (b[1].at || 0));
+    // (a chat the bidder is reading right now stays open)
+    const old = Object.entries(all).filter(([, v]) => !active.has(v.tabId)).sort((a, b) => (a[1].at || 0) - (b[1].at || 0));
     const out = [];
     while (old.length > keep) { const [k, v] = old.shift(); out.push(v.tabId); delete all[k]; }
     return out;
@@ -366,9 +385,24 @@ async function startWork(lease) {
   // "Project-only" memory, the shared account's memory of other profiles stays out.
   const fresh = lease.project_url || CHAT_URL;
   const url = lease.work === 'answer' && /\/c\//.test(lease.conversation || '') ? lease.conversation : fresh;
+  // Answers in a chat whose tab is still open on it: asked right there — no page load.
+  if (lease.work === 'answer' && lease.key && await answerInPlace(lease, url)) return;
   if (lease.work === 'answer' && lease.key) await closeKept((key) => key === lease.key);   // one tab per chat
   const id = await openFrame(url);
   await frames(async (all) => { all[id] = { lease, task: frameTask(lease), startedAt: now(), aliveAt: now() }; });
+}
+async function answerInPlace(lease, url) {
+  const kept = (await keptTabs())[lease.key];
+  if (!kept || convId(kept.conversation) !== convId(url)) return false;
+  const t = await chrome.tabs.get(kept.tabId).catch(() => null);
+  if (!t || t.status !== 'complete' || convId(t.url) !== convId(url)) return false;
+  await withKept(async (all) => { delete all[lease.key]; });
+  await withTabs(async (set) => { set.add(t.id); });
+  const id = frameOfTab(t.id);
+  await frames(async (all) => { all[id] = { lease, task: frameTask(lease), startedAt: now(), aliveAt: now(), conversation: kept.conversation }; });
+  const poked = await chrome.tabs.sendMessage(t.id, { type: 'gpt_poke' }, { frameId: 0 }).then((r) => !!r?.ok).catch(() => false);
+  if (!poked) await chrome.tabs.reload(t.id).catch(() => {});   // its driver is gone (the extension updated): load it again
+  return true;
 }
 async function taskFor(frame) {
   if ((await state()).checkFrame === frame) return { id: frame, kind: 'check' };
@@ -509,6 +543,8 @@ export function installGptRunner() {
       }).then(sendResponse, () => sendResponse({ ours: false, task: null }));
       return true;
     }
+    // The driver's pauses (gpt/driver.js sleep): timed here, where Chrome doesn't slow timers down.
+    if (msg?.type === 'gpt_sleep') { setTimeout(() => sendResponse({}), Math.max(0, Math.min(Number(msg.ms) || 0, 5000))); return true; }
     if (msg?.type === 'gpt_alive' && msg.frame) { alive(msg.frame, msg.conversation || '').catch((e) => noteError('alive', e)); return; }
     if (msg?.type === 'gpt_done' && msg.frame) { finish(msg.frame, msg.result).then(() => sendResponse({ ok: true }), () => sendResponse({ ok: false })); return true; }
     if (msg?.type === 'gpt') {

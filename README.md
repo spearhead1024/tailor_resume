@@ -75,7 +75,7 @@ One side panel (`extension/panel/`), tabs by role: **Out Bids** and **Easy Bids*
   screen + the next 2, each with a ChatGPT tab writing / holding its CV. Mark as Applied / Report / Skip →
   that job's chat is deleted **inside its own tab** and the tab closed, the set's next job comes up, and the
   NEWEST queue job not in the set joins it. The set is kept per profile, so new jobs at the top of the queue
-  never make the bidder jump. Never more than 3 ChatGPT tabs; chats to delete run in an open tab.
+  never make the bidder jump. ONE ChatGPT tab: it writes those CVs one after another, answers tech questions first (in the chat it is on, without reloading), and deletes chats in place.
 - **ChatGPT project per profile** (`profile.gpt_project_url`, ⚙ Settings → Use This Tab, `PUT /api/gpt/project`):
   the bidders share one ChatGPT account whose memory mixed profiles up; chats start inside the profile's
   project (create it with "Project-only" memory). Also: the CV prompt names the candidate and fences out

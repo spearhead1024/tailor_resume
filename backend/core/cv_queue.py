@@ -280,7 +280,7 @@ def trash(db_path, user: dict, conversations: Iterable[str], device: str = "") -
 # ---------- what the extension's worker asks for ----------
 def claim(db_path, user: dict, device: str, slots: int, *, build_task, active: Iterable[str] = (), only_deletes: bool = False) -> dict:
     """Lease up to `slots` pieces of work to this browser: one batch of chats to delete, then
-    the jobs (highest priority first), then answers for questions added later. build_task(row)
+    answers for questions (a bidder is waiting for them), then the jobs (highest priority first). build_task(row)
     adds what ChatGPT needs (the CV prompt, the questions). only_deletes: a disconnected
     browser still deletes the chats left behind, nothing else.
 
@@ -312,7 +312,11 @@ def claim(db_path, user: dict, device: str, slots: int, *, build_task, active: I
                     c.lease_until, c.lease_device = None, ""
         session.flush()
         chats = session.scalars(select(GptChatRow).where(GptChatRow.user_id == uid).order_by(GptChatRow.created_at)).all()
-        if slots > 0 and not any(c.lease_until for c in chats):
+        # Questions waiting for answers go before the deletes (with one ChatGPT tab, a delete batch
+        # would hold the bidder up).
+        asking = not only_deletes and any(not r.work and r.stage == "ready" and r.resume_id and (r.want or [])
+                                          for r in session.scalars(select(CvQueueRow).where(CvQueueRow.user_id == uid)).all())
+        if slots > 0 and not asking and not any(c.lease_until for c in chats):
             due = [c for c in chats if (c.retry_at is None or c.retry_at <= now)
                    and (not c.device or c.device == device or (c.created_at and now - c.created_at > ANY_DEVICE_AFTER))][:DELETE_BATCH]
             if due:
@@ -325,8 +329,10 @@ def claim(db_path, user: dict, device: str, slots: int, *, build_task, active: I
         if only_deletes:
             return {"tasks": out, "to_delete": to_delete}
         rows = session.scalars(select(CvQueueRow).where(CvQueueRow.user_id == uid)).all()
+        # Answers first: the bidder is waiting for them on an open application form, while CVs are
+        # written ahead. (They used to queue behind every CV — minutes with the one ChatGPT tab.)
         todo = sorted((r for r in rows if not r.work and (r.stage == "queued" or (r.stage == "ready" and (r.want or []) and r.resume_id))),
-                      key=lambda r: (r.stage != "queued", -(r.priority or 0), r.created_at or now))
+                      key=lambda r: (r.stage == "queued", -(r.priority or 0), r.created_at or now))
         for r in todo:
             if slots <= 0:
                 break

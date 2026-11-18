@@ -57,7 +57,7 @@ def _merge_answers(resume_id: str, fresh: list[dict]) -> None:
 def prepare(body: dict, user: dict = Depends(_bidder)):
     """body: {profile_id, jobs: [{id, company, job_title}], mode: 'out' | 'easy'} — the job on screen
     first, then the next ones in the Bid queue. Of the first 3 (by position), those without a CV are
-    queued; in Out Bids the chats of jobs outside those 3 are closed (at most 3 ChatGPT tabs)."""
+    queued; in Out Bids the chats of jobs outside those 3 are closed (the extension keeps one ChatGPT tab)."""
     pid = str((body or {}).get("profile_id") or "").strip()
     if not pid:
         raise HTTPException(status_code=400, detail="profile_id is required")

@@ -25,7 +25,14 @@
   window.__trGptDriver = true;
   let FRAME = '';                                                 // this tab's work id, from the worker
 
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // A pause that background tabs don't stretch: Chrome slows a hidden tab's timers (to once a MINUTE
+  // after 5 minutes hidden), so the service worker — whose timers run normally — answers when the time
+  // is up. The page's own timer is the fallback (the worker can't be reached after an update).
+  const sleep = (ms) => new Promise((resolve) => {
+    let done = false; const end = () => { if (!done) { done = true; resolve(); } };
+    setTimeout(end, ms);
+    try { chrome.runtime.sendMessage({ type: 'gpt_sleep', ms }).then(end, () => {}); } catch { /* timer only */ }
+  });
   const q = (sels, root = document) => { for (const s of sels) { try { const el = root.querySelector(s); if (el) return el; } catch { /* bad selector */ } } return null; };
   // This page lives in a background tab that may not be laid out or painted: "visible" and
   // "text" must not depend on layout. Visible = in the document and not hidden by CSS;
@@ -73,7 +80,27 @@
     if (limitTextPresent() && (!composerUsable() || (dialog && LIMIT_RE.test(textOf(dialog))))) return 'rate_limited';
     return '';
   }
-  async function waitFor(fn, ms, step = 500) { const end = Date.now() + ms; while (Date.now() < end) { const v = fn(); if (v) return v; await sleep(step); } return null; }
+  // Wait until fn() returns something. Checked on every change of the page, not only on a timer:
+  // Chrome slows timers down in background tabs (to once a MINUTE in a tab hidden 5+ minutes),
+  // which made a finished reply wait long before it was noticed. DOM changes are seen at once.
+  // (Checks are bunched: one per burst of changes, through a MessageChannel — never throttled.)
+  function waitFor(fn, ms, step = 500) {
+    return new Promise((resolve) => {
+      let done = false, queued = false;
+      const endAt = Date.now() + ms;
+      const ch = new MessageChannel();
+      const finish = (v) => { if (done) return; done = true; obs.disconnect(); ch.port1.close(); resolve(v); };
+      const check = () => {
+        if (done) return;
+        let v = null; try { v = fn(); } catch { /* the page is changing */ }
+        if (v) finish(v); else if (Date.now() >= endAt) finish(null);
+      };
+      ch.port1.onmessage = () => { queued = false; check(); };
+      const obs = new MutationObserver(() => { if (!queued && !done) { queued = true; ch.port2.postMessage(0); } });
+      obs.observe(document.documentElement, { subtree: true, childList: true, characterData: true, attributes: true });
+      (async () => { while (!done) { check(); if (!done) await sleep(step); } })();
+    });
+  }
 
   async function typePrompt(composer, prompt) {
     composer.focus();
@@ -117,22 +144,24 @@
   }
   function lastReply() { const list = replyCandidates(); const el = list[list.length - 1]; return { el, text: textOf(el).trim(), count: list.length }; }
 
-  // Done = the reply changed from the pre-send snapshot, is no longer streaming (no
-  // stop button) and its text has been stable for a few ticks.
-  async function waitForReply(baseline, timeoutMs) {
-    const end = Date.now() + timeoutMs;
-    let last = '', stable = 0;
+  // Done = the reply changed from the pre-send snapshot, is no longer streaming (no stop button)
+  // and either holds what was asked for (ready(reply): the JSON parses — done AT ONCE) or its text
+  // has stayed the same for 1.5 s.
+  const signedOut = () => /^\/auth\//.test(location.pathname) || visible(q(SEL.login));
+  async function waitForReply(baseline, timeoutMs, ready = () => false) {
     const started = await waitFor(() => { const r = lastReply(); return (r.count > baseline.count || r.text !== baseline.text) || q(SEL.stop); }, 60_000, 500);
     if (!started && limitTextPresent()) return { kind: 'rate_limited' };
-    while (Date.now() < end) {
-      if (detectBlocker() === 'needs_login') return { kind: 'needs_login' };
+    let last = '', since = Date.now();
+    const out = await waitFor(() => {
+      if (signedOut()) return { kind: 'needs_login' };
       const r = lastReply();
       const changed = r.count > baseline.count || r.text !== baseline.text;
-      if (changed && !q(SEL.stop) && r.text) { stable = r.text === last ? stable + 1 : 0; last = r.text; if (stable >= 3) return { done: true }; }
-      else { stable = 0; last = r.text; }
-      await sleep(700);
-    }
-    return { kind: 'timeout' };
+      if (!changed || q(SEL.stop) || !r.text) { last = r.text; since = Date.now(); return null; }
+      if (ready(r)) return { done: true };
+      if (r.text !== last) { last = r.text; since = Date.now(); return null; }
+      return Date.now() - since >= 1500 ? { done: true } : null;
+    }, timeoutMs, 700);
+    return out || { kind: 'timeout' };
   }
 
   // Every top-level {...} span (string-aware), tried last-to-first, so the reply's
@@ -177,7 +206,8 @@
     if (!(await typePrompt(composer, prompt))) return { ok: false, kind: 'no_composer', error: 'Could not type the prompt into ChatGPT.', diag: diagnose() };
     await sleep(300); await clickSend(composer);
     const salvage = () => { const r = lastReply(); return extractJson(r.el, r.text); };
-    let reply = await waitForReply(baseline, timeoutMs);
+    const isResume = (r) => !!extractJson(r.el, r.text);
+    let reply = await waitForReply(baseline, timeoutMs, isResume);
     if (reply.kind === 'timeout') { const j = salvage(); if (j) return { ok: true, resume_json: j, conversation: location.href, note: 'captured at timeout' }; }
     if (reply.kind) return { ok: false, kind: reply.kind, error: `ChatGPT did not finish (${reply.kind}).`, diag: diagnose() };
     let json = salvage();
@@ -186,7 +216,7 @@
       const base2 = lastReply();
       await typePrompt(c2, 'Your previous reply was not valid JSON. Reply with ONLY the complete JSON object described above — no markdown fences, no commentary, no truncation.');
       await sleep(300); await clickSend(c2);
-      reply = await waitForReply(base2, Math.min(timeoutMs, 4 * 60_000));
+      reply = await waitForReply(base2, Math.min(timeoutMs, 4 * 60_000), isResume);
       json = salvage();
       if (!json) return { ok: false, kind: reply.kind || 'invalid_json', error: 'ChatGPT replied, but not with a valid resume JSON object.', diag: diagnose() };
     }
@@ -204,23 +234,25 @@
     }
     return null;
   }
-  async function send(prompt, timeoutMs) {
+  async function send(prompt, timeoutMs, ready) {
     const b0 = detectBlocker(); if (b0) return blockedResult(b0);
     const composer = await composerOrFail();
     if (!composer) return { ok: false, kind: detectBlocker() || 'no_composer', error: 'Could not find the ChatGPT message box.', diag: diagnose() };
     const baseline = lastReply();
     if (!(await typePrompt(composer, prompt))) return { ok: false, kind: 'no_composer', error: 'Could not type into ChatGPT.', diag: diagnose() };
     await sleep(300); await clickSend(composer);
-    const reply = await waitForReply(baseline, timeoutMs);
+    const reply = await waitForReply(baseline, timeoutMs, ready);
     return reply.kind && reply.kind !== 'timeout' ? { ok: false, kind: reply.kind, error: `ChatGPT did not finish (${reply.kind}).`, diag: diagnose() } : { ok: true };
   }
   async function answers({ prompt, count, timeoutMs = 3 * 60_000 }) {
-    let r = await send(prompt, timeoutMs);
+    const parsed = (l) => parseAnswers(l.el ? textOf(l.el) : l.text, count) || parseAnswers(l.text, count);
+    const isAnswers = (l) => !!parsed(l);       // the list is complete: reported the moment ChatGPT stops
+    let r = await send(prompt, timeoutMs, isAnswers);
     if (!r.ok) return r;
-    const read = () => { const l = lastReply(); return parseAnswers(l.el ? textOf(l.el) : l.text, count) || parseAnswers(l.text, count); };
+    const read = () => parsed(lastReply());
     let out = read();
     if (!out) {   // once more, strictly
-      r = await send(`Reply with ONLY the JSON array of ${count} strings, one answer per question, in order. No other text.`, timeoutMs);
+      r = await send(`Reply with ONLY the JSON array of ${count} strings, one answer per question, in order. No other text.`, timeoutMs, isAnswers);
       if (!r.ok) return r;
       out = read();
     }
@@ -308,7 +340,21 @@
   }
 
   // Ask for this tab's task, do it, report. (Pull: a fresh message wakes a suspended worker.)
-  (async () => {
+  // The worker keeps ONE ChatGPT tab and gives it the next task: answers for the chat it is on are
+  // started with a poke (gpt_poke) — no page load; anything else loads the page again.
+  let pulling = false;
+  chrome.runtime.onMessage.addListener((msg, _s, reply) => {
+    if (msg?.type !== 'gpt_poke') return;
+    reply({ ok: !pulling });
+    if (!pulling) pull();
+  });
+  pull();
+  async function pull() {
+    if (pulling) return;
+    pulling = true;
+    try { await pullOnce(); } finally { pulling = false; }
+  }
+  async function pullOnce() {
     let task = null;
     for (let i = 0; i < 5 && !task; i++) {
       const r = await chrome.runtime.sendMessage({ type: 'gpt_ready' }).catch(() => null);
@@ -330,5 +376,5 @@
       if (ok) break;
       await sleep(1000);
     }
-  })();
+  }
 })();
