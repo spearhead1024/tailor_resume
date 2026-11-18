@@ -1,6 +1,6 @@
 {
-  "version": "1.10.4",
+  "version": "1.10.5",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "One ChatGPT tab; tech-question answers first and much faster.",
-  "built_at": "2026-11-18T18:12:52Z"
+  "changelog": "Tech Questions: the Copy button keeps its size next to long questions.",
+  "built_at": "2026-11-18T18:15:39Z"
 }
