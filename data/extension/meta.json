@@ -1,6 +1,6 @@
 {
-  "version": "1.10.5",
+  "version": "1.10.6",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "Tech Questions: the Copy button keeps its size next to long questions.",
-  "built_at": "2026-11-18T18:15:39Z"
+  "changelog": "Faster ChatGPT answers: done is checked every second, no extra waits.",
+  "built_at": "2026-11-18T18:36:17Z"
 }
