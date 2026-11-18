@@ -1,6 +1,6 @@
 {
-  "version": "1.10.3",
+  "version": "1.10.4",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "Easy Bids: the CV from Gen CV is still saved to Downloads after the panel switched to another tab and back.",
-  "built_at": "2026-11-18T17:58:45Z"
+  "changelog": "One ChatGPT tab; tech-question answers first and much faster.",
+  "built_at": "2026-11-18T18:12:52Z"
 }
