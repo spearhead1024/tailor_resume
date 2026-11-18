@@ -71,9 +71,9 @@ One side panel (`extension/panel/`), tabs by role: **Out Bids** and **Easy Bids*
   still waiting for its CV survives closing the panel (session storage).
 - **✕** (top right, every screen) closes the panel — `chrome.sidePanel.close()` in the side panel, or the
   tab / window it was opened in — for browsers that draw no close button of their own.
-- **Out Bids works on a set of 3 jobs** (panel `fillWin`, server `core/cv_queue.AHEAD = 3`): the one on
-  screen + the next 2, each with a ChatGPT tab writing / holding its CV. Mark as Applied / Report / Skip →
-  that job's chat is deleted **inside its own tab** and the tab closed, the set's next job comes up, and the
+- **Out Bids works on a set of 2 jobs** (panel `fillWin`, server `core/cv_queue.AHEAD = 2`): the one on
+  screen + the next one, their CVs written one after another. Mark as Applied / Report / Skip →
+  that job's chat is deleted (in the open ChatGPT tab), the set's next job comes up, and the
   NEWEST queue job not in the set joins it. The set is kept per profile, so new jobs at the top of the queue
   never make the bidder jump. ONE ChatGPT tab: it writes those CVs one after another, answers tech questions first (in the chat it is on, without reloading), and deletes chats in place.
 - **ChatGPT project per profile** (`profile.gpt_project_url`, ⚙ Settings → Use This Tab, `PUT /api/gpt/project`):

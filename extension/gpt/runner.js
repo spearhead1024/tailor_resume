@@ -1,7 +1,7 @@
 /* ChatGPT connection — the extension's WORKER (imported by background.js).
  *
  * The queue lives on the SERVER (/api/gpt, table cv_queue): which jobs get a CV written ahead
- * (the job on screen + the next 2), which questions to answer, which ChatGPT conversations to
+ * (the job on screen + the next one), which questions to answer, which ChatGPT conversations to
  * delete. Nothing finished is lost when the browser closes — the server builds the CV the moment
  * ChatGPT's JSON arrives, and a lease that runs out (a closed browser) puts unfinished work back
  * in the queue. This worker only:
@@ -171,13 +171,28 @@ async function makeRoom() {
 }
 // deleteChats: the chats are no use any more (the job is done): each is deleted INSIDE its own tab
 // before the tab closes — no extra ChatGPT tab is opened for it — and the server is told.
-async function closeKept(test, { deleteChats = false } = {}) {
-  const gone = await withKept(async (all) => { const out = []; for (const [k, v] of Object.entries(all)) if (test(k, v)) { out.push(v); delete all[k]; } return out; });
+// keepOne: the ONE ChatGPT tab is not closed when its job is done — it stays (idle) for the next CV,
+// so no tab is opened and closed again and again.
+const IDLE = 'idle';
+async function closeKept(test, { deleteChats = false, keepOne = false } = {}) {
+  let idle = null;
+  if (keepOne && !(await state()).enabled) keepOne = false;          // disconnected: no tab stays
+  const working = keepOne ? (await ourTabs()).size : 1;
+  const gone = await withKept(async (all) => {
+    const out = [];
+    for (const [k, v] of Object.entries(all)) if ((k !== IDLE || !keepOne) && test(k, v)) { out.push(v); delete all[k]; }
+    // the last ChatGPT tab stays open, idle — registered at once, so a delete that starts meanwhile uses it
+    if (keepOne && out.length && !working && !Object.keys(all).length) {
+      idle = [...out].sort((a, b) => (b.at || 0) - (a.at || 0))[0];
+      all[IDLE] = { tabId: idle.tabId, conversation: '', at: now() };
+    }
+    return out;
+  });
   const done = [];
   for (const v of gone) {
     const id = convId(v.conversation);
     if (deleteChats && id) { const r = await deleteInTab(v.tabId, [id]); if (r) done.push(...r.done); }
-    await chrome.tabs.remove(v.tabId).catch(() => {});
+    if (v !== idle) await chrome.tabs.remove(v.tabId).catch(() => {});
   }
   if (done.length) await api('/api/gpt/deleted', { done, failed: [] }).catch(() => {});
 }
@@ -266,7 +281,7 @@ export async function syncMirror() {
     await noteToDelete(toDelete);
     // A kept chat is done once the server no longer holds that conversation for the job.
     const held = new Map(threads.filter((r) => r.stage !== 'closing').map((r) => [r.key, convId(r.conversation)]));
-    await closeKept((key, v) => !held.get(key) || held.get(key) !== convId(v.conversation), { deleteChats: true });
+    await closeKept((key, v) => !held.get(key) || held.get(key) !== convId(v.conversation), { deleteChats: true, keepOne: true });
   } catch (e) { if (e?.status === 401) await chrome.storage.local.set({ [K.threads]: {} }); }
 }
 async function noteToDelete(n) { if (typeof n === 'number' && (await state()).toDelete !== n) await setState({ toDelete: n }); }
@@ -446,6 +461,7 @@ async function finish(frame, res) {
   const kind = res?.ok ? '' : (res?.kind || 'error');
   // A written CV / answers: the chat stays open for the bidder (keepTab). Anything else: closed.
   if (!kind && (lease.work === 'write' || lease.work === 'answer') && lease.key && /\/c\//.test(f.conversation)) await keepTab(frame, lease.key, f.conversation);
+  else if (!kind && lease.work === 'delete' && (await state()).enabled && !Object.keys(await keptTabs()).length) await keepTab(frame, IDLE, '');   // the one tab stays for the next CV
   else await closeFrame(frame);
   if (res?.ok && res.plan) await setState({ plan: res.plan });
   if (lease.work === 'delete' && kind === 'needs_login' && !(await state()).enabled) {

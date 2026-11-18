@@ -1481,6 +1481,19 @@ class Storage:
             rows = session.scalars(select(GeneratedResumeRow).order_by(GeneratedResumeRow.created_at_ts)).all()
             return [_normalize_generated_resume(dict(row.data or {})) for row in rows]
 
+    def latest_cv_id(self, profile_id: str, job_id: str) -> str:
+        """The newest CV built for this profile + job ('' = none) — so ChatGPT never writes one again."""
+        if not profile_id or not job_id:
+            return ''
+        with session_scope(self.db_path) as session:
+            for row in session.scalars(select(GeneratedResumeRow).where(GeneratedResumeRow.profile_id == str(profile_id),
+                                                                        GeneratedResumeRow.job_id == str(job_id))
+                                       .order_by(GeneratedResumeRow.created_at_ts.desc())).all():
+                data = row.data or {}
+                if str(data.get('status') or 'generated') == 'generated':
+                    return str(row.id or data.get('saved_resume_id') or '')
+        return ''
+
     def get_generated_resumes_for_profile(self, profile_id: str) -> list[dict]:
         """Only one profile's generated resumes, via the indexed profile_id column.
 

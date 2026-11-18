@@ -5,7 +5,7 @@
 export const GPT_KEYS = { threads: 'gptThreads', state: 'gptState' };
 export const CHAT_ORIGINS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
 export const CHAT_URL = 'https://chatgpt.com/';
-export const PARALLEL = 1;   // ONE ChatGPT tab: it writes the CVs of the jobs ahead (the server's queue of 3) one after another, and answers questions first
+export const PARALLEL = 1;   // ONE ChatGPT tab: it writes the CVs of the jobs ahead (the server's queue of 2) one after another, and answers questions first
 export const threadKey = (profileId, jobId) => `${profileId}:${jobId}`;
 
 export async function gptSnapshot() {

@@ -123,10 +123,10 @@ function ExtensionGuide() {
             name it after the profile → ⚙ <strong>Memory: Project-only</strong> → Create. With that project open, in the panel:
             ⚙ Settings → <strong>Project · &lt;profile&gt;</strong> → <strong>Use This Tab</strong>. It's saved for every bidder; that
             profile's CVs and answers are then written inside its project.</li>
-          <li><strong>Out Bids</strong> — jobs that apply on the company's site. ChatGPT prepares <strong>3 jobs</strong>
-            (shown under the job): the one on screen and the next 2, one after another in <strong>one ChatGPT tab</strong>.
+          <li><strong>Out Bids</strong> — jobs that apply on the company's site. ChatGPT prepares <strong>2 jobs</strong>
+            (shown under the job): the one on screen and the next one, one after another in <strong>one ChatGPT tab</strong>.
             <strong> Download CV</strong>, apply, then <strong>Mark as Applied</strong> (or Report / Skip): its ChatGPT chat is
-            deleted, the next of the 3 comes up, and the newest job in the queue joins them.</li>
+            deleted, the other one comes up, and the newest job in the queue joins it. A job that already has a CV is never sent to ChatGPT again.</li>
           <li><strong>Tech Questions</strong> — paste the application's questions (one per line) and click
             <strong> Save &amp; Answer</strong>: ChatGPT answers them first, before any other CV, in the same chat that wrote the CV. Every bidder on
             that job sees them; click <strong>Copy</strong> to use an answer.</li>

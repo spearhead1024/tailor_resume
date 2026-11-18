@@ -24,7 +24,7 @@ from core.db import session_scope
 from core.db.models import CvQueueRow, GptChatRow
 from core.storage import _write_lock
 
-AHEAD = 3                                   # Out Bids: CVs prepared for the job on screen + the next 2 — never further
+AHEAD = 2                                   # Out Bids: CVs prepared for the job on screen + the next one — never further
 MAX_ATTEMPTS = 2
 LEASE = {"write": timedelta(minutes=12), "answer": timedelta(minutes=6), "delete": timedelta(minutes=4)}
 IDLE_CLOSE = timedelta(hours=2)             # a ready / failed row nobody touched → its conversation is deleted
@@ -278,7 +278,8 @@ def trash(db_path, user: dict, conversations: Iterable[str], device: str = "") -
 
 
 # ---------- what the extension's worker asks for ----------
-def claim(db_path, user: dict, device: str, slots: int, *, build_task, active: Iterable[str] = (), only_deletes: bool = False) -> dict:
+def claim(db_path, user: dict, device: str, slots: int, *, build_task, active: Iterable[str] = (), only_deletes: bool = False,
+          cv_of=lambda profile_id, job_id: "") -> dict:
     """Lease up to `slots` pieces of work to this browser: one batch of chats to delete, then
     answers for questions (a bidder is waiting for them), then the jobs (highest priority first). build_task(row)
     adds what ChatGPT needs (the CV prompt, the questions). only_deletes: a disconnected
@@ -291,6 +292,13 @@ def claim(db_path, user: dict, device: str, slots: int, *, build_task, active: I
     → {tasks, to_delete}"""
     out: list[dict] = []
     keep = set(active)
+    # CVs that already exist for the queued jobs (looked up before the write lock is taken)
+    existing: dict = {}
+    if not only_deletes:
+        with session_scope(db_path) as session:
+            queued = session.execute(select(CvQueueRow.profile_id, CvQueueRow.job_id).where(
+                CvQueueRow.user_id == user.get("id", ""), CvQueueRow.stage == "queued")).all()
+        existing = {(p, j): cv_of(p, j) for p, j in queued}
     with session_scope(db_path) as session:
         _write_lock(session)
         uid = user.get("id", "")
@@ -337,6 +345,14 @@ def claim(db_path, user: dict, device: str, slots: int, *, build_task, active: I
             if slots <= 0:
                 break
             work = "write" if r.stage == "queued" else "answer"
+            if work == "write":
+                # The job already has a CV for this profile (built by hand, or meanwhile): ChatGPT
+                # doesn't write it again — the row just takes that CV.
+                have = existing.get((r.profile_id, r.job_id), "")
+                if have:
+                    _drop_chat(session, r)
+                    r.stage, r.resume_id, r.error, r.updated_at = "ready", have, "", now
+                    continue
             try:
                 task = build_task(r, work)
             except Exception as exc:                     # e.g. the job is no longer available

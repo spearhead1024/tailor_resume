@@ -56,15 +56,15 @@ def _merge_answers(resume_id: str, fresh: list[dict]) -> None:
 @router.post("/prepare")
 def prepare(body: dict, user: dict = Depends(_bidder)):
     """body: {profile_id, jobs: [{id, company, job_title}], mode: 'out' | 'easy'} — the job on screen
-    first, then the next ones in the Bid queue. Of the first 3 (by position), those without a CV are
-    queued; in Out Bids the chats of jobs outside those 3 are closed (the extension keeps one ChatGPT tab)."""
+    first, then the next ones in the Bid queue. Of the first 2 (by position), those without a CV are
+    queued; in Out Bids the chats of jobs outside those 2 are closed (the extension keeps one ChatGPT tab)."""
     pid = str((body or {}).get("profile_id") or "").strip()
     if not pid:
         raise HTTPException(status_code=400, detail="profile_id is required")
     R._check_profile_access(user, pid)
     jobs = [j for j in (body or {}).get("jobs") or [] if isinstance(j, dict) and j.get("id")][:20]
     with_cv = {r.get("job_id") for r in storage.get_generated_resumes_for_profile(pid) if r.get("status") == "generated"}
-    # Out Bids (mode "out"): ChatGPT chats only for the job on screen + the next 2 (Q.AHEAD).
+    # Out Bids (mode "out"): ChatGPT chats only for the job on screen + the next one (Q.AHEAD).
     cap = str((body or {}).get("mode") or "") == "out"
     # Out Bids leaves the Easy Apply jobs' CVs and chats alone (Easy Bids' Gen CV work).
     spare = storage.easy_job_ids if cap else (lambda ids: set())
@@ -166,7 +166,8 @@ def claim(body: dict, user: dict = Depends(_bidder)):
     slots = max(0, min(int((body or {}).get("slots") or 0), 5))
     device = str((body or {}).get("device") or "")[:64]
     active = [str(k) for k in (body or {}).get("active") or []][:40]
-    return Q.claim(storage.db_path, user, device, slots, build_task=_task, active=active, only_deletes=bool((body or {}).get("only_deletes")))
+    return Q.claim(storage.db_path, user, device, slots, build_task=_task, active=active, only_deletes=bool((body or {}).get("only_deletes")),
+                   cv_of=storage.latest_cv_id)
 
 
 @router.post("/started")

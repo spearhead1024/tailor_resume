@@ -84,7 +84,7 @@ const S = {
   manual: false,       // show the copy-prompt / paste-JSON flow while ChatGPT is connected
   profiles: [], profileId: '',
   queue: [], queueLoading: false,
-  win: [],             // Out Bids: the working set — the job on screen + the next 2 (see fillWin)
+  win: [],             // Out Bids: the working set — the job on screen + the next one (see fillWin)
   combo: { open: false, q: '', active: 0 },
   jobId: '', job: null,
   resumeId: '', ats: null, atsScore: 0, atsOpen: false,
@@ -418,15 +418,15 @@ async function selectProfile(id) {
   if (S.mode === 'easy') scheduleEasyCheck(true);   // the same LinkedIn job, for this profile
 }
 
-// ---------- Out Bids: the working set of 3 ----------
-// Out Bids works through a fixed SET of 3 jobs — the one on screen and the 2 after it — and ChatGPT
-// writes their CVs in 3 tabs (core/cv_queue.AHEAD). When a job is done (Mark as Applied / Report /
+// ---------- Out Bids: the working set of 2 ----------
+// Out Bids works through a fixed SET of 2 jobs — the one on screen and the one after it — and ChatGPT
+// writes their CVs one after another in its one tab (core/cv_queue.AHEAD). When a job is done (Mark as Applied / Report /
 // Skip) it leaves the set, the NEXT job of the set comes up (its CV is already written), and the set
 // is filled again with the NEWEST job of the queue that isn't in it — whose CV ChatGPT starts at once.
 // The set is kept per profile (session storage): new jobs arriving at the top of the queue, a refresh
 // or reopening the panel never make the bidder jump to another job. (It used to take "the job at the
 // same position" in the reloaded, newest-first queue — new arrivals pushed that 3, 6… jobs down.)
-const WIN = 3;
+const WIN = 2;
 const winKey = (pid) => `outWin:${pid}`;
 let winPid = '';
 async function loadWin() {
@@ -699,7 +699,7 @@ function renderLogin() {
 const gptOn = () => !!S.gptSnap?.state.enabled;
 const currentThread = () => (S.gptSnap && S.profileId && S.jobId ? S.gptSnap.threads[threadKey(S.profileId, S.jobId)] || null : null);
 
-// Out Bids: the working set (the job on screen + the next 2 — core/cv_queue.AHEAD) gets its CVs written
+// Out Bids: the working set (the job on screen + the next one — core/cv_queue.AHEAD) gets its CVs written
 // ahead, never more. Easy Bids: only the
 // jobs Gen CV was pressed for (the one on screen first) — nothing is written just by looking at a job.
 function gptPrepare() {
@@ -709,7 +709,7 @@ function gptPrepare() {
     ? [...S.gen.values()].sort((a, b) => (b.id === S.jobId) - (a.id === S.jobId))
     : S.win.map((id) => S.queue.find((j) => j.id === id)).filter(Boolean);   // the working set, the job on screen first
   const jobs = list.map((j) => ({ id: j.id, company: j.company, job_title: j.job_title }));
-  // The server keeps the queue (3 ahead, skipping jobs with a CV); the worker is told to look.
+  // The server keeps the queue (2 ahead, skipping jobs with a CV); the worker is told to look.
   if (jobs.length) api('/api/gpt/prepare', { method: 'POST', body: { profile_id: S.profileId, jobs, mode: S.mode === 'easy' ? 'easy' : 'out' } }).then(() => gpt('sync')).catch(() => {});
 }
 async function connectGpt() {
@@ -1269,7 +1269,7 @@ function patchSettingsGpt() {
   const del = st.toDelete ? ` · ${st.toDelete} chat${st.toDelete === 1 ? '' : 's'} to delete` : '';
   const desc = !st.enabled ? 'Writes your CVs and answers tech questions. A paid ChatGPT plan is required.'
     : st.notice ? esc(st.notice)
-    : `${st.plan ? `ChatGPT ${esc(planLabel(st.plan))}. ` : ''}${mine.length ? `${ready}/${mine.length} CVs ready for this profile${del}. ` : del ? `${del.slice(3)}. ` : ''}Each CV's chat stays open in a tab until the job is done.`;
+    : `${st.plan ? `ChatGPT ${esc(planLabel(st.plan))}. ` : ''}${mine.length ? `${ready}/${mine.length} CVs ready for this profile${del}. ` : del ? `${del.slice(3)}. ` : ''}One ChatGPT tab; a CV's chat is deleted when the job is done.`;
   const acts = !st.enabled ? '<button class="sm" data-action="gptConnect">Connect</button>'
     : `${['needs_login', 'needs_plan'].includes(st.status) ? '<button class="secondary sm" data-action="gptSignIn">Open ChatGPT</button><button class="sm" data-action="gptContinue">Continue</button>' : ''}
        <button class="ghost sm" data-action="gptDisconnect" title="Stop writing CVs with ChatGPT and delete its chats">Disconnect</button>`;
@@ -1660,7 +1660,7 @@ function companyPill(info) {
   return `<span class="pill ${key}" title="${esc(tip)}">${label}</span>`;
 }
 
-// Out Bids' working set (the job on screen + the next 2), each with where its CV stands. A click
+// Out Bids' working set (the job on screen + the next one), each with where its CV stands. A click
 // opens that job.
 function winLine() {
   if (S.mode !== 'bid' || !(S.win || []).length) return '';
@@ -1672,7 +1672,7 @@ function winLine() {
     return `<button class="win-chip ${st[0]}${id === S.jobId ? ' on' : ''}" data-action="pickWin" data-id="${esc(id)}" title="${esc(`${j.company} — ${j.job_title}: ${st[2]}`)}">
       <span class="n">${i + 1}</span><span class="c">${esc(j.company)}</span><span class="s">${st[1]}</span></button>`;
   }).join('');
-  return `<div class="win-line" title="The 3 jobs ChatGPT works on — done ones are replaced by the newest job">${chips}</div>`;
+  return `<div class="win-line" title="The 2 jobs ChatGPT works on — done ones are replaced by the newest job">${chips}</div>`;
 }
 function patchJob() {
   patchCombo();
