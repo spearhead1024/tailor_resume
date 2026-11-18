@@ -1,38 +1,21 @@
-"""Metrics endpoint.
+"""Metrics endpoint — one week (Mon..Sun) of applications and jobs added, per person.
 
-Returns one row per (user, profile) pair with daily / weekly / lifetime
-application counts. Each cell is delivered as a pair {applied, total} so
-the UI can render the `applied / total` fraction.
+The numbers are built to equal the other tabs for the same work day (5pm JST → 5pm JST):
 
-Query params:
-    week_start: ISO date (YYYY-MM-DD) of the Monday of the target week.
-                Defaults to the current week. The week is Mon..Sun (7 days); every cell
-                also carries `easy` — the part done through LinkedIn Easy Apply.
+* Applications: every applied CV, filed under the day it was APPLIED (`applied_at`) — local
+  bidders and VPS_1's (the old server, mirrored) alike — so a day's GRAND TOTAL is exactly what the
+  Applied tab lists for that day. One row per (applier, profile); a local profile's row also shows
+  its to-do pool (approved jobs added that day that match the profile's region and tech stacks).
+* Jobs added: every job that isn't deleted, filed under the day it was added (`submitted_at`),
+  per adder — a local user, or the VPS_1 adder of a synced job — so a day's GRAND TOTAL is the
+  Jobs tab's count for that day (all statuses but deleted; ✓ = its "approved").
+* `easy` in every cell: the part that is LinkedIn Easy Apply (core/easy_apply, by the job link).
 
-Response shape::
-
-    {
-      "week_start": "2026-05-12",
-      "week_end":   "2026-05-18",
-      "days":       ["2026-05-12", ..., "2026-05-18"],
-      "rows":       [
-        {
-          "user_id":     "...",
-          "username":    "...",
-          "profile_id":  "...",
-          "profile_name":"...",
-          "assigned":    true,       # false = not their profile; shown for applies they made this week
-          "daily":       [{applied, total}, ... 7 entries],
-          "week":        {applied, total},
-          "lifetime":    {applied, total}
-        }
-      ],
-      "totals":     {                  # admin only
-        "daily":    [{applied, total}, ... 7 entries],
-        "week":     {applied, total},
-        "lifetime": {applied, total}
-      }
-    }
+Query: week_start = the Monday (YYYY-MM-DD); default this week.
+Rows: {user_id, username, source: local|vps1, profile_id, profile_name, assigned,
+       daily: [{applied, total, easy} x7], week: {...}}   (total is null for a VPS_1 profile)
+job_rows: {user_id, username, source, daily: [{uploaded, approved, rejected, pending, easy} x7], week}
+totals / job_totals (admins): the same cells summed over everyone.
 """
 from __future__ import annotations
 
@@ -42,6 +25,7 @@ from fastapi import APIRouter, Depends
 from auth import get_current_user, storage
 from core.storage import tech_stacks_match
 from core.easy_apply import is_easy_apply
+from core import vps1_adapt
 
 # The Metrics day starts at 5pm JST (UTC+9, no daylight saving) and runs to 5pm JST the next
 # day — i.e. 08:00 UTC, which is 3am EST / 4am EDT, so a US working day sits wholly inside one
@@ -91,286 +75,190 @@ def _day_str(iso_ts: str) -> str:
     return _metrics_day(ts).isoformat()
 
 
+def _vps1_key(name: str) -> str:
+    return "vps1:" + (str(name or "").strip().lower() or "unknown")
+
+
 @router.get("")
 def get_metrics(week_start: str = "", user: dict = Depends(get_current_user)):
-    """Role-aware metrics for one calendar week (Mon..Sun)."""
+    """Role-aware metrics for one week (Mon..Sun) — see the module docstring."""
     is_admin = bool(user.get("is_admin"))
-
-    # The whole week, Mon..Sun: jobs are added on weekends too (and applied on Monday), so a
-    # Saturday / Sunday intake must show — Mon..Fri alone silently dropped them.
     requested = _parse_iso_date(week_start) if week_start else None
     monday = _monday_of(requested or _today())
     sunday = monday + timedelta(days=6)
-    days = [monday + timedelta(days=i) for i in range(7)]
-    day_strs = [d.isoformat() for d in days]
+    day_strs = [(monday + timedelta(days=i)).isoformat() for i in range(7)]
+    in_week = set(day_strs)
 
-    # Pull data
     users = storage.get_users()
     profiles = storage.get_profiles()
-    resumes = [r for r in storage.get_generated_resumes() if r.get("status") == "generated"]
     profile_by_id = {p.get("id"): p for p in profiles}
+    all_jobs = storage.get_jobs()
+    job_link = {j.get("id"): j.get("link") or "" for j in all_jobs}
 
-    all_jobs = storage.get_jobs()  # every status — used for job-upload metrics
-
-    # To-Do denominator = approved jobs eligible for the profile: region match
-    # AND tech-stack match (any of the profile's main skills mentioned as a whole
-    # word in the job description; empty stacks = All-Stack = every job).
-    all_approved_jobs = [
-        j for j in all_jobs
-        if j.get("status") == "approved"
-        and not j.get("flagged")
-        and not j.get("admin_applied")
-    ]
-    job_by_id = {j.get("id"): j for j in all_approved_jobs}
+    # The to-do pool of a local profile: approved jobs matching its region AND tech stacks.
+    approved = [j for j in all_jobs if j.get("status") == "approved" and not j.get("flagged") and not j.get("admin_applied")]
 
     def _regions_match(job_region: str, profile_region: str) -> bool:
         return "ANY" in (job_region, profile_region) or job_region == profile_region
 
     def _job_eligible(job: dict, profile: dict) -> bool:
-        """A job counts for a profile only if region AND tech stacks match."""
         p_region = str(profile.get("region") or "ANY").upper().strip() or "ANY"
         if not _regions_match(str(job.get("region") or "ANY").upper(), p_region):
             return False
         return tech_stacks_match(job.get("description"), profile.get("tech_stacks") or [])
 
-    def _profile_approved_jobs(profile: dict) -> list[dict]:
-        return [j for j in all_approved_jobs if _job_eligible(j, profile)]
+    pool_cache: dict[str, dict[str, int]] = {}
 
-    # For the bidder view, restrict to the bidder's own assigned profiles.
+    def _pool(pid: str) -> dict[str, int]:
+        if pid not in pool_cache:
+            prof = profile_by_id.get(pid) or {}
+            per_day: dict[str, int] = defaultdict(int)
+            for j in approved:
+                d = _day_str(j.get("submitted_at"))
+                if d in in_week and _job_eligible(j, prof):
+                    per_day[d] += 1
+            pool_cache[pid] = per_day
+        return pool_cache[pid]
+
+    me = user.get("id") or ""
     if not is_admin:
+        users = [u for u in users if u.get("id") == me]
         allowed = set(user.get("assigned_profile_ids") or [])
-        # Bidder's "user row" is themselves only.
-        users = [u for u in users if u.get("id") == user.get("id")]
         for u in users:
             u["assigned_profile_ids"] = [pid for pid in (u.get("assigned_profile_ids") or []) if pid in allowed]
+    user_by_id = {u.get("id"): u for u in users}
 
-    # Build per-(applier, profile) buckets of APPLIES.
-    #
-    # Attribution is EXACT: each application counts ONLY for the bidder who
-    # actually marked it applied (applied_by_user_id), so a profile shared by
-    # two bidders never leaks one bidder's applies onto the other.
-    #
-    # The day bucket is the day the JOB was added (submitted_at, by the 5pm-JST day) — NOT
-    # the day the bidder clicked "applied". Each column is therefore "of the
-    # jobs that arrived that day, how many has this bidder applied" — coverage
-    # of the day's intake, which is how the team reads the grid (e.g. Tuesday
-    # 50/50 = all of Tuesday's 50 jobs applied). Bucketing by the click day
-    # instead scatters one day's jobs across whatever days the bidder happened
-    # to work them and lets "applied" exceed that day's intake. A bidder onboarded
-    # later still has their applies land on the day each job was added.
-    #
-    # `applies_by_profile` unions every applier (incl. an admin helping out) per
-    # profile for the admin grand total below. Count UNIQUE JOBS (deduped by
-    # job_id) so regenerated resumes don't inflate the count.
-    # `easy_*`: the subset applied through LinkedIn Easy Apply (a LinkedIn job link — core/easy_apply).
-    def _new_bucket() -> dict:
-        return {"daily": defaultdict(set), "week_jobs": set(), "lifetime_jobs": set(),
-                "easy_daily": defaultdict(set), "easy_week": set(), "easy_lifetime": set()}
-    applies: dict[tuple[str, str], dict] = defaultdict(_new_bucket)
-    applies_by_profile: dict[str, dict] = defaultdict(_new_bucket)
-    for r in resumes:
-        if r.get("applied_status") != "applied":
+    # ── Applications: (applier, profile) → day → [applies], each {job_id, easy} ─────────────
+    applies: dict[tuple[str, str], dict[str, list[bool]]] = defaultdict(lambda: defaultdict(list))
+    names: dict[str, tuple[str, str]] = {}          # applier key → (username, source)
+    profile_names: dict[str, str] = {}
+    for r in storage.get_applied_metrics_index():   # the Applied tab's rows, light (no resume blobs)
+        d = _day_str(r.get("applied_at") or r.get("created_at"))
+        if d not in in_week:
             continue
+        uid = r.get("applied_by_user_id") or r.get("created_by_user_id") or ""
         pid = r.get("profile_id") or ""
-        job_id = r.get("job_id") or ""
-        applier = r.get("applied_by_user_id") or ""
-        if not pid or not job_id or not applier:
+        if not uid or not pid or (not is_admin and uid != me):
             continue
-        # Only count applies against jobs still in the approved to-do pool AND
-        # still eligible for this profile (region + tech stacks), so the
-        # numerator stays inside the same cohort as the denominator.
-        job = job_by_id.get(job_id)
-        if not job:
-            continue  # job deleted / not approved — exclude from metrics
-        prof = profile_by_id.get(pid)
-        if prof is None or not _job_eligible(job, prof):
-            continue  # job no longer matches the profile's region/tech stacks
-        job_added = _day_str(job.get("submitted_at"))
-        if not job_added:
-            continue
-        easy = is_easy_apply(job.get("link") or "")
-        for b in (applies[(applier, pid)], applies_by_profile[pid]):
-            b["lifetime_jobs"].add(job_id)
-            if easy:
-                b["easy_lifetime"].add(job_id)
-            if job_added in day_strs:
-                b["daily"][job_added].add(job_id)
-                if easy:
-                    b["easy_daily"][job_added].add(job_id)
-            if monday.isoformat() <= job_added <= sunday.isoformat():
-                b["week_jobs"].add(job_id)
-                if easy:
-                    b["easy_week"].add(job_id)
-
-    # Compose rows. For each user, one row per assigned profile — plus one per profile they
-    # applied on THIS WEEK without being assigned to it. Admins work jobs on any profile, never
-    # assigned, so without these rows an admin's applies counted nowhere but the grand total.
-    applied_this_week: dict[str, list[str]] = defaultdict(list)
-    for (applier, pid), b in applies.items():
-        if b["week_jobs"]:
-            applied_this_week[applier].append(pid)
-    rows: list[dict] = []
-    # Per-profile to-do denominators, captured once per profile for the grand
-    # total (and to de-duplicate profiles shared by several bidders).
-    profile_denominator: dict[str, dict] = {}
-    for u in users:
-        uid = u.get("id") or ""
-        uname = u.get("username") or u.get("email") or uid
-        assigned = list(u.get("assigned_profile_ids") or [])
-        extra = sorted(set(applied_this_week.get(uid, ())) - set(assigned))
-        # A user with neither assigned profiles nor applies this week gets no rows (the table
-        # would fill with empty ones).
-        for pid in assigned + extra:
-            prof = profile_by_id.get(pid)
-            if not prof:
+        link = r.get("job_link") or job_link.get(r.get("job_id"), "")
+        applies[(uid, pid)][d].append(is_easy_apply(link))
+    if is_admin:   # VPS_1's applies (the Applied tab lists them too)
+        for a in storage.get_vps1_applications(status="applied"):
+            row = vps1_adapt.applied_row(a)
+            d = _day_str(row.get("applied_at") or row.get("created_at"))
+            if d not in in_week:
                 continue
-            b = applies.get((uid, pid)) or _new_bucket()
-            # Denominator filtered by this profile's region AND tech stacks.
-            profile_jobs = _profile_approved_jobs(prof)
-            p_added_per_day: dict[str, int] = defaultdict(int)
-            p_added_in_week = 0
-            for j in profile_jobs:
-                submitted = _day_str(j.get("submitted_at"))
-                if not submitted:
-                    continue
-                if submitted in day_strs:
-                    p_added_per_day[submitted] += 1
-                if monday.isoformat() <= submitted <= sunday.isoformat():
-                    p_added_in_week += 1
-            p_added_lifetime = len(profile_jobs)
-            rows.append({
-                "user_id": uid,
-                "username": uname,
-                "profile_id": pid,
-                "profile_name": prof.get("name", ""),
-                "assigned": pid in assigned,
-                "daily": [
-                    {"applied": len(b["daily"].get(d, ())), "total": p_added_per_day.get(d, 0),
-                     "easy": len(b["easy_daily"].get(d, ()))}
-                    for d in day_strs
-                ],
-                "week":     {"applied": len(b["week_jobs"]),     "total": p_added_in_week, "easy": len(b["easy_week"])},
-                "lifetime": {"applied": len(b["lifetime_jobs"]), "total": p_added_lifetime, "easy": len(b["easy_lifetime"])},
-            })
-            # Capture this profile's denominator once for the grand total.
-            profile_denominator[pid] = {
-                "daily":    {d: p_added_per_day.get(d, 0) for d in day_strs},
-                "week":     p_added_in_week,
-                "lifetime": p_added_lifetime,
-            }
+            key = _vps1_key(row.get("bidder"))
+            names[key] = (str(row.get("bidder") or "unknown"), "vps1")
+            pid = str(row.get("profile_id") or "vps1:")
+            profile_names[pid] = str(row.get("profile_name") or "")
+            applies[(key, pid)][d].append(is_easy_apply(row.get("job_link") or ""))
 
-    # Stable sort: by username, then assigned profiles before the extra ones, then profile name.
-    rows.sort(key=lambda r: (r["username"].lower(), not r["assigned"], r["profile_name"].lower()))
+    def _cell(easies: list[bool], total) -> dict:
+        return {"applied": len(easies), "total": total, "easy": sum(1 for e in easies if e)}
 
-    payload: dict = {
-        "week_start": monday.isoformat(),
-        "week_end":   sunday.isoformat(),
-        "days":       day_strs,
-        "rows":       rows,
-    }
-
-    if is_admin:
-        # Grand totals: per profile, count UNIQUE jobs applied by ANYONE on that
-        # profile (every assigned bidder, plus an admin helping out — deduped so
-        # a job two people both marked counts once) over the profile's to-do
-        # pool. Restricted to profiles that have a row so the total reconciles
-        # with the table; iterating profile_denominator de-dupes shared profiles.
-        shown = list(profile_denominator.keys())
-        totals_daily = [
-            {"applied": sum(len(applies_by_profile[pid]["daily"].get(d, ())) for pid in shown),
-             "total":   sum(profile_denominator[pid]["daily"][d] for pid in shown),
-             "easy":    sum(len(applies_by_profile[pid]["easy_daily"].get(d, ())) for pid in shown)}
-            for d in day_strs
-        ]
-        totals_week = {
-            "applied": sum(len(applies_by_profile[pid]["week_jobs"]) for pid in shown),
-            "total":   sum(profile_denominator[pid]["week"] for pid in shown),
-            "easy":    sum(len(applies_by_profile[pid]["easy_week"]) for pid in shown),
-        }
-        totals_lifetime = {
-            "applied": sum(len(applies_by_profile[pid]["lifetime_jobs"]) for pid in shown),
-            "total":   sum(profile_denominator[pid]["lifetime"] for pid in shown),
-            "easy":    sum(len(applies_by_profile[pid]["easy_lifetime"]) for pid in shown),
-        }
-        payload["totals"] = {
-            "daily":    totals_daily,
-            "week":     totals_week,
-            "lifetime": totals_lifetime,
-        }
-
-    # ── Job-upload metrics ─────────────────────────────────────────────────
-    # Per uploader: how many jobs they added, broken down by approved/rejected,
-    # bucketed by the upload date (submitted_at). Synced jobs have no local uploader
-    # (their adder is a VPS1 account), so they're excluded; deleted jobs don't count
-    # as an "upload".
-    def _zero_job() -> dict:
-        return {"uploaded": 0, "approved": 0, "rejected": 0, "easy": 0}
-
-    def _new_job_bucket() -> dict:
-        return {"daily": defaultdict(_zero_job), "week": _zero_job(), "lifetime": _zero_job()}
-
-    def _bump(cell: dict, st: str, easy: bool) -> None:
-        cell["uploaded"] += 1
-        if easy:
-            cell["easy"] += 1
-        if st == "approved":
-            cell["approved"] += 1
-        elif st == "rejected":
-            cell["rejected"] += 1
-
-    job_buckets: dict[str, dict] = defaultdict(_new_job_bucket)
-    for j in all_jobs:
-        uid = str(j.get("created_by_user_id") or "").strip()
-        if not uid:
+    rows: list[dict] = []
+    keys = set(applies)
+    for u in users:                                  # a local user's assigned profiles show even when empty
+        for pid in u.get("assigned_profile_ids") or []:
+            if pid in profile_by_id:
+                keys.add((u.get("id"), pid))
+    for uid, pid in keys:
+        local = not uid.startswith("vps1:")
+        u = user_by_id.get(uid) if local else None
+        if local and u is None:
+            continue                                  # a deleted account / another bidder (bidder view)
+        if local and pid not in profile_by_id:
             continue
+        days = applies.get((uid, pid), {})
+        pool = _pool(pid) if local else None
+        daily = [_cell(days.get(d, []), pool.get(d, 0) if pool is not None else None) for d in day_strs]
+        week = _cell([e for d in day_strs for e in days.get(d, [])], sum(pool.values()) if pool is not None else None)
+        rows.append({
+            "user_id": uid,
+            "username": (u.get("username") or u.get("email") or uid) if local else names[uid][0],
+            "source": "local" if local else "vps1",
+            "profile_id": pid,
+            "profile_name": (profile_by_id[pid].get("name", "") if local else profile_names.get(pid, "")),
+            "assigned": (pid in (u.get("assigned_profile_ids") or [])) if local else True,
+            "daily": daily,
+            "week": week,
+        })
+    rows.sort(key=lambda r: (r["source"] != "local", r["username"].lower(), not r["assigned"], r["profile_name"].lower()))
+
+    payload: dict = {"week_start": monday.isoformat(), "week_end": sunday.isoformat(), "days": day_strs, "rows": rows}
+
+    def _sum(cells: list[dict], keys_=("applied", "easy")) -> dict:
+        out = {k: sum(c.get(k) or 0 for c in cells) for k in keys_}
+        return out
+
+    if is_admin:   # = the Applied tab's count for each day (each applied CV once)
+        payload["totals"] = {
+            "daily": [{**_sum([r["daily"][i] for r in rows]), "total": None} for i in range(7)],
+            "week": {**_sum([r["week"] for r in rows]), "total": None},
+        }
+
+    # ── Jobs added: adder → day → cells ───────────────────────────────────────────────────
+    def _zero_job() -> dict:
+        return {"uploaded": 0, "approved": 0, "rejected": 0, "pending": 0, "easy": 0}
+
+    job_days: dict[str, dict[str, dict]] = defaultdict(lambda: defaultdict(_zero_job))
+    adder_names: dict[str, tuple[str, str]] = {}
+    for j in all_jobs:
         st = str(j.get("status") or "")
         if st == "deleted":
             continue
-        added = _day_str(j.get("submitted_at"))
-        if not added:
+        d = _day_str(j.get("submitted_at"))
+        if d not in in_week:
             continue
-        b = job_buckets[uid]
-        easy = is_easy_apply(j.get("link") or "")
-        _bump(b["lifetime"], st, easy)
-        if added in day_strs:
-            _bump(b["daily"][added], st, easy)
-        if monday.isoformat() <= added <= sunday.isoformat():
-            _bump(b["week"], st, easy)
+        uid = str(j.get("created_by_user_id") or "").strip()
+        if uid and uid in user_by_id:
+            key = uid
+        elif uid:
+            continue                                  # another local user (bidder view) / a deleted account
+        else:
+            if not is_admin:
+                continue
+            key = _vps1_key(j.get("created_by_username"))      # synced from VPS_1: its adder there
+            adder_names[key] = (str(j.get("created_by_username") or "").strip() or "unknown", "vps1")
+        c = job_days[key][d]
+        c["uploaded"] += 1
+        if st in ("approved", "rejected", "pending"):
+            c[st] += 1
+        if is_easy_apply(j.get("link") or ""):
+            c["easy"] += 1
 
-    # One row per job_adder, and per anyone else who added a job THIS WEEK (an admin adding jobs
-    # by hand used to count nowhere). Admins see all; everyone else sees themselves, because
-    # `users` was already filtered above for non-admins.
     job_rows: list[dict] = []
-    for u in users:
-        uid = u.get("id") or ""
-        added_this_week = uid in job_buckets and job_buckets[uid]["week"]["uploaded"] > 0
-        if "job_adder" not in set(u.get("roles") or []) and not added_this_week:
+    job_keys = set(job_days) | {u.get("id") for u in users if "job_adder" in set(u.get("roles") or [])}
+    for key in job_keys:
+        local = not str(key).startswith("vps1:")
+        u = user_by_id.get(key) if local else None
+        if local and u is None:
             continue
-        uname = u.get("username") or u.get("email") or uid
-        b = job_buckets.get(uid) or {"daily": {}, "week": _zero_job(), "lifetime": _zero_job()}
+        days = job_days.get(key, {})
+        daily = [dict(days.get(d) or _zero_job()) for d in day_strs]
+        week = _zero_job()
+        for c in daily:
+            for k in week:
+                week[k] += c[k]
         job_rows.append({
-            "user_id": uid,
-            "username": uname,
-            "daily": [dict(b["daily"].get(d) or _zero_job()) for d in day_strs],
-            "week": dict(b["week"]),
-            "lifetime": dict(b["lifetime"]),
+            "user_id": key,
+            "username": (u.get("username") or u.get("email") or key) if local else adder_names[key][0],
+            "source": "local" if local else "vps1",
+            "daily": daily,
+            "week": week,
         })
-    job_rows.sort(key=lambda r: r["username"].lower())
+    job_rows.sort(key=lambda r: (r["source"] != "local", r["username"].lower()))
     payload["job_rows"] = job_rows
-
     if is_admin and job_rows:
         def _sum_job(cells: list[dict]) -> dict:
             out = _zero_job()
             for c in cells:
-                out["uploaded"] += c["uploaded"]
-                out["approved"] += c["approved"]
-                out["rejected"] += c["rejected"]
-                out["easy"] += c["easy"]
+                for k in out:
+                    out[k] += c[k]
             return out
         payload["job_totals"] = {
-            "daily":    [_sum_job([r["daily"][i] for r in job_rows]) for i in range(len(day_strs))],
-            "week":     _sum_job([r["week"] for r in job_rows]),
-            "lifetime": _sum_job([r["lifetime"] for r in job_rows]),
+            "daily": [_sum_job([r["daily"][i] for r in job_rows]) for i in range(7)],
+            "week": _sum_job([r["week"] for r in job_rows]),
         }
-
     return payload

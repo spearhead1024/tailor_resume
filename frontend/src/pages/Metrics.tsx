@@ -30,28 +30,30 @@ function saveHiddenUsers(ids: string[]) {
 // One-time cleanup: drop the legacy keys so they can't linger.
 try { for (const k of ['metrics_selected_users', 'metrics_hidden_users_v2']) localStorage.removeItem(k); } catch { /* */ }
 
-// easy: how many of `applied` went through LinkedIn Easy Apply.
-type Cell = { applied: number; total: number; easy?: number };
+// applied: CVs marked applied that work day (= the Applied tab). total: a local profile's to-do pool
+// that day (approved jobs added, matching region + stacks) — null for VPS1 profiles and the grand
+// total. easy: how many of `applied` were LinkedIn Easy Apply.
+type Cell = { applied: number; total: number | null; easy?: number };
 type Row = {
   user_id: string;
   username: string;
+  source?: 'local' | 'vps1';
   profile_id: string;
   profile_name: string;
   assigned: boolean;   // false = not their profile — they applied on it this week anyway (e.g. an admin)
   daily: Cell[];
   week: Cell;
-  lifetime: Cell;
 };
-type JobCell = { uploaded: number; approved: number; rejected: number; easy?: number };
-type JobRow = { user_id: string; username: string; daily: JobCell[]; week: JobCell; lifetime: JobCell };
+type JobCell = { uploaded: number; approved: number; rejected: number; pending?: number; easy?: number };
+type JobRow = { user_id: string; username: string; source?: 'local' | 'vps1'; daily: JobCell[]; week: JobCell };
 type MetricsResponse = {
   week_start: string;
   week_end: string;
   days: string[];
   rows: Row[];
-  totals?: { daily: Cell[]; week: Cell; lifetime: Cell };
+  totals?: { daily: Cell[]; week: Cell };
   job_rows?: JobRow[];
-  job_totals?: { daily: JobCell[]; week: JobCell; lifetime: JobCell };
+  job_totals?: { daily: JobCell[]; week: JobCell };
 };
 
 /** Parse a YYYY-MM-DD string as LOCAL midnight (NOT UTC midnight).
@@ -123,11 +125,11 @@ function EasyTag({ n }: { n?: number }) {
 }
 
 function CellView({ cell }: { cell: Cell }) {
-  const empty = cell.total === 0 && cell.applied === 0;
+  const empty = !cell.total && cell.applied === 0;
   return (
     <span style={{ fontVariantNumeric: 'tabular-nums', color: empty ? 'var(--muted)' : 'var(--text-soft)' }}>
       <strong style={{ color: cell.applied > 0 ? 'var(--text)' : 'var(--muted)' }}>{cell.applied}</strong>
-      <span style={{ color: 'var(--muted)' }}> / {cell.total}</span>
+      {cell.total != null && <span style={{ color: 'var(--muted)' }} title="To-do: approved jobs added that day for this profile"> / {cell.total}</span>}
       <EasyTag n={cell.easy} />
     </span>
   );
@@ -140,6 +142,7 @@ function JobCellView({ cell }: { cell: JobCell }) {
       <strong style={{ color: empty ? 'var(--muted)' : 'var(--text)' }}>{cell.uploaded}</strong>
       {cell.approved > 0 && <span style={{ color: 'var(--metric-ok, #16a34a)', marginLeft: 4 }}>✓{cell.approved}</span>}
       {cell.rejected > 0 && <span style={{ color: 'var(--metric-bad, #dc2626)', marginLeft: 4 }}>✗{cell.rejected}</span>}
+      {(cell.pending || 0) > 0 && <span style={{ color: 'var(--muted)', marginLeft: 4 }} title="Pending approval">…{cell.pending}</span>}
       <EasyTag n={cell.easy} />
     </span>
   );
@@ -148,9 +151,11 @@ function JobCellView({ cell }: { cell: JobCell }) {
 /** Sum applied and to-do pools across profile rows. Each profile has its OWN pool (filtered by
  *  region and tech stack), so pools are summed, never "first pool × row count". */
 function sumApplied(cells: Cell[]): Cell {
+  // A total only when every cell has one (local profiles): a VPS1 row has no to-do pool.
+  const totals = cells.map((c) => c.total);
   return {
     applied: cells.reduce((a, c) => a + c.applied, 0),
-    total:   cells.reduce((a, c) => a + c.total, 0),
+    total:   totals.every((t) => t != null) ? totals.reduce((a: number, t) => a + (t || 0), 0) : null,
     easy:    cells.reduce((a, c) => a + (c.easy || 0), 0),
   };
 }
@@ -159,16 +164,6 @@ function sumApplied(cells: Cell[]): Cell {
 function aggregateAcrossRows(arrays: Cell[][]): Cell[] {
   if (arrays.length === 0) return [];
   return arrays[0].map((_, i) => sumApplied(arrays.map((a) => a[i])));
-}
-
-/** Rows for a grand total: a profile shared by two bidders appears once per bidder, but its pool
- *  must count once. Keep each profile's pool on its first row and zero it on the others. */
-function poolOncePerProfile(rows: Row[]): Row[] {
-  const seen = new Set<string>();
-  return rows.map((r) => {
-    if (!seen.has(r.profile_id)) { seen.add(r.profile_id); return r; }
-    return { ...r, daily: r.daily.map((c) => ({ ...c, total: 0 })), week: { ...r.week, total: 0 } };
-  });
 }
 
 /** Searchable multi-select of users for the Metrics filter. Works on a HIDDEN set:
@@ -312,9 +307,11 @@ export default function Metrics() {
   const appsTotals = useMemo(() => {
     // Nobody filtered out → the server's totals, which also count a job two people both marked once.
     if (data?.totals && blocks.length === allBlocks.length) return data.totals;
-    const rows = poolOncePerProfile(blocks.flatMap((b) => b.apps));
+    const rows = blocks.flatMap((b) => b.apps);
     if (rows.length === 0) return null;
-    return { daily: aggregateAcrossRows(rows.map((r) => r.daily)), week: sumApplied(rows.map((r) => r.week)) };
+    // Like the server's: the applies of everyone shown (= the Applied tab for them), no to-do pool.
+    const noPool = (c: Cell): Cell => ({ ...c, total: null });
+    return { daily: aggregateAcrossRows(rows.map((r) => r.daily)).map(noPool), week: noPool(sumApplied(rows.map((r) => r.week))) };
   }, [blocks, allBlocks, data]);
   const jobTotals = useMemo(() => {
     const jobRows = blocks.flatMap((b) => (b.jobs ? [b.jobs] : []));
@@ -324,6 +321,7 @@ export default function Metrics() {
       uploaded: cells.reduce((a, c) => a + c.uploaded, 0),
       approved: cells.reduce((a, c) => a + c.approved, 0),
       rejected: cells.reduce((a, c) => a + c.rejected, 0),
+      pending: cells.reduce((a, c) => a + (c.pending || 0), 0),
       easy: cells.reduce((a, c) => a + (c.easy || 0), 0),
     });
     return {
@@ -381,6 +379,8 @@ export default function Metrics() {
           onClick={() => setWeekStart(todayIsoMonday())}>
           This week
         </button>
+        <span className="muted" style={{ fontSize: '0.8rem' }}
+          title="Every tab counts a day the same way: Metrics, Applied and Jobs">A day runs 5pm → 5pm GMT+9</span>
         {isFetching && <span className="spinner" />}
         {isAdmin && userOptions.length > 0 && (
           <div style={{ marginLeft: 'auto' }}>
@@ -399,12 +399,12 @@ export default function Metrics() {
               {showApps && <th rowSpan={2}>Profile</th>}
               {showApps && (
                 <th colSpan={appCols} className="metrics-group-head">
-                  📨 Applications<small>applied / total To-Do · <span className="metrics-easy" style={{ marginLeft: 0 }}>E</span> = Easy Apply · by the day the job was added</small>
+                  📨 Applications<small>applied that day / to-do · <span className="metrics-easy" style={{ marginLeft: 0 }}>E</span> = Easy Apply · total = the Applied tab</small>
                 </th>
               )}
               {showJobs && (
                 <th colSpan={jobCols} className={`metrics-group-head${showApps ? ' metrics-sec' : ''}`}>
-                  📥 Jobs added<small>uploaded ( ✓ approved · ✗ rejected · <span className="metrics-easy" style={{ marginLeft: 0 }}>E</span> Easy Apply )</small>
+                  📥 Jobs added<small>added ( ✓ approved · ✗ rejected · … pending · <span className="metrics-easy" style={{ marginLeft: 0 }}>E</span> Easy Apply ) · total = the Jobs tab</small>
                 </th>
               )}
             </tr>
@@ -434,6 +434,7 @@ export default function Metrics() {
                   <td rowSpan={lines} className="metrics-user-cell">
                     {b.username}
                     {adminIds.has(b.user_id) && <span className="metrics-tag">admin</span>}
+                    {b.user_id.startsWith('vps1:') && <span className="metrics-tag" title="From VPS1 (the old server), mirrored here">VPS1</span>}
                   </td>
                 );
                 const appLine = (i: number) => {

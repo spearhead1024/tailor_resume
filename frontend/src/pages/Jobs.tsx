@@ -552,7 +552,7 @@ export default function Jobs() {
                     onChange={toggleAll} />
                 </th>
               )}
-              <th>Company</th><th style={{ width: '22%' }}>Job title</th><th>Region</th><th>Apply</th><th>Status</th>
+              <th>Company</th><th style={{ width: '22%' }}>Job title</th><th>Region</th><th>Status</th>
               <th style={{ whiteSpace: 'nowrap' }}>AddedAt</th>
               {isAdmin && <th style={{ whiteSpace: 'nowrap' }}>Added by</th>}
               {isAdmin && <th></th>}
@@ -562,7 +562,7 @@ export default function Jobs() {
             {groups.map((group) => (
               <React.Fragment key={group.key}>
                 <tr>
-                  <td colSpan={isAdmin ? 9 : 6} style={{
+                  <td colSpan={isAdmin ? 8 : 5} style={{
                     padding: '0.5rem 0.75rem', fontWeight: 600, fontSize: '0.85rem',
                     color: 'var(--muted)', background: 'var(--panel-2)', borderTop: '2px solid var(--border)',
                   }}>
@@ -587,9 +587,8 @@ export default function Jobs() {
                             onChanged={() => qc.invalidateQueries({ queryKey: ['jobs'] })} />
                         </div>
                       </td>
-                      <td style={{ maxWidth: 260, overflowWrap: 'anywhere' }}>{job.link ? <a href={job.link} target="_blank" rel="noreferrer">{job.job_title}</a> : job.job_title}</td>
+                      <td style={{ maxWidth: 260, overflowWrap: 'anywhere' }}>{job.link ? <a href={job.link} target="_blank" rel="noreferrer">{job.job_title}</a> : job.job_title}<ApplyBadge type={job.apply_type} /></td>
                       <td>{job.region}</td>
-                      <td><ApplyBadge type={job.apply_type} /></td>
                       <td><span className={`pill ${job.status}`}>{job.status}</span></td>
                       <td style={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }} title="US Eastern time">{etDateTime(job.submitted_at || job.approved_at)}</td>
                       {isAdmin && (
@@ -622,7 +621,7 @@ export default function Jobs() {
                     </tr>
                     {job.flagged && (job.reports?.length || 0) > 0 && (
                       <tr>
-                        <td colSpan={isAdmin ? 9 : 6} style={{ padding: '0.75rem 1rem', background: 'rgba(220,38,38,0.06)', borderBottom: '1px solid var(--border)' }}>
+                        <td colSpan={isAdmin ? 8 : 5} style={{ padding: '0.75rem 1rem', background: 'rgba(220,38,38,0.06)', borderBottom: '1px solid var(--border)' }}>
                           <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: 12 }}>
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <div style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--danger,#dc2626)', marginBottom: 4 }}>
@@ -659,7 +658,7 @@ export default function Jobs() {
                     )}
                     {editingId === job.id && (
                       <tr>
-                        <td colSpan={isAdmin ? 9 : 6} style={{ padding: '1rem', background: 'var(--panel-2)' }}>
+                        <td colSpan={isAdmin ? 8 : 5} style={{ padding: '1rem', background: 'var(--panel-2)' }}>
                           <div className="row">
                             <div className="field"><label>Company{REQ}</label><input value={editDraft.company} onChange={(e) => setEditDraft({ ...editDraft, company: e.target.value })} /></div>
                             <div className="field"><label>Job title{REQ}</label><input value={editDraft.job_title} onChange={(e) => setEditDraft({ ...editDraft, job_title: e.target.value })} /></div>

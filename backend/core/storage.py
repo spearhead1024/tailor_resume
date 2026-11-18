@@ -1515,6 +1515,24 @@ class Storage:
         WHERE json_extract(data, '$.applied_status') = 'applied'
     """)
 
+    # The same applied CVs as _APPLIED_INDEX_SQL (so Metrics counts exactly what the Applied tab
+    # lists), with who applied them — for routers/metrics.py, without loading any resume blob.
+    _APPLIED_METRICS_SQL = text("""
+        SELECT json_extract(data, '$.job_id')               AS job_id,
+               json_extract(data, '$.job_link')             AS job_link,
+               json_extract(data, '$.profile_id')           AS profile_id,
+               json_extract(data, '$.applied_at')           AS applied_at,
+               json_extract(data, '$.created_at')           AS created_at,
+               json_extract(data, '$.applied_by_user_id')   AS applied_by_user_id,
+               json_extract(data, '$.created_by_user_id')   AS created_by_user_id
+        FROM generated_resumes
+        WHERE json_extract(data, '$.applied_status') = 'applied'
+    """)
+
+    def get_applied_metrics_index(self) -> list[dict]:
+        with session_scope(self.db_path) as session:
+            return [dict(m) for m in session.execute(self._APPLIED_METRICS_SQL).mappings().all()]
+
     def get_applied_resume_index(self) -> list[dict]:
         """The APPLIED resumes, as lightweight rows for the Applied list.
 
@@ -2040,12 +2058,6 @@ class Storage:
                 if v:
                     names.add(v)
         return names
-
-    def job_submitted_index(self) -> dict[str, str]:
-        """{job_id: submitted_at ISO} for every job — light (two columns), for day-of-adding filters."""
-        with session_scope(self.db_path) as session:
-            return {i: (t.strftime('%Y-%m-%dT%H:%M:%SZ') if t else '')
-                    for i, t in session.execute(select(JobRow.id, JobRow.submitted_at)).all()}
 
     def job_adders(self, **filters) -> list[dict]:
         """The Jobs tab's "Added by" options: everyone with a live account who added a job in the

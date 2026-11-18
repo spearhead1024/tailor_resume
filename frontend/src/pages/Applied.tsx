@@ -24,7 +24,6 @@ type Row = {
   applied_at: string;
   created_at: string;
   apply_type?: string;     // 'easy' (LinkedIn Easy Apply) / 'out'
-  job_added_at?: string;   // with "Job added": the day the job was added
   source?: string;
 };
 type SearchResp = {
@@ -52,10 +51,6 @@ export default function Applied() {
   const [bidder, setBidder] = useUrlState('bidder', '');
   const [dateFrom, setDateFrom] = useUrlState('from', '');
   const [dateTo, setDateTo] = useUrlState('to', '');
-  // Which day the From/To dates mean: the day it was APPLIED, or the day the JOB was ADDED — the
-  // Metrics grid counts an apply under the day its job was added, so "Job added" lists exactly a
-  // Metrics cell (VPS_1's applies aren't in Metrics, so they drop out there).
-  const [dateBy, setDateBy] = useUrlState('by', 'applied');
   const [applyFilter, setApplyFilter] = useUrlState('apply', '');
   const [page, setPage] = useUrlState('page', 1);
   const [pageSize, setPageSize] = useUrlState('size', 25);
@@ -65,7 +60,7 @@ export default function Applied() {
     const t = setTimeout(() => setDebounced(query.trim()), 350);
     return () => clearTimeout(t);
   }, [query]);
-  useOnChange([debounced, profileId, bidder, dateFrom, dateTo, dateBy, applyFilter, pageSize], () => setPage(1));
+  useOnChange([debounced, profileId, bidder, dateFrom, dateTo, applyFilter, pageSize], () => setPage(1));
 
   const params = useMemo(() => {
     const sp = new URLSearchParams();
@@ -75,12 +70,12 @@ export default function Applied() {
     if (dateFrom) sp.set('date_from', dateFrom);
     if (dateTo) sp.set('date_to', dateTo);
     // A From/To day is a work day: 5pm GMT+9 to 5pm GMT+9 the next day (the 12th = 12th 5pm … 13th 4:59pm).
-    if (dateFrom || dateTo) { sp.set('tz', APPLIED_DAY.tz); sp.set('day_start', String(APPLIED_DAY.startHour)); sp.set('date_by', dateBy); }
+    if (dateFrom || dateTo) { sp.set('tz', APPLIED_DAY.tz); sp.set('day_start', String(APPLIED_DAY.startHour)); }
     if (applyFilter) sp.set('apply', applyFilter);
     sp.set('page', String(page));
     sp.set('page_size', String(pageSize));
     return sp.toString();
-  }, [debounced, profileId, bidder, dateFrom, dateTo, dateBy, applyFilter, page, pageSize]);
+  }, [debounced, profileId, bidder, dateFrom, dateTo, applyFilter, page, pageSize]);
 
   const { data, isFetching } = useQuery({
     queryKey: ['applied', 'search', params],
@@ -138,7 +133,7 @@ export default function Applied() {
   }
 
   function clearFilters() {
-    setQuery(''); setProfileId(''); setBidder(''); setDateFrom(''); setDateTo(''); setApplyFilter(''); setDateBy('applied');
+    setQuery(''); setProfileId(''); setBidder(''); setDateFrom(''); setDateTo(''); setApplyFilter('');
   }
   const hasFilters = !!(query || profileId || bidder || dateFrom || dateTo || applyFilter);
 
@@ -163,11 +158,7 @@ export default function Applied() {
           {(data?.bidders || []).map((b) => <option key={b} value={b}>{b}</option>)}
         </select>
         <ApplyTypeSelect value={applyFilter} onChange={setApplyFilter} style={{ maxWidth: 130 }} />
-        <select value={dateBy} onChange={(e) => setDateBy(e.target.value)} style={{ maxWidth: 150 }}
-          title="Applied on: the day it was applied. Job added on: the day the job was added — how Metrics counts (each cell = the jobs added that day, applied). A day runs 5pm GMT+9 → 5pm GMT+9.">
-          <option value="applied">Applied on</option>
-          <option value="added">Job added on</option>
-        </select>
+        <label style={{ fontSize: '0.8rem', color: 'var(--muted)' }} title="A day runs 5pm GMT+9 → 5pm GMT+9 — the same day as Metrics and Jobs">Applied</label>
         <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} style={{ maxWidth: 150 }} title="From — the day starts at 5pm GMT+9 (the 12th = 12th 5pm to 13th 5pm)" />
         <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} style={{ maxWidth: 150 }} title="To — the day starts at 5pm GMT+9 (the 12th = 12th 5pm to 13th 5pm)" />
         {hasFilters && <button className="secondary" onClick={clearFilters} style={{ fontSize: '0.82rem' }}>Clear</button>}
@@ -196,7 +187,7 @@ export default function Applied() {
       ) : (
         <table>
           <thead>
-            <tr><th>Company</th><th>Title</th><th>Apply</th><th>Profile</th><th>Bidder</th><th style={{ whiteSpace: 'nowrap' }}>Applied</th><th></th></tr>
+            <tr><th>Company</th><th>Title</th><th>Profile</th><th>Bidder</th><th style={{ whiteSpace: 'nowrap' }}>Applied</th><th></th></tr>
           </thead>
           <tbody>
             {rows.map((r) => (
@@ -241,8 +232,7 @@ function RowView({ row, open, onToggle, onPdf, onSchedule, tz }: {
         <td>{row.job_company || '—'}</td>
         <td>{row.job_link
           ? <a href={row.job_link} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>{row.job_title}</a>
-          : row.job_title}</td>
-        <td><ApplyBadge type={row.apply_type} /></td>
+          : row.job_title}<ApplyBadge type={row.apply_type} /></td>
         <td>{row.profile_name || '—'}</td>
         <td>{row.bidder || '—'}</td>
         <td style={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }}>{userDateTime(row.applied_at || row.created_at, tz)}</td>
@@ -257,7 +247,7 @@ function RowView({ row, open, onToggle, onPdf, onSchedule, tz }: {
       </tr>
       {open && (
         <tr>
-          <td colSpan={7} style={{ background: 'var(--panel-2)', padding: '1rem' }}>
+          <td colSpan={6} style={{ background: 'var(--panel-2)', padding: '1rem' }}>
             {isLoading ? <span className="spinner" /> : detail ? (
               <div style={{ fontSize: '0.86rem', lineHeight: 1.6 }}>
                 <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 8 }}>
