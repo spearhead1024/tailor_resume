@@ -25,6 +25,7 @@ import { linkedinJobId, readLinkedInJob, readOutsideLink } from './linkedin.js';
 import { CLASSIC_ON, CLASSIC_SEARCH, classicTabKey, classicUrl, isAiSearch, isClassicSearch, describeSearch, applicationOpen } from '../lib/classic.js';
 import { gpt, gptSnapshot, onGptChange, requestChatAccess, threadKey } from '../gpt/client.js';
 import { UPDATE_KEY, diskVersion } from '../lib/self-update.js';
+import { saveFile, cvPdfName } from '../lib/save-file.js';
 
 // ---------- tiny utils ----------
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -206,8 +207,8 @@ async function showJob(job) {
   try {
     const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
     const jobTab = jobTabId != null ? await chrome.tabs.get(jobTabId).catch(() => null) : null;
-    if (active?.id != null && (active.id === jobTabId || jobForUrl(active.url || ''))) {
-      // On the job tab (or a queued job's page): the next job replaces it.
+    if (active?.id != null && (active.id === jobTabId || jobForUrl(active.url || '') || isEmptyTab(active.url || active.pendingUrl))) {
+      // On the job tab, a queued job's page or an empty tab (a new tab): the job opens right there.
       if (active.url !== job.link) await chrome.tabs.update(active.id, { url: job.link });
       setJobTab(active.id);
     } else if (jobTab && jobTab.windowId === active?.windowId) {
@@ -302,11 +303,7 @@ function cvBlob(id) {
 // "<Profile name> resume.pdf" — the same name the web app's Bid tab saves, so either place
 // replaces the file the other saved. Made safe for every OS (Windows forbids \/:*?"<>| and
 // a trailing dot or space; Chrome rejects control characters and a leading dot).
-const cvFilename = () => {
-  const name = String(selectedProfile()?.name || '').replace(/[\\/:*?"<>|\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ')
-    .trim().replace(/^[.\s]+|[.\s]+$/g, '').slice(0, 120);
-  return `${name || 'Resume'} resume.pdf`;
-};
+const cvFilename = () => cvPdfName(selectedProfile()?.name);
 
 // ---------- alerts ----------
 // Success notes fade after 6s. A network error fades after 10s, or the moment the
@@ -500,7 +497,7 @@ async function generate() {
     track('generate', job);
   } finally { S.busy = ''; patchBuild(); }
   if (rid && S.jobId === jobId && S.resumeId === rid) {
-    S.gen.delete(jobId);                   // (Easy Bids: a Gen CV request this answers)
+    S.gen.delete(jobId); saveGen();        // (Easy Bids: a Gen CV request this answers)
     await download();                      // straight to Downloads, replacing
   }
 }
@@ -509,9 +506,20 @@ async function generate() {
 // at once when it already had one. Only while that job is on screen (the file must match the job
 // the bidder is applying to); one that finishes while they look at another job is saved when they
 // come back to it.
+// The Gen CV requests still waiting for their CV are kept in session storage: closing the panel
+// before ChatGPT is done no longer loses the automatic download — the reopened panel saves it.
+const GEN_KEY = 'panelGen';
+const saveGen = () => chrome.storage.session.set({ [GEN_KEY]: { profileId: S.profileId, items: [...S.gen.values()] } }).catch(() => {});
+async function restoreGen() {
+  if (S.mode !== 'easy') return;
+  const g = (await chrome.storage.session.get(GEN_KEY).catch(() => ({})))[GEN_KEY];
+  if (!g || g.profileId !== S.profileId || !Array.isArray(g.items) || !g.items.length) return;
+  for (const it of g.items) if (it?.id && !S.gen.has(it.id)) S.gen.set(it.id, it);
+  gptPrepare(); patchEasy(); maybeAutoDownload();
+}
 function maybeAutoDownload() {
   if (S.mode !== 'easy' || !S.resumeId || !currentJob() || S.busy || !S.gen.has(S.jobId)) return;
-  S.gen.delete(S.jobId);
+  S.gen.delete(S.jobId); saveGen();
   download().catch(showError);
 }
 
@@ -526,41 +534,14 @@ async function download() {
   try {
     const blob = await cvBlob(S.resumeId);
     const url = URL.createObjectURL(blob);
-    const outcome = await saveFile({ url, filename, saveAs: false, conflictAction: 'overwrite' });
+    const outcome = await saveFile({ url, filename, saveAs: false, conflictAction: 'overwrite' }, () => { S.dlAsk = true; patchAlerts(); });
     setTimeout(() => URL.revokeObjectURL(url), 120_000);
+    if (outcome === 'cancelled') { S.dlAsk = true; patchAlerts(); }
     if (outcome === 'complete') { track('download', job); toast(`Saved ${filename} to Downloads`); }
     else if (outcome === 'locked') setError(`Could not replace ${filename}: that file is open in another program (a PDF viewer?). Close it, then click ⬇ to save again.`);
     else if (outcome === 'failed') setError(`Could not save ${filename}. Click ⬇ to try again.`);
     // 'cancelled' (Save As closed) is a choice, not an error.
   } finally { S.busy = ''; patchBuild(); }
-}
-// chrome.downloads.download, resolved with how it ENDED: 'complete' | 'locked' (the file to
-// replace is in use) | 'cancelled' | 'failed'. The download id comes back before the file is
-// written, so the outcome is read from downloads.onChanged.
-function saveFile(opts) {
-  return new Promise((resolve) => {
-    let id = null, settled = false;
-    const done = (v) => { if (settled) return; settled = true; chrome.downloads.onChanged.removeListener(onChanged); clearTimeout(timer); resolve(v); };
-    function onChanged(d) {
-      if (id === null || d.id !== id) return;
-      if (d.state?.current === 'complete') done('complete');
-      else if (d.state?.current === 'interrupted') {
-        const err = String(d.error?.current || '');
-        done(err === 'USER_CANCELED' ? 'cancelled' : /^FILE_(ACCESS_DENIED|BLOCKED|FAILED|NO_SPACE|TOO_LARGE|TRANSIENT_ERROR)$/.test(err) ? 'locked' : 'failed');
-      }
-    }
-    // A Save As dialog can stay open for long; a silent save is done in seconds.
-    const timer = setTimeout(() => done('complete'), opts.saveAs ? 10 * 60_000 : 30_000);
-    chrome.downloads.onChanged.addListener(onChanged);
-    chrome.downloads.download(opts).then((downloadId) => {
-      id = downloadId;
-      // It may have finished before the listener could see it.
-      chrome.downloads.search({ id }).then(([it]) => {
-        if (it?.state === 'complete') done('complete');
-        else if (it?.state === 'interrupted') onChanged({ id, state: { current: 'interrupted' }, error: { current: it.error } });
-      }).catch(() => {});
-    }, (e) => done(/cancel/i.test(e?.message || '') ? 'cancelled' : 'failed'));
-  });
 }
 
 async function finish(kind, run, note) {
@@ -961,7 +942,7 @@ async function addJob({ gen }) {
     // Add Job alone (a CV later) never takes the place of a job being worked on.
     if (S.jobId !== item.id && (gen || !easyPinned())) { await selectJob(item.id, { open: false, item }); track('open_link', item); }
     if (!gen) return;
-    S.gen.set(item.id, { id: item.id, company: item.company, job_title: item.job_title });
+    S.gen.set(item.id, { id: item.id, company: item.company, job_title: item.job_title }); saveGen();
     if (S.resumeId) { maybeAutoDownload(); return; }      // it already has a CV: save it now
     if (gptOn()) gptPrepare();
     else setMessage(`Connect ChatGPT to write the CV automatically — or write it by hand in the Resume card below.`);
@@ -1340,7 +1321,26 @@ async function startMain() {
   patchUpdateBar();
   fetchLatest(true).then(patchUpdates);
   const { [MODE_KEY]: saved } = await chrome.storage.local.get(MODE_KEY).catch(() => ({}));
-  await setMode(modes.includes(saved) ? saved : modes[0]);
+  await setMode((await modeForTab(modes)) || (modes.includes(saved) ? saved : modes[0]));
+  await restoreGen();
+}
+// The tab the panel opens on follows the page you're on:
+//   · an empty tab (new tab, about:blank, a browser page) → Out Bids, and the latest job opens in it;
+//   · LinkedIn → Easy Bids;
+//   · any other site → Add Jobs (a job posting to add) — or Out Bids for a bidder who can't add jobs,
+//     and Out Bids on its own job tab.
+// Without the matching tab (role), the last tab used.
+// (Never this panel's own page, when it is open in a tab: that must not be navigated away.)
+const OWN_PAGES = chrome.runtime.getURL('');
+const isEmptyTab = (url) => !/^https?:\/\//i.test(url || '') && !String(url || '').startsWith(OWN_PAGES);
+async function modeForTab(modes) {
+  const tab = await activeTab();
+  const url = tab?.url || tab?.pendingUrl || '';
+  const has = (m) => modes.includes(m);
+  if (isEmptyTab(url)) return has('bid') ? 'bid' : null;
+  if (isLinkedIn(url)) return has('easy') ? 'easy' : has('add') ? 'add' : null;
+  if (tab?.id != null && tab.id === jobTabId && has('bid')) return 'bid';
+  return has('add') ? 'add' : has('bid') ? 'bid' : null;
 }
 
 function renderFrame(modes) {
@@ -1476,8 +1476,13 @@ function pickJob(id) {
 function patchAlerts() {
   const el = $('#alerts'); if (!el) return;
   const box = (kind, cls, msg) => `<div class="alert ${cls}"><span>${esc(msg)}</span><button class="alert-x" data-action="dismissAlert" data-k="${kind}" title="Dismiss" aria-label="Dismiss">✕</button></div>`;
-  el.innerHTML = (S.error ? box('error', 'error', S.error) : '') + (S.message ? box('message', 'ok', S.message) : '');
-  el.hidden = !S.error && !S.message;
+  // The browser asks where to save every file: CVs can't be saved by themselves until that's off.
+  const ask = S.dlAsk ? `<div class="alert warn"><span>Your browser asks where to save every file, so CVs can't be saved to Downloads by themselves.
+    Turn off <b>“Ask where to save each file before downloading”</b>.
+    <button class="sm secondary" data-action="openDlSettings" style="margin-top:6px">Open Download Settings</button></span>
+    <button class="alert-x" data-action="dismissAlert" data-k="dlAsk" title="Dismiss" aria-label="Dismiss">✕</button></div>` : '';
+  el.innerHTML = ask + (S.error ? box('error', 'error', S.error) : '') + (S.message ? box('message', 'ok', S.message) : '');
+  el.hidden = !S.error && !S.message && !S.dlAsk;
 }
 
 function patchProfile() {
@@ -1678,6 +1683,7 @@ async function onClick(e) {
     switch (a) {
       case 'mode': if (t.dataset.mode !== S.mode) await setMode(t.dataset.mode); break;
       case 'closePanel': await closePanel(); break;
+      case 'openDlSettings': S.dlAsk = false; patchAlerts(); await chrome.tabs.create({ url: 'chrome://settings/downloads', active: true }); break;
       case 'gptConnect': await connectGpt(); break;
       case 'gptContinue': await gpt('continue'); break;
       case 'restartExt': chrome.runtime.reload(); break;

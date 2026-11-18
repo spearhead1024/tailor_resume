@@ -63,6 +63,12 @@ One side panel (`extension/panel/`), tabs by role: **Out Bids** and **Easy Bids*
   which cards each tab shows, LinkedIn's classic job search (`lib/classic.js`, kept instead of the AI search),
   and Update Now.
 - The layout is one fluid column (centred past 600px), so it works from Chrome's narrowest side panel up.
+- **Opening the panel** picks the tab from the page you're on: an empty tab → Out Bids (the latest job
+  opens in it), LinkedIn → Easy Bids, any other site → Add Jobs (Out Bids for a bidder without it).
+- **CVs save to Downloads by themselves** as "<Profile> resume.pdf" (a name valid on Windows / macOS /
+  Linux; the same CV replaces the old file — `lib/save-file.js`). If the browser's "Ask where to save each
+  file" setting is on, every save shows a dialog; the panel detects it and links to the setting. A Gen CV
+  still waiting for its CV survives closing the panel (session storage).
 - **✕** (top right, every screen) closes the panel — `chrome.sidePanel.close()` in the side panel, or the
   tab / window it was opened in — for browsers that draw no close button of their own.
 - **Out Bids** has ChatGPT write CVs for the job on screen and the next 2 only (`core/cv_queue.AHEAD = 3`,

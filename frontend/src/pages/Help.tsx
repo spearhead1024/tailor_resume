@@ -110,6 +110,8 @@ function ExtensionGuide() {
       <div className="card">
         <h2 style={h2}>3 · Use it</h2>
         <ul style={{ ...step, listStyle: 'disc' }}>
+          <li>The panel opens on the right tab by itself: <strong>Easy Bids</strong> on LinkedIn, <strong>Out Bids</strong> on an
+            empty tab (the latest job opens there), <strong>Add Jobs</strong> on any other site.</li>
           <li><strong>⚙ Settings → Connections</strong>: connect <strong>ChatGPT</strong> (a paid plan — it writes the CVs)
             and <strong>LinkedIn</strong> (Easy Bids reads the job you have open). Pick a profile at the top of the panel.</li>
           <li><strong>Easy Bids</strong> — LinkedIn Easy Apply. Open a job on LinkedIn; the panel checks it first:
@@ -131,6 +133,8 @@ function ExtensionGuide() {
           <li><strong>Mac / Linux</strong>: <a href={zipUrl} download>download the .zip</a>, extract it, then
             <code> chrome://extensions</code> → Developer mode → <strong>Load unpacked</strong>. It doesn't update by itself:
             for a new version replace the folder's files and click ↻ on the extension.</li>
+          <li><strong>A Save dialog pops up for every CV</strong>: turn off “Ask where to save each file before downloading”
+            in <code>chrome://settings/downloads</code> (Edge: <code>edge://settings/downloads</code>) — CVs then save to Downloads by themselves.</li>
           <li><strong>Update didn't arrive</strong>: check <code>%LOCALAPPDATA%\TailorResume\updater.log</code>, or run the setup again.</li>
           <li><strong>Stop automatic updates</strong>: Windows Task Scheduler → delete “TailorResume extension updater”.</li>
         </ul>
