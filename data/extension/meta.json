@@ -1,6 +1,6 @@
 {
-  "version": "1.9.0",
+  "version": "1.9.1",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "Redesigned panel; ChatGPT & LinkedIn connections in Settings; Tech Questions in Easy Bids; CV Ready / Already applied labels",
-  "built_at": "2026-11-17T19:25:12Z"
+  "changelog": "\u2715 button closes the panel; Out Bids prepares 3 CVs ahead (no more)",
+  "built_at": "2026-11-18T12:13:56Z"
 }
