@@ -272,6 +272,26 @@ async def sync_now(user: dict = Depends(require_role("admin"))):
         _sync_lock.release()
 
 
+@router.get("/lookup")
+def lookup_job(url: str = Query(""), user: dict = Depends(get_current_user)):
+    """Is this page a job TailorResume already has? For the extension, which opens the right tab for
+    the page the bidder is on (a known job → Out Bids, a new one → Add Jobs). Read-only; only says
+    whether it exists (and its id / status) — any signed-in user. A company's apply form under the
+    posting (…/jobs/123/apply) counts as that posting."""
+    raw = str(url or "").strip()[:2048]
+    if not raw.startswith(("http://", "https://")):
+        return {"exists": False}
+    tries = [raw]
+    base = raw.split("#")[0].split("?")[0].rstrip("/")
+    if base.rsplit("/", 1)[-1].lower() in ("apply", "application", "applications", "applynow"):
+        tries.append(base.rsplit("/", 1)[0])
+    for u in tries:
+        job = storage.find_job_by_url(u)
+        if job and job.get("status") != "deleted":
+            return {"exists": True, "job_id": job.get("id", ""), "status": job.get("status", "")}
+    return {"exists": False}
+
+
 @router.get("/{job_id}")
 def get_job(job_id: str, user: dict = Depends(get_current_user)):
     job = storage.get_job_by_id(job_id)

@@ -271,11 +271,13 @@ async function followTab(tabId, url) {
 }
 chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
   if (windowId !== panelWindowId) return;
+  scheduleAutoMode();
   if (S.mode === 'easy') scheduleEasyCheck();
   else chrome.tabs.get(tabId).then((t) => followTab(tabId, t.url)).catch(() => {});
 });
 chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
   if (!tab.active || tab.windowId !== panelWindowId) return;
+  if (change.url) scheduleAutoMode();
   // LinkedIn is a single-page app: picking another job in its list changes only the URL.
   if (S.mode === 'easy') { if (change.url || change.status === 'complete') scheduleEasyCheck(); }
   else if (change.url) followTab(tabId, change.url);
@@ -372,8 +374,9 @@ async function loadProfiles() {
   const { [PROFILE_KEY]: saved } = await chrome.storage.local.get(PROFILE_KEY);
   S.profileId = S.profiles.some((p) => p.id === saved) ? saved : (S.profiles[0]?.id || '');
   renderMain();
-  // Out Bids opens the first job; Easy Bids never navigates — it reads the job on the LinkedIn tab.
-  await loadQueue({ open: S.mode === 'bid' });
+  // Out Bids opens the first job (not when the panel switched by itself for the page on screen);
+  // Easy Bids never navigates — it reads the job on the LinkedIn tab.
+  await loadQueue({ open: S.mode === 'bid' && !S.quietSwitch });
   if (S.mode === 'easy') scheduleEasyCheck(true);
 }
 
@@ -470,7 +473,7 @@ async function loadQueue({ open = false } = {}) {
   if (S.mode === 'easy') { patchJob(); patchBuild(); return; }
   // The tab already shows a queued job (e.g. the panel opened mid-application): select
   // it instead of navigating the tab away from the bidder's work.
-  const tab = open ? await activeTab() : null;
+  const tab = open || S.quietSwitch ? await activeTab() : null;
   const inTab = tab ? jobForUrl(tab.url || '') : null;
   if (inTab) { setJobTab(tab.id); await selectJob(inTab.id, { open: false }); return; }
   await selectJob(S.win[0] || '', { open });   // the next job of the working set
@@ -1401,7 +1404,13 @@ async function startMain() {
   patchUpdateBar();
   fetchLatest(true).then(patchUpdates);
   const { [MODE_KEY]: saved } = await chrome.storage.local.get(MODE_KEY).catch(() => ({}));
-  await setMode((await modeForTab(modes)) || (modes.includes(saved) ? saved : modes[0]));
+  S.starting = true; S.autoAgain = false;
+  // Out Bids opens its latest job only from an EMPTY tab; on any other page nothing is navigated.
+  const here = await activeTab();
+  S.quietSwitch = !isEmptyTab(here?.url || here?.pendingUrl || '');
+  try { await setMode((await modeForTab(modes, { opening: true })) || (modes.includes(saved) ? saved : modes[0])); }
+  finally { S.starting = false; S.quietSwitch = false; }
+  if (S.autoAgain) scheduleAutoMode();   // the bidder moved to another tab while the panel was opening
   await restoreGen();
 }
 // The tab the panel opens on follows the page you're on:
@@ -1413,14 +1422,47 @@ async function startMain() {
 // (Never this panel's own page, when it is open in a tab: that must not be navigated away.)
 const OWN_PAGES = chrome.runtime.getURL('');
 const isEmptyTab = (url) => !/^https?:\/\//i.test(url || '') && !String(url || '').startsWith(OWN_PAGES);
-async function modeForTab(modes) {
+// Sites that are no job page: they never switch the tab (ChatGPT, this app, mail, search…).
+const NOT_JOB_SITE = /^https:\/\/([^/]+\.)?(chatgpt\.com|chat\.openai\.com|openai\.com|tailorresume\.duckdns\.org|mail\.google\.com|docs\.google\.com|drive\.google\.com|accounts\.google\.com|calendar\.google\.com|meet\.google\.com|outlook\.live\.com|outlook\.office\.com|outlook\.office365\.com|teams\.microsoft\.com|web\.whatsapp\.com|web\.telegram\.org|slack\.com|discord\.com|youtube\.com|google\.[a-z.]+|bing\.com|duckduckgo\.com)(\/|$)/i;
+// The tab for the page (null = keep the one on screen):
+//   LinkedIn → Easy Bids · a job TailorResume has → Out Bids · a new job page → Add Jobs.
+// Out Bids' own job tab, and a tab opened from it or from LinkedIn (a company's "Apply" page), keep
+// the tab on screen — applying never flips the panel. opening: the panel was just opened (an empty
+// tab then means Out Bids, whose latest job opens in it).
+async function modeForTab(modes, { opening = false } = {}) {
   const tab = await activeTab();
   const url = tab?.url || tab?.pendingUrl || '';
   const has = (m) => modes.includes(m);
-  if (isEmptyTab(url)) return has('bid') ? 'bid' : null;
+  if (isEmptyTab(url)) return opening && has('bid') ? 'bid' : null;
   if (isLinkedIn(url)) return has('easy') ? 'easy' : has('add') ? 'add' : null;
-  if (tab?.id != null && tab.id === jobTabId && has('bid')) return 'bid';
-  return has('add') ? 'add' : has('bid') ? 'bid' : null;
+  if (NOT_JOB_SITE.test(url)) return null;
+  if (tab?.id != null && tab.id === jobTabId) return has('bid') ? 'bid' : null;
+  if (!opening && tab?.openerTabId != null) {
+    if (tab.openerTabId === jobTabId) return null;
+    const opener = await chrome.tabs.get(tab.openerTabId).catch(() => null);
+    if (isLinkedIn(opener?.url)) return null;
+  }
+  let known = false;
+  try { known = !!(await api(`/api/jobs/lookup?url=${encodeURIComponent(url)}`)).exists; } catch { return null; }
+  if (known) return has('bid') ? 'bid' : has('add') ? 'add' : null;
+  return has('add') ? 'add' : opening && has('bid') ? 'bid' : null;
+}
+// Follow the page: the panel switches by itself as the bidder moves between tabs and pages — never
+// while something is in progress (a CV saving, Gen CV, ⚙ Settings, Easy Bids catching a company link),
+// and the switch itself navigates nothing.
+let autoTimer = 0;
+function scheduleAutoMode() { clearTimeout(autoTimer); autoTimer = setTimeout(() => autoMode().catch(() => {}), 450); }
+async function autoMode() {
+  if (S.starting) { S.autoAgain = true; return; }   // the panel is opening: looked at again when it is ready
+  if (S.screen !== 'main' || S.settingsOpen || S.busy || S.genBusy || awaitingLink()) return;
+  const modes = availableModes();
+  if (modes.length < 2) return;
+  const m = await modeForTab(modes);
+  if (!m || m === S.mode || S.busy || S.genBusy) return;
+  S.quietSwitch = true;                       // switched by the page: the page stays where it is
+  try { await setMode(m); } finally { S.quietSwitch = false; }
+  if (m === 'bid') { const t = await activeTab(); if (t) followTab(t.id, t.url || ''); }
+  toast(`${MODES.find((x) => x.id === m)?.label || m} — for this page`);
 }
 
 function renderFrame(modes) {
