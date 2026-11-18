@@ -401,12 +401,11 @@ export default function Jobs() {
           <option value="">All regions</option>
           <RegionOptions />
         </select>
-        <ApplyTypeSelect value={applyFilter} onChange={setApplyFilter} style={{ ...FILTER, width: 112 }} />
         {isAdmin && <label htmlFor="jobs-added-by" style={FILTER_LABEL}>Added by</label>}
         {isAdmin && (
           <select id="jobs-added-by" value={addedByFilter} onChange={(e) => setAddedByFilter(e.target.value)}
             style={{ ...FILTER, width: 124 }} title="Show only the jobs one person added">
-            <option value="">All</option>
+            <option value="">All ({adders.reduce((n, a) => n + a.count, 0)})</option>
             {/* The person picked may have no jobs under the other filters (or be a deleted account
                 named in a link) — keep them shown as the selection, not blank. */}
             {addedByFilter && addedByFilter !== ADDED_BY_NONE
@@ -441,6 +440,7 @@ export default function Jobs() {
         {(dateFrom || dateTo) && (
           <button className="secondary" onClick={showAllDates} style={FILTER_BTN} title="Remove the date filter">All dates</button>
         )}
+        <ApplyTypeSelect value={applyFilter} onChange={setApplyFilter} style={{ ...FILTER, width: 112 }} />
         {hasExtraFilters && (
           <button className="secondary" onClick={resetToToday} style={FILTER_BTN} title="Reset every filter to today's jobs">Clear</button>
         )}
