@@ -1294,7 +1294,7 @@ async function patchSettingsLinkedIn() {
   const ok = await hasLinkedInAccess();
   el.innerHTML = connRow('LinkedIn', ok ? '<span class="pill ok">Connected</span>' : '<span class="pill muted">Not connected</span>',
     ok ? 'Easy Bids reads the job on your LinkedIn tab — company, title, description, apply button.'
-      : 'Needed by Easy Bids to read the job on your LinkedIn tab (and by the classic job search).',
+      : 'Needed by Easy Bids to read the job on your LinkedIn tab (classic search also uses it to spot an open application form).',
     ok ? '' : '<button class="sm" data-action="easyAllow">Connect</button>');
 }
 chrome.permissions.onAdded?.addListener(() => { patchSettingsLinkedIn(); if (S.mode === 'easy') scheduleEasyCheck(true); });

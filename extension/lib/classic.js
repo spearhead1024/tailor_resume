@@ -5,7 +5,10 @@
 //
 //   · The last classic search with filters is remembered by itself (chrome.storage.local).
 //   · Never while an application form (Easy Apply) is open on the page — checked on the page itself
-//     with the LinkedIn access Easy Bids already has; without that access nothing is redirected.
+//     (a few tries, while LinkedIn loads). When the page can't be checked (no LinkedIn access granted,
+//     still loading) the tab IS switched — like the original extension — unless a form was seen open
+//     there in the last 2 minutes. (1.9 never switched without a definite "no form": with LinkedIn
+//     access not granted, or a page still loading, classic search never came back.)
 //   · Loop guard: LinkedIn may force AI search back; after 2 tries within 25 s the tab is left alone
 //     for 10 minutes (the panel says so and offers "Try again").
 // Kept from the original: the URL rules, the loop guard and the application check. Dropped: its popup
@@ -69,18 +72,24 @@ export function applicationOpenOnPage() {
   }
   return false;
 }
-// true / false, or null when the page can't be checked (no LinkedIn access, page loading).
-export async function applicationOpen(tabId) {
-  try {
-    const [r] = await chrome.scripting.executeScript({ target: { tabId }, func: applicationOpenOnPage });
-    return typeof r?.result === 'boolean' ? r.result : null;
-  } catch { return null; }
+// true / false, or null when the page can't be checked (no LinkedIn access, page loading) — tried a
+// few times while LinkedIn finishes loading.
+export async function applicationOpen(tabId, tries = 3) {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const [r] = await chrome.scripting.executeScript({ target: { tabId }, func: applicationOpenOnPage });
+      if (typeof r?.result === 'boolean') return r.result;
+    } catch { /* no access / not ready */ }
+    if (i < tries - 1) await sleep(350);
+  }
+  return null;
 }
 
 const CHECK_DELAY_MS = 900;          // let LinkedIn settle (and any application dialog appear)
 const ATTEMPT_WINDOW_MS = 25_000;
 const MAX_ATTEMPTS = 2;
 const BLOCK_MS = 10 * 60_000;
+const APPLY_STALE_MS = 2 * 60_000;    // a form seen open this recently still counts when the page can't be checked
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function onUrl(tabId, url) {
@@ -100,8 +109,10 @@ async function onUrl(tabId, url) {
   const key = classicTabKey(tabId), now = Date.now();
   const state = (await chrome.storage.session.get(key))[key] || {};
   if ((state.blockedUntil || 0) > now) return;
-  // Never throw away an application in progress; unknown (no access / loading) counts as "maybe".
-  if ((await applicationOpen(tabId)) !== false) return;
+  // Never throw away an application in progress.
+  const applying = await applicationOpen(tabId);
+  if (applying === true) { await chrome.storage.session.set({ [key]: { ...state, applyingAt: now } }); return; }
+  if (applying === null && now - (state.applyingAt || 0) < APPLY_STALE_MS) return;
   const recent = (state.attempts || []).filter((t) => now - t < ATTEMPT_WINDOW_MS);
   if (recent.length >= MAX_ATTEMPTS) {               // LinkedIn keeps forcing AI search: stop, don't loop
     await chrome.storage.session.set({ [key]: { attempts: recent, blockedUntil: now + BLOCK_MS } });
