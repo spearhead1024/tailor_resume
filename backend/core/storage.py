@@ -736,6 +736,9 @@ def _normalize_profile(item: dict) -> dict:
         # = "All-Stack" (every job matches). Separate from technical_skills,
         # which feeds résumé keyword bolding.
         'tech_stacks': [str(s).strip() for s in item.get('tech_stacks', []) if str(s).strip()],
+        # The profile's ChatGPT PROJECT link (routers/cv_queue.py set_project): the extension writes this
+        # profile's CVs and answers in chats inside it, apart from the other profiles' (shared account).
+        'gpt_project_url': str(item.get('gpt_project_url', '') or '').strip()[:500],
         'region': _normalize_market_region(item.get('region', item.get('market_region', ''))),
         'active': bool(item.get('active', True)),
         'status': 'restricted' if str(item.get('status', 'active') or 'active').strip().lower() == 'restricted' else 'active',

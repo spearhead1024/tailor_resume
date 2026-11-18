@@ -84,6 +84,7 @@ const S = {
   manual: false,       // show the copy-prompt / paste-JSON flow while ChatGPT is connected
   profiles: [], profileId: '',
   queue: [], queueLoading: false,
+  win: [],             // Out Bids: the working set — the job on screen + the next 2 (see fillWin)
   combo: { open: false, q: '', active: 0 },
   jobId: '', job: null,
   resumeId: '', ats: null, atsScore: 0, atsOpen: false,
@@ -414,11 +415,43 @@ async function selectProfile(id) {
   if (S.mode === 'easy') scheduleEasyCheck(true);   // the same LinkedIn job, for this profile
 }
 
-// Reload the queue. The current job is kept when it's still there; otherwise the
-// job that took its place (same position) becomes current — so after Mark as
-// Applied / Report / Skip the bidder lands on the next job.
+// ---------- Out Bids: the working set of 3 ----------
+// Out Bids works through a fixed SET of 3 jobs — the one on screen and the 2 after it — and ChatGPT
+// writes their CVs in 3 tabs (core/cv_queue.AHEAD). When a job is done (Mark as Applied / Report /
+// Skip) it leaves the set, the NEXT job of the set comes up (its CV is already written), and the set
+// is filled again with the NEWEST job of the queue that isn't in it — whose CV ChatGPT starts at once.
+// The set is kept per profile (session storage): new jobs arriving at the top of the queue, a refresh
+// or reopening the panel never make the bidder jump to another job. (It used to take "the job at the
+// same position" in the reloaded, newest-first queue — new arrivals pushed that 3, 6… jobs down.)
+const WIN = 3;
+const winKey = (pid) => `outWin:${pid}`;
+let winPid = '';
+async function loadWin() {
+  if (winPid === S.profileId) return;
+  winPid = S.profileId;
+  const got = (await chrome.storage.session.get(winKey(winPid)).catch(() => ({})))[winKey(winPid)];
+  S.win = Array.isArray(got) ? got.filter((x) => typeof x === 'string') : [];
+}
+const saveWin = () => { if (S.profileId) chrome.storage.session.set({ [winKey(S.profileId)]: S.win }).catch(() => {}); };
+function fillWin() {
+  const inQueue = new Set(S.queue.map((j) => j.id));
+  S.win = (S.win || []).filter((id) => inQueue.has(id));
+  for (const j of S.queue) {                    // the queue is newest first: the newest jobs not in the set
+    if (S.win.length >= WIN) break;
+    if (!S.win.includes(j.id)) S.win.push(j.id);
+  }
+  saveWin();
+}
+// This job is on screen now: it leads the set. (Picked from outside the set, it pushes the set's last job out.)
+function promote(id) {
+  if (!id || S.mode !== 'bid') return;
+  S.win = [id, ...(S.win || []).filter((x) => x !== id)].slice(0, WIN);
+  fillWin();
+}
+
+// Reload the queue. The current job is kept when it's still there; otherwise (Out Bids) the next
+// job of the working set comes up — see fillWin.
 async function loadQueue({ open = false } = {}) {
-  const prevIdx = S.queue.findIndex((j) => j.id === S.jobId);
   const pid = S.profileId, view = S.bidView;
   S.queueLoading = true; patchJob();
   let queue = [];
@@ -431,7 +464,8 @@ async function loadQueue({ open = false } = {}) {
   S.queueLoading = false;
   const p = selectedProfile(); if (p) p.bid_count = S.queue.length;
   patchProfile();
-  if (S.queue.some((j) => j.id === S.jobId)) { patchJob(); patchBuild(); return; }
+  if (S.mode === 'bid') { await loadWin(); fillWin(); }
+  if (S.queue.some((j) => j.id === S.jobId)) { promote(S.jobId); gptPrepare(); patchJob(); patchBuild(); return; }
   // Easy Bids: the current job follows the LinkedIn tab, never the queue's order.
   if (S.mode === 'easy') { patchJob(); patchBuild(); return; }
   // The tab already shows a queued job (e.g. the panel opened mid-application): select
@@ -439,12 +473,12 @@ async function loadQueue({ open = false } = {}) {
   const tab = open ? await activeTab() : null;
   const inTab = tab ? jobForUrl(tab.url || '') : null;
   if (inTab) { setJobTab(tab.id); await selectJob(inTab.id, { open: false }); return; }
-  const next = S.queue[Math.max(0, Math.min(prevIdx, S.queue.length - 1))];
-  await selectJob(next?.id || '', { open });
+  await selectJob(S.win[0] || '', { open });   // the next job of the working set
 }
 
 async function selectJob(id, { open = true, item: given = null } = {}) {
   const item = S.queue.find((j) => j.id === id) || (given?.id === id ? given : null);
+  if (item) promote(id);
   S.extraJob = item && !S.queue.includes(item) ? item : null;
   Object.assign(S, {
     jobId: item ? id : '', job: null, confirm: '', atsOpen: false,
@@ -558,7 +592,13 @@ async function finish(kind, run, note) {
       S.jobId = ''; S.extraJob = null;
       await loadQueue({ open: false });
       scheduleEasyCheck(true);
-    } else await loadQueue({ open: true });
+    } else {
+      // Out Bids: the job leaves the working set; the set's next job comes up, and the newest job of
+      // the queue not in the set joins it (its ChatGPT tab opens as this one's closes).
+      S.win = S.win.filter((id) => id !== job.id); saveWin();
+      S.jobId = '';
+      await loadQueue({ open: true });
+    }
   } finally { S.busy = ''; S.confirm = ''; patchBuild(); }
 }
 
@@ -638,16 +678,15 @@ function renderLogin() {
 const gptOn = () => !!S.gptSnap?.state.enabled;
 const currentThread = () => (S.gptSnap && S.profileId && S.jobId ? S.gptSnap.threads[threadKey(S.profileId, S.jobId)] || null : null);
 
-// Out Bids: the job on screen and the next 2 (3 in all — core/cv_queue.AHEAD) get their CVs written
-// ahead, never further down the list. Easy Bids: only the
+// Out Bids: the working set (the job on screen + the next 2 — core/cv_queue.AHEAD) gets its CVs written
+// ahead, never more. Easy Bids: only the
 // jobs Gen CV was pressed for (the one on screen first) — nothing is written just by looking at a job.
 function gptPrepare() {
   if (!gptOn() || !S.profileId) return;
   if (S.mode !== 'easy' && !S.jobId) return;
-  const i = Math.max(0, S.queue.findIndex((j) => j.id === S.jobId));
   const list = S.mode === 'easy'
     ? [...S.gen.values()].sort((a, b) => (b.id === S.jobId) - (a.id === S.jobId))
-    : S.queue.slice(i, i + 3);
+    : S.win.map((id) => S.queue.find((j) => j.id === id)).filter(Boolean);   // the working set, the job on screen first
   const jobs = list.map((j) => ({ id: j.id, company: j.company, job_title: j.job_title }));
   // The server keeps the queue (3 ahead, skipping jobs with a CV); the worker is told to look.
   if (jobs.length) api('/api/gpt/prepare', { method: 'POST', body: { profile_id: S.profileId, jobs, mode: S.mode === 'easy' ? 'easy' : 'out' } }).then(() => gpt('sync')).catch(() => {});
@@ -679,6 +718,7 @@ let lastWant = '';
 onGptChange(async () => {
   S.gptSnap = await gptSnapshot();
   adoptBuiltCvs();
+  if (S.mode === 'bid') patchJob();
   patchGptLine();
   patchEasy();
   patchSettingsGpt();
@@ -724,6 +764,11 @@ function patchGptLine() {
     ? '<button class="secondary sm" data-action="openChat" title="Open this CV\'s ChatGPT chat to ask it more (tech questions…). It is closed and deleted when the job is done.">Open Chat</button>' : '';
   el.className = `gpt-line ${cls}`;
   el.innerHTML = `<span class="txt">${text.startsWith('<span') ? text : esc(text)}</span>${btn}${chat}`;
+  // Connected, but this profile has no ChatGPT project: its chats share the account's memory.
+  const p = selectedProfile();
+  if (st.enabled && p && !p.gpt_project_url) {
+    el.innerHTML += `<span class="gpt-meta warn-meta">No ChatGPT project for ${esc(p.name || 'this profile')} — ChatGPT's memory may mix profiles up. <a href="#" data-action="settings">Set one in Settings</a></span>`;
+  }
 }
 
 // ---------- application questions (shared per job) + this CV's answers ----------
@@ -1176,6 +1221,7 @@ function renderSettings() {
       <div class="settings-head"><h2>Settings</h2><button class="secondary sm" data-action="settings">Done</button></div>
       ${bidLike ? `<section class="card"><div class="card-head"><span class="card-title">Connections</span></div>
         <div class="conn" id="settingsGpt"></div>
+        <div class="conn" id="settingsProject"></div>
         <div class="conn" id="settingsLinkedIn"></div>
       </section>
       <section class="card"><div class="card-head"><span class="card-title">Show on ${tabName}</span></div>
@@ -1184,7 +1230,7 @@ function renderSettings() {
       <section class="card"><div class="card-head"><span class="card-title">Classic job search</span></div><div id="settingsClassic" class="fld"></div></section>
       <section class="card"><div class="card-head"><span class="card-title">Extension</span></div><div id="settingsExt" class="fld"></div></section>
     </main>`;
-  patchSettingsGpt(); patchSettingsLinkedIn(); patchClassic(); patchSettingsExt();
+  patchSettingsGpt(); patchSettingsProject(); patchSettingsLinkedIn(); patchClassic(); patchSettingsExt();
 }
 const connRow = (name, pill, desc, acts) => `<div class="who-c"><div class="name">${name} ${pill}</div><div class="desc">${desc}</div></div>${acts ? `<div class="acts">${acts}</div>` : ''}`;
 // ChatGPT: state, plan, CVs ready, chats waiting to be deleted, Connect / Continue / Disconnect.
@@ -1208,6 +1254,40 @@ function patchSettingsGpt() {
        <button class="ghost sm" data-action="gptDisconnect" title="Stop writing CVs with ChatGPT and delete its chats">Disconnect</button>`;
   el.innerHTML = connRow('ChatGPT', pill, desc, acts);
 }
+// The selected profile's ChatGPT PROJECT. The bidders share one ChatGPT account, whose memory mixes
+// profiles up (Farhan's CV answered with Stefan's details). Chats started in a project created with
+// "Project-only" memory see only that project: each profile gets its own, set here (saved on the
+// server, so every bidder's extension uses it). CVs and answers for the profile then start there.
+const PROJECT_RE = /^https:\/\/(chatgpt\.com|chat\.openai\.com)\/g\/g-p-[A-Za-z0-9]{8,}/;
+function patchSettingsProject() {
+  const el = $('#settingsProject'); if (!el) return;
+  const p = selectedProfile();
+  if (!p) { el.innerHTML = ''; return; }
+  const url = p.gpt_project_url || '';
+  const name = esc(p.name || 'this profile');
+  const short = url.replace(/^https:\/\/chatgpt\.com\/g\//, '').replace(/\/project$/, '');
+  el.innerHTML = connRow(`Project · ${name}`, url ? '<span class="pill ok">Set</span>' : '<span class="pill warn">Not set</span>',
+    url ? `${name}'s CVs and answers are written in this ChatGPT project: <a href="${esc(url)}" target="_blank" rel="noopener">${esc(short)}</a>`
+      : `Without a project, ChatGPT's memory can mix profiles up. In ChatGPT: <b>New project</b> → name it “${name}” → ⚙ Memory: <b>Project-only</b> → create → then, with the project open, click <b>Use This Tab</b>.`,
+    `${url ? '' : '<button class="secondary sm" data-action="projectOpenGpt">Open ChatGPT</button>'}
+     <button class="sm" data-action="projectUseTab" title="Use the ChatGPT project open in the current tab">Use This Tab</button>
+     ${url ? '<button class="ghost sm" data-action="projectClear">Clear</button>' : ''}`);
+  el.insertAdjacentHTML('beforeend', `<div class="row project-paste"><input id="projectUrl" type="url" spellcheck="false" placeholder="…or paste the project link (https://chatgpt.com/g/g-p-…)"><button class="secondary sm" data-action="projectSave">Save</button></div>`);
+}
+async function saveProject(raw, { fromTab = false } = {}) {
+  const p = selectedProfile(); if (!p) return;
+  const url = String(raw || '').trim();
+  if (url && !PROJECT_RE.test(url)) {
+    setError(fromTab ? 'The current tab isn\'t a ChatGPT project — open the project in ChatGPT (its address has /g/g-p-…), then click Use This Tab.'
+      : 'That isn\'t a ChatGPT project link — it looks like https://chatgpt.com/g/g-p-…/project.');
+    return;
+  }
+  const r = await api('/api/gpt/project', { method: 'PUT', body: { profile_id: p.id, url } });
+  p.gpt_project_url = r.url || '';
+  toast(r.url ? `ChatGPT project set for ${p.name}` : `ChatGPT project cleared for ${p.name}`);
+  patchSettingsProject(); patchGptLine();
+}
+
 // LinkedIn: Easy Bids reads the job on the bidder's LinkedIn tab (an optional host permission).
 async function patchSettingsLinkedIn() {
   const el = $('#settingsLinkedIn'); if (!el) return;
@@ -1517,6 +1597,20 @@ function companyPill(info) {
   return `<span class="pill ${key}" title="${esc(tip)}">${label}</span>`;
 }
 
+// Out Bids' working set (the job on screen + the next 2), each with where its CV stands. A click
+// opens that job.
+function winLine() {
+  if (S.mode !== 'bid' || !(S.win || []).length) return '';
+  const chips = S.win.map((id, i) => {
+    const j = S.queue.find((x) => x.id === id); if (!j) return '';
+    const t = S.gptSnap?.threads?.[threadKey(S.profileId, id)];
+    const st = j.resume_id || t?.resumeId ? ['ready', '✓', 'CV ready'] : t?.stage === 'writing' ? ['writing', '<span class="spinner"></span>', 'ChatGPT is writing the CV']
+      : t?.stage === 'failed' ? ['failed', '!', `ChatGPT could not write it — ${t.error || ''}`] : ['queued', '…', gptOn() ? 'Waiting for its ChatGPT tab' : 'Connect ChatGPT to write it'];
+    return `<button class="win-chip ${st[0]}${id === S.jobId ? ' on' : ''}" data-action="pickWin" data-id="${esc(id)}" title="${esc(`${j.company} — ${j.job_title}: ${st[2]}`)}">
+      <span class="n">${i + 1}</span><span class="c">${esc(j.company)}</span><span class="s">${st[1]}</span></button>`;
+  }).join('');
+  return `<div class="win-line" title="The 3 jobs ChatGPT works on — done ones are replaced by the newest job">${chips}</div>`;
+}
 function patchJob() {
   patchCombo();
   const el = $('#jobLine'); if (!el) return;
@@ -1531,7 +1625,7 @@ function patchJob() {
     <div class="job-block" title="${esc(`${j.job_title} · ${j.company} · ${j.region || 'ANY'}`)}">
       <div class="job-title"><a class="role" href="${esc(j.link)}" data-action="openJob">${esc(j.job_title)}</a></div>
       <div class="job-sub"><span class="txt">${esc(j.company)}</span><span class="region">${esc(j.region || 'ANY')}</span>${companyPill(info)}</div>
-    </div>`;
+    </div>${winLine()}`;
 }
 
 const ATS_MAX = { 'Keyword Match': 30, 'Title Alignment': 15, 'Skills Alignment': 15, 'Experience Evidence': 20, Structure: 15, 'Fit Bonus': 10 };
@@ -1683,6 +1777,11 @@ async function onClick(e) {
     switch (a) {
       case 'mode': if (t.dataset.mode !== S.mode) await setMode(t.dataset.mode); break;
       case 'closePanel': await closePanel(); break;
+      case 'pickWin': if (t.dataset.id) pickJob(t.dataset.id); break;
+      case 'projectUseTab': await saveProject(((await activeTab())?.url) || '', { fromTab: true }); break;
+      case 'projectSave': await saveProject($('#projectUrl')?.value || ''); break;
+      case 'projectClear': await saveProject(''); break;
+      case 'projectOpenGpt': await chrome.tabs.create({ url: 'https://chatgpt.com/', active: true }); break;
       case 'openDlSettings': S.dlAsk = false; patchAlerts(); await chrome.tabs.create({ url: 'chrome://settings/downloads', active: true }); break;
       case 'gptConnect': await connectGpt(); break;
       case 'gptContinue': await gpt('continue'); break;

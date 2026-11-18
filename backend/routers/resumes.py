@@ -592,6 +592,7 @@ def bid_profiles(user: dict = Depends(get_current_user), skip_linkedin: bool = Q
     out = [
         {
             **_bid_public_profile(p),
+            "gpt_project_url": cv_queue.project_url(p.get("gpt_project_url")),
             "bid_count": len(_eligible_bid_items(
                 p, jobs=jobs, resumes=storage.get_generated_resumes_for_profile(p.get("id", "")),
             )),
@@ -1236,7 +1237,20 @@ def _build_prompt(profile: dict, job: dict) -> str:
     role = str(job.get("job_title") or "").strip() or '<<<paste target role here, e.g. "Senior Backend Engineer">>>'
     jd = str(job.get("description") or "").strip() or "<<<paste the job description here>>>"
 
-    return (
+    # The bidders share one ChatGPT account: its memory of OTHER profiles (their names, emails,
+    # employers) must not leak in. Name the candidate and fence the request to this message.
+    # Bidders also ask this same chat follow-up questions (tech questions…): it must answer as THIS
+    # candidate — name and location only (no contact details go to ChatGPT).
+    candidate = str(profile.get("name") or "").strip() or "the candidate below"
+    where = str(profile.get("location") or "").strip()
+    isolation = (
+        f"CANDIDATE: {candidate}{f' ({where})' if where else ''}. This conversation is ONLY about this one candidate. "
+        "Ignore everything you remember from saved memory, custom instructions or other conversations — other "
+        "candidates' names, emails, employers, locations or experience must NOT appear, now or in any later reply "
+        f"in this conversation. Every later question here is answered as {candidate}, using only the facts in this "
+        "conversation.\n\n"
+    )
+    return isolation + (
         _CHATGPT_PROMPT_TEMPLATE
         .replace("{{TARGET_ROLE}}", role)
         .replace("{{COMPANY_BLOCK}}", company_block)
@@ -1407,6 +1421,28 @@ def generate_from_json(
     }
 
 
+_CO_SUFFIX = {"inc", "incorporated", "llc", "ltd", "limited", "corp", "corporation", "co", "company", "gmbh", "sa", "srl",
+              "plc", "group", "ag", "bv", "sas", "pty", "the"}
+
+
+def _company_tokens(name: str) -> list[str]:
+    return [t for t in re.sub(r"[^a-z0-9]+", " ", str(name or "").lower()).split() if t not in _CO_SUFFIX]
+
+
+def _same_company(got: str, want: str) -> bool:
+    """Is ChatGPT's company_name the prompt's company (allowing "Example, Inc." for "Example Inc",
+    "Amazon Web Services (AWS)" for "Amazon Web Services", a dropped word…)? An empty name passes —
+    the filler places entries by their order, the name is not used."""
+    a, b = _company_tokens(got), _company_tokens(want)
+    if not a or not b:
+        return True
+    ja, jb = " ".join(a), " ".join(b)
+    if ja == jb or ja in jb or jb in ja:
+        return True
+    sa, sb = set(a), set(b)
+    return len(sa & sb) / len(sa | sb) >= 0.5
+
+
 def build_cv(user: dict, profile_id: str, job_id: str, data: dict, *, source: str) -> dict:
     """ChatGPT's resume JSON (VPS1's 7-key shape) → a saved resume record (the PDF is rendered
     by the caller, in the background). Shared by the paste flow above and the extension's
@@ -1454,6 +1490,17 @@ def build_cv(user: dict, profile_id: str, job_id: str, data: dict, *, source: st
             f"ChatGPT returned {len(wh)} compan{'y' if len(wh) == 1 else 'ies'} in work_history, but this "
             f"profile has {len(expected)} ({', '.join(c['company_name'] for c in expected)}). "
             "Ask ChatGPT to return exactly one entry per company, in that order, then paste again."))
+
+    # The companies must be THIS profile's (ChatGPT's memory of another profile — the bidders share
+    # one ChatGPT account — must not leak in): each entry is matched against the prompt's company.
+    if expected:
+        wrong = [(str(w.get("company_name") or ""), c["company_name"]) for w, c in zip(wh, expected)
+                 if not _same_company(str(w.get("company_name") or ""), c["company_name"])]
+        if wrong:
+            got, want = wrong[0]
+            raise HTTPException(status_code=400, detail=(
+                f"ChatGPT wrote this CV with another work history (\"{got}\" instead of \"{want}\") — "
+                "it may have used another profile from its memory. Write it again in a new chat."))
 
     # Education is preserved from the profile (VPS1 flow: never rendered from the
     # pasted JSON — the profile/template owns education).

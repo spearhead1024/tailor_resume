@@ -71,9 +71,15 @@ One side panel (`extension/panel/`), tabs by role: **Out Bids** and **Easy Bids*
   still waiting for its CV survives closing the panel (session storage).
 - **✕** (top right, every screen) closes the panel — `chrome.sidePanel.close()` in the side panel, or the
   tab / window it was opened in — for browsers that draw no close button of their own.
-- **Out Bids** has ChatGPT write CVs for the job on screen and the next 2 only (`core/cv_queue.AHEAD = 3`,
-  counted by position in the list), and keeps at most those 3 chats open — a job passed by keeps its CV,
-  its chat tab is closed. ChatGPT tabs open right next to the bidder's current tab.
+- **Out Bids works on a set of 3 jobs** (panel `fillWin`, server `core/cv_queue.AHEAD = 3`): the one on
+  screen + the next 2, each with a ChatGPT tab writing / holding its CV. Mark as Applied / Report / Skip →
+  that job's chat is deleted **inside its own tab** and the tab closed, the set's next job comes up, and the
+  NEWEST queue job not in the set joins it. The set is kept per profile, so new jobs at the top of the queue
+  never make the bidder jump. Never more than 3 ChatGPT tabs; chats to delete run in an open tab.
+- **ChatGPT project per profile** (`profile.gpt_project_url`, ⚙ Settings → Use This Tab, `PUT /api/gpt/project`):
+  the bidders share one ChatGPT account whose memory mixed profiles up; chats start inside the profile's
+  project (create it with "Project-only" memory). Also: the CV prompt names the candidate and fences out
+  memory, and the server refuses a CV whose companies aren't the profile's (written again in a new chat).
 
 **Easy vs Out in the web app**: Jobs and Applied show a small LinkedIn *Easy Apply* badge on Easy Apply
 jobs and an Easy / Out filter; Metrics shows how many applies and jobs added were Easy Apply (`E n`).

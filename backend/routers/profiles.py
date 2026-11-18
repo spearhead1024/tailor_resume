@@ -259,6 +259,10 @@ def update_profile(profile_id: str, body: ProfileUpsertRequest, user: dict = Dep
 
     payload = dict(body.payload)
     payload["id"] = profile_id
+    # Set from the extension (PUT /api/gpt/project), not on this form: an edit that doesn't send it keeps it.
+    if "gpt_project_url" not in payload:
+        old = next((p for p in storage.get_profiles() if p.get("id") == profile_id), {})
+        payload["gpt_project_url"] = old.get("gpt_project_url", "")
     storage.upsert_profile(payload)
     return next((p for p in storage.get_profiles() if p["id"] == profile_id), {"id": profile_id})
 

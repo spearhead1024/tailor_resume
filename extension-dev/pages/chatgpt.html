@@ -141,8 +141,10 @@
     const text = box.innerText.trim(); if (!text || box.getAttribute('contenteditable') === 'false') return;
     box.textContent = ''; syncSend();
     if (!convId()) {   // the real app moves to /c/<id> with history.pushState
-      url = `https://chatgpt.com/c/${crypto.randomUUID()}`;   // the real ids are UUIDs
-      realFetch(`/__tr_created/${convId()}`).catch(() => {});   // tests only: lets the mock server count every chat opened
+      // In a project (https://chatgpt.com/g/g-p-<id>-<name>/project) the chat lives under it: /g/g-p-…/c/<id>.
+      const project = (new URL(url).pathname.match(/^\/g\/(g-p-[\w-]+)/) || [])[1] || '';
+      url = `https://chatgpt.com${project ? `/g/${project}` : ''}/c/${crypto.randomUUID()}`;   // the real ids are UUIDs
+      realFetch(`/__tr_created/${convId()}${project ? `/${project}` : ''}`).catch(() => {});   // tests only: the mock server counts every chat opened (and its project)
       $('#where').textContent = `conversation ${convId()}`;
       let told = false;
       try { if (parent.__harness) { parent.__harness.pushUrl(window, url); told = true; } } catch { /* cross-origin parent */ }

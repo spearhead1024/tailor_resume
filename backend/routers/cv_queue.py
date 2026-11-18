@@ -69,6 +69,27 @@ def prepare(body: dict, user: dict = Depends(_bidder)):
     return {"threads": Q.prepare(storage.db_path, user, pid, jobs, lambda jid: jid in with_cv, cap_chats=cap)}
 
 
+@router.put("/project")
+def set_project(body: dict, user: dict = Depends(_bidder)):
+    """The profile's ChatGPT project: body {profile_id, url} ('' clears it). CVs and answers for
+    this profile are written in chats inside it, so the shared ChatGPT account's memory of other
+    profiles stays out (create the project with "Project-only" memory)."""
+    pid = str((body or {}).get("profile_id") or "").strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="profile_id is required")
+    R._check_profile_access(user, pid)
+    raw = str((body or {}).get("url") or "").strip()
+    url = Q.project_url(raw)
+    if raw and not url:
+        raise HTTPException(status_code=400, detail="That isn't a ChatGPT project link — open the project in ChatGPT; its address looks like https://chatgpt.com/g/g-p-…/project.")
+    profile = R._get_profile(pid)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    profile["gpt_project_url"] = url
+    storage.upsert_profile(profile)
+    return {"ok": True, "profile_id": pid, "url": url}
+
+
 @router.get("/threads")
 def threads(profile_id: str = "", user: dict = Depends(_bidder)):
     return {"threads": Q.threads(storage.db_path, user, profile_id), "to_delete": Q.chats_to_delete(storage.db_path, user)}
@@ -107,13 +128,16 @@ def _task(row, work: str) -> dict | None:
         job = storage.get_job_by_id(row.job_id)
         if not job or job.get("status") != "approved" or job.get("flagged") or job.get("admin_applied"):
             raise HTTPException(status_code=404, detail="The job is no longer available.")
-        return {"prompt": R._build_prompt(R._get_profile(row.profile_id), job), "questions": job_questions(job)}
+        profile = R._get_profile(row.profile_id)
+        return {"prompt": R._build_prompt(profile, job), "questions": job_questions(job),
+                "project_url": Q.project_url(profile.get("gpt_project_url"))}
     rec = storage.get_generated_resume_by_id(row.resume_id) or {}
     have = {a.get("question", "").lower() for a in rec.get("application_answers") or []}
     missing = [q for q in row.want or [] if q.lower() not in have]
     if not missing:
         return None
-    return {"questions": missing, "context": "" if row.conversation else _context(row, rec)}
+    project = Q.project_url((R._get_profile(row.profile_id) or {}).get("gpt_project_url"))
+    return {"questions": missing, "context": "" if row.conversation else _context(row, rec), "project_url": project}
 
 
 def _context(row, rec: dict) -> str:

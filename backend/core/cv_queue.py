@@ -33,6 +33,16 @@ DELETE_TRIES = 12                           # 5, 10, 20, 40, 60, 60… minutes a
 ANY_DEVICE_AFTER = timedelta(hours=24)      # a chat its own browser never deleted: any browser of the user tries
 
 _CID = re.compile(r"/c/([A-Za-z0-9][A-Za-z0-9_-]{7,100})")
+# A ChatGPT PROJECT: https://chatgpt.com/g/g-p-<id>[-<name>]/project (or any page under /g/g-p-…).
+_PROJECT = re.compile(r"^https://(?:chatgpt\.com|chat\.openai\.com)/g/(g-p-[A-Za-z0-9]{8,64}(?:-[A-Za-z0-9-]{0,120})?)(?:/|$)")
+
+
+def project_url(raw) -> str:
+    """The canonical link of a ChatGPT project (its /project page), or '' if `raw` isn't one.
+    Chats started there stay in the project — with "Project-only" memory, apart from every other
+    profile's chats (the bidders share one ChatGPT account)."""
+    m = _PROJECT.match(str(raw or "").strip())
+    return f"https://chatgpt.com/g/{m.group(1)}/project" if m else ""
 
 
 def _now() -> datetime:

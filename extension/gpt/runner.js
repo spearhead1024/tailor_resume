@@ -150,9 +150,52 @@ async function makeRoom() {
   });
   for (const tabId of gone) await chrome.tabs.remove(tabId).catch(() => {});
 }
-async function closeKept(test) {
-  const gone = await withKept(async (all) => { const out = []; for (const [k, v] of Object.entries(all)) if (test(k, v)) { out.push(v.tabId); delete all[k]; } return out; });
-  for (const tabId of gone) await chrome.tabs.remove(tabId).catch(() => {});
+// deleteChats: the chats are no use any more (the job is done): each is deleted INSIDE its own tab
+// before the tab closes — no extra ChatGPT tab is opened for it — and the server is told.
+async function closeKept(test, { deleteChats = false } = {}) {
+  const gone = await withKept(async (all) => { const out = []; for (const [k, v] of Object.entries(all)) if (test(k, v)) { out.push(v); delete all[k]; } return out; });
+  const done = [];
+  for (const v of gone) {
+    const id = convId(v.conversation);
+    if (deleteChats && id) { const r = await deleteInTab(v.tabId, [id]); if (r) done.push(...r.done); }
+    await chrome.tabs.remove(v.tabId).catch(() => {});
+  }
+  if (done.length) await api('/api/gpt/deleted', { done, failed: [] }).catch(() => {});
+}
+// Hide (= delete) chats from inside an open chatgpt.com tab, with the page's own session — what
+// ChatGPT's own "Delete chat" does. null: not possible there (not a ChatGPT page, signed out…).
+async function deleteInTab(tabId, ids) {
+  try {
+    const [r] = await chrome.scripting.executeScript({ target: { tabId }, func: hideChats, args: [ids] });
+    return r?.result || null;
+  } catch { return null; }
+}
+async function hideChats(ids) {   // runs IN the ChatGPT page
+  let token = '';
+  try { token = (await (await fetch(`${location.origin}/api/auth/session`, { credentials: 'include' })).json())?.accessToken || ''; } catch { /* below */ }
+  if (!token) return null;
+  const done = [], failed = [];
+  for (const id of ids) {
+    let ok = false;
+    try {
+      const r = await fetch(`${location.origin}/backend-api/conversation/${encodeURIComponent(id)}`, { method: 'PATCH', credentials: 'include',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ is_visible: false }) });
+      ok = r.ok || r.status === 404;   // 404: already gone
+    } catch { /* network */ }
+    (ok ? done : failed).push(id);
+  }
+  return { done, failed };
+}
+// A batch of chats to delete, run in one of our ChatGPT tabs that is open and loaded. false: none.
+async function deleteInPlace(lease) {
+  const tabs = new Set([...Object.values(await keptTabs()).map((v) => v.tabId), ...(await ourTabs())]);
+  for (const tabId of tabs) {
+    const t = await chrome.tabs.get(tabId).catch(() => null);
+    if (!t || t.status !== 'complete' || !/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(t.url || '')) continue;
+    const r = await deleteInTab(tabId, lease.ids || []);
+    if (r) { await api('/api/gpt/deleted', { done: r.done, failed: r.failed }).catch(() => {}); return true; }
+  }
+  return false;
 }
 // The panel's "Open Chat": the job's kept tab, or its conversation opened again (and kept).
 async function openChat(key) {
@@ -204,7 +247,7 @@ export async function syncMirror() {
     await noteToDelete(toDelete);
     // A kept chat is done once the server no longer holds that conversation for the job.
     const held = new Map(threads.filter((r) => r.stage !== 'closing').map((r) => [r.key, convId(r.conversation)]));
-    await closeKept((key, v) => !held.get(key) || held.get(key) !== convId(v.conversation));
+    await closeKept((key, v) => !held.get(key) || held.get(key) !== convId(v.conversation), { deleteChats: true });
   } catch (e) { if (e?.status === 401) await chrome.storage.local.set({ [K.threads]: {} }); }
 }
 async function noteToDelete(n) { if (typeof n === 'number' && (await state()).toDelete !== n) await setState({ toDelete: n }); }
@@ -316,8 +359,13 @@ function frameTask(lease) {
   return { kind: 'answers', prompt: answersPrompt(lease.questions, { context: lease.context || '' }), count: lease.questions.length, timeoutMs: 3 * 60_000 };
 }
 async function startWork(lease) {
+  // Chats to delete: in a ChatGPT tab that is already open, when there is one — no extra tab.
+  if (lease.work === 'delete' && await deleteInPlace(lease)) return;
   // Answers go to the CV's own conversation; a CV built by hand has none — a new chat (with the job as context).
-  const url = lease.work === 'answer' && /\/c\//.test(lease.conversation || '') ? lease.conversation : CHAT_URL;
+  // A new chat starts in the profile's ChatGPT PROJECT when it has one (lease.project_url): there, with
+  // "Project-only" memory, the shared account's memory of other profiles stays out.
+  const fresh = lease.project_url || CHAT_URL;
+  const url = lease.work === 'answer' && /\/c\//.test(lease.conversation || '') ? lease.conversation : fresh;
   if (lease.work === 'answer' && lease.key) await closeKept((key) => key === lease.key);   // one tab per chat
   const id = await openFrame(url);
   await frames(async (all) => { all[id] = { lease, task: frameTask(lease), startedAt: now(), aliveAt: now() }; });
@@ -415,11 +463,12 @@ async function handle(msg) {
       // Work in progress goes back to the server queue; built CVs and their answers stay. Every
       // ChatGPT chat the queue still keeps is deleted now (a question asked later gets a new chat).
       await stopAllWork();
-      await closeKept(() => true);
       const c = (await state()).checkFrame; if (c) await closeFrame(c);
       await setState({ enabled: false, status: 'off', notice: '', checkFrame: '', cooldownUntil: 0 });
       const r = await api('/api/gpt/cleanup', { device: await deviceId() }).catch(() => null);
-      if (r) await noteToDelete(r.to_delete);
+      await closeKept(() => true, { deleteChats: !!r });   // the server listed them: deleted in their own tabs
+      const left = await api('/api/gpt/cleanup', { device: await deviceId() }).catch(() => null);
+      if (left || r) await noteToDelete((left || r).to_delete);
       tick(); return { ok: true };
     }
     case 'continue': await setState({ status: 'checking', notice: '', checkFrame: '' }); tick(); return { ok: true };   // check the account again

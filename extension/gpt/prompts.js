@@ -19,6 +19,7 @@ export function answersPrompt(questions, { context = '' } = {}) {
     context
       ? `Answer the job application questions below as the candidate described here.\n\n${context}`
       : 'Now answer the job application questions below as the candidate whose resume you just wrote, for this same job.',
+    'Answer ONLY as this candidate. Ignore anything you remember about other people from saved memory or other conversations — their names, emails, employers or locations must not appear.',
     '',
     'How to write each answer:',
     '- 2 or 3 sentences, under 70 words.',

@@ -278,3 +278,22 @@ textarea.desc { min-height: 150px; font-size: 12px; }
 
 /* ✕ — close the panel (topbar on the main screens; the corner on sign-in) */
 .corner-close { position: fixed; top: 8px; right: 8px; z-index: 40; }
+
+/* Out Bids: the working set of 3 (panel.js winLine) */
+.win-line { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+.win-chip { height: 26px; padding: 0 6px; gap: 4px; justify-content: flex-start; background: var(--panel-2); color: var(--text-soft);
+  border-color: var(--border-soft); font-size: 11.5px; font-weight: 500; min-width: 0; }
+.win-chip:hover:not(:disabled) { background: var(--panel-3); color: var(--text); }
+.win-chip.on { border-color: var(--accent); color: var(--text); box-shadow: inset 0 0 0 1px var(--accent); background: var(--accent-bg); }
+.win-chip .n { color: var(--muted); font-variant-numeric: tabular-nums; }
+.win-chip .c { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.win-chip .s { flex: none; font-weight: 700; }
+.win-chip.ready .s { color: var(--success); }
+.win-chip.failed .s { color: var(--danger); }
+.win-chip.queued .s { color: var(--muted); }
+.win-chip .spinner { width: 10px; height: 10px; }
+.gpt-meta.warn-meta { flex: 1 0 100%; color: var(--warning); font-size: 11.5px; }
+.gpt-meta.warn-meta a { color: inherit; font-weight: 600; text-decoration: underline; }
+.conn { flex-wrap: wrap; }
+.project-paste { flex: 1 0 100%; margin-top: 2px; }
+.project-paste input { flex: 1 1 auto; height: 24px; font-size: 11.5px; }
