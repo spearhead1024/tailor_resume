@@ -1,6 +1,6 @@
 {
-  "version": "1.10.2",
+  "version": "1.10.3",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "The panel switches by itself: LinkedIn \u2192 Easy Bids, a known job \u2192 Out Bids, a new job page \u2192 Add Jobs",
-  "built_at": "2026-11-18T15:23:51Z"
+  "changelog": "Easy Bids: the CV from Gen CV is still saved to Downloads after the panel switched to another tab and back.",
+  "built_at": "2026-11-18T17:58:45Z"
 }
