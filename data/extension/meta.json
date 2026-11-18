@@ -1,6 +1,6 @@
 {
-  "version": "1.10.6",
+  "version": "1.10.7",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "Faster ChatGPT answers: done is checked every second, no extra waits.",
-  "built_at": "2026-11-18T18:36:17Z"
+  "changelog": "Queue of 2; a job with a CV is never sent to ChatGPT again; the one ChatGPT tab stays open.",
+  "built_at": "2026-11-18T19:01:01Z"
 }
