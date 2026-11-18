@@ -1,6 +1,6 @@
 {
-  "version": "1.9.1",
+  "version": "1.9.2",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "\u2715 button closes the panel; Out Bids prepares 3 CVs ahead (no more)",
-  "built_at": "2026-11-18T12:13:56Z"
+  "changelog": "At most 3 ChatGPT tabs (Out Bids: the job on screen + next 2); ChatGPT tabs open next to your tab",
+  "built_at": "2026-11-18T12:55:53Z"
 }
