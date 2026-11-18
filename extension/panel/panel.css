@@ -53,6 +53,9 @@ b, strong { font-weight: 600; }
 .small { font-size: 12px; }
 .row { display: flex; gap: 6px; align-items: center; min-width: 0; flex-wrap: wrap; }
 .row.space { justify-content: space-between; align-items: flex-start; flex-wrap: nowrap; }
+/* a long text next to a button wraps; the button keeps its size (it used to be squeezed) */
+.row.space > button { flex: none; white-space: nowrap; }
+.qa-row .row.space > .q { flex: 1 1 auto; }
 .grow { flex: 1 1 0; min-width: 0; }
 .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .empty { text-align: center; color: var(--muted); padding: 14px 8px; font-size: 12.5px; }
