@@ -66,12 +66,14 @@ One side panel (`extension/panel/`), tabs by role: **Out Bids** and **Easy Bids*
 - **✕** (top right, every screen) closes the panel — `chrome.sidePanel.close()` in the side panel, or the
   tab / window it was opened in — for browsers that draw no close button of their own.
 - **Out Bids** has ChatGPT write CVs for the job on screen and the next 2 only (`core/cv_queue.AHEAD = 3`,
-  counted by position in the list).
+  counted by position in the list), and keeps at most those 3 chats open — a job passed by keeps its CV,
+  its chat tab is closed. ChatGPT tabs open right next to the bidder's current tab.
 
-**Easy vs Out in the web app**: Jobs and Applied show an *Easy* / *Out* label and filter; Metrics shows
-how many applies (and jobs added) were Easy Apply (`E n`). Metrics, Applied and Jobs all count a day as
-the 5pm JST → 5pm JST work day, and the Metrics week is Mon–Sun. Applied's *Job added on* lists exactly
-what a Metrics cell counts (Metrics files an apply under the day its job was added).
+**Easy vs Out in the web app**: Jobs and Applied show a small LinkedIn *Easy Apply* badge on Easy Apply
+jobs and an Easy / Out filter; Metrics shows how many applies and jobs added were Easy Apply (`E n`).
+**One day everywhere**: Metrics, Applied and Jobs count a day as 5pm GMT+9 → 5pm GMT+9, and Metrics'
+week is Mon–Sun. Metrics files an apply under the day it was applied and includes VPS1 (mirrored applies,
+synced jobs), so its GRAND TOTALs equal the Applied tab (applied) and the Jobs tab (jobs added) for every day.
 
 To try changes without packing or installing it:
 

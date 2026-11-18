@@ -112,15 +112,21 @@ def _expire(session, user_id: str) -> None:
 
 
 # ---------- what the panel asks for ----------
-def prepare(db_path, user: dict, profile_id: str, jobs: list[dict], has_cv) -> list[dict]:
+def prepare(db_path, user: dict, profile_id: str, jobs: list[dict], has_cv, *, cap_chats: bool = False) -> list[dict]:
     """The bidder is on jobs[0]; jobs[1:] come next. The window is the job on screen and the
     next ones — AHEAD jobs in all, by POSITION — and those of them without a CV yet
     (has_cv(job_id)) are queued. (Skipping jobs that already have a CV before counting used to
     slide the window further and further down the list: ChatGPT kept writing CVs ahead without
     end.) Queued work of this bidder outside that window (another profile, jobs passed by) is
-    dropped — nothing was sent to ChatGPT for it."""
+    dropped — nothing was sent to ChatGPT for it.
+
+    cap_chats (Out Bids): ChatGPT chats stay open only for those AHEAD jobs — a job passed by keeps
+    its CV and answers, but its chat (and so its tab) is closed; a question asked later gets a new
+    chat. So Out Bids never has more than AHEAD ChatGPT tabs. (Easy Bids keeps a CV's chat until the
+    job is done: its jobs are the ones the bidder pressed Gen CV for.)"""
     window = [j for j in jobs[:AHEAD] if not has_cv(j["id"])]
     keep = {(profile_id, j["id"]) for j in window}
+    in_view = {(profile_id, j["id"]) for j in jobs[:AHEAD]}
     with session_scope(db_path) as session:
         _write_lock(session)
         uid = user.get("id", "")
@@ -128,6 +134,11 @@ def prepare(db_path, user: dict, profile_id: str, jobs: list[dict], has_cv) -> l
             if (r.profile_id, r.job_id) not in keep and not r.work and not (r.want or []):
                 _drop_chat(session, r)
                 session.delete(r)
+        if cap_chats:
+            for r in session.scalars(select(CvQueueRow).where(CvQueueRow.user_id == uid, CvQueueRow.stage.in_(("ready", "failed")))).all():
+                if (r.profile_id, r.job_id) not in in_view and not r.work and not (r.want or []):
+                    _drop_chat(session, r)          # the CV and its answers stay
+                    session.delete(r)
         for i, j in enumerate(window):
             r = session.get(CvQueueRow, (profile_id, j["id"]))
             if r is None:

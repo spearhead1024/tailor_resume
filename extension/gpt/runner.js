@@ -98,8 +98,12 @@ export async function ensureDriver() {
 }
 async function openFrame(url) {
   await ensureDriver();
-  // In the background (the bidder's focus stays where it is), at the end of the window's tab strip.
-  const tab = await chrome.tabs.create({ url, active: false });
+  await makeRoom();
+  // In the background (the bidder's focus stays where it is), right NEXT TO the bidder's current tab
+  // — where it is seen, not at the far end of a long tab strip.
+  const [cur] = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => []);
+  const near = cur && !/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(cur.url || '') ? { windowId: cur.windowId, index: cur.index + 1 } : {};
+  const tab = await chrome.tabs.create({ url, active: false, ...near });
   await withTabs(async (set) => { set.add(tab.id); });
   // Chrome may discard background tabs to save memory — that would kill a CV half-written.
   await chrome.tabs.update(tab.id, { autoDiscardable: false }).catch(() => {});
@@ -129,8 +133,22 @@ const withKept = (fn) => { const run = keptLock.then(async () => { const all = a
 async function keepTab(frame, key, conversation) {
   const tabId = tabOfFrame(frame);
   await withTabs(async (set) => { set.delete(tabId); });       // not a work tab any more: the driver is done
-  const old = await withKept(async (all) => { const prev = all[key]; all[key] = { tabId, conversation }; return prev; });
+  const old = await withKept(async (all) => { const prev = all[key]; all[key] = { tabId, conversation, at: now() }; return prev; });
   if (old && old.tabId !== tabId) await chrome.tabs.remove(old.tabId).catch(() => {});
+}
+// At most PARALLEL ChatGPT tabs in all — working tabs AND kept chats. Before a new working tab opens,
+// the oldest kept chats' tabs are closed if needed. Their chats stay: the server still holds them,
+// so "Open Chat" (openChat) opens one again, and questions still go to it.
+async function makeRoom() {
+  const working = Object.keys(await read(FRAMES, {})).length + ((await state()).checkFrame ? 1 : 0);
+  const keep = Math.max(0, PARALLEL - 1 - working);
+  const gone = await withKept(async (all) => {
+    const old = Object.entries(all).sort((a, b) => (a[1].at || 0) - (b[1].at || 0));
+    const out = [];
+    while (old.length > keep) { const [k, v] = old.shift(); out.push(v.tabId); delete all[k]; }
+    return out;
+  });
+  for (const tabId of gone) await chrome.tabs.remove(tabId).catch(() => {});
 }
 async function closeKept(test) {
   const gone = await withKept(async (all) => { const out = []; for (const [k, v] of Object.entries(all)) if (test(k, v)) { out.push(v.tabId); delete all[k]; } return out; });
@@ -147,7 +165,7 @@ async function openChat(key) {
   const thread = (await read(K.threads, {}))[key];
   if (!/\/c\//.test(thread?.conversation || '')) return { ok: false, error: 'This CV has no ChatGPT chat any more.' };
   const tab = await chrome.tabs.create({ url: thread.conversation, active: true });
-  await withKept(async (all) => { all[key] = { tabId: tab.id, conversation: thread.conversation }; });
+  await withKept(async (all) => { all[key] = { tabId: tab.id, conversation: thread.conversation, at: now() }; });
   return { ok: true };
 }
 chrome.tabs.onRemoved.addListener((tabId) => {   // the bidder closed a kept tab: just forget it

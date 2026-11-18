@@ -55,15 +55,18 @@ def _merge_answers(resume_id: str, fresh: list[dict]) -> None:
 # ---------- the panel ----------
 @router.post("/prepare")
 def prepare(body: dict, user: dict = Depends(_bidder)):
-    """body: {profile_id, jobs: [{id, company, job_title}]} — the job on screen first, then the
-    next ones in the Bid queue. The first 3 without a CV are queued."""
+    """body: {profile_id, jobs: [{id, company, job_title}], mode: 'out' | 'easy'} — the job on screen
+    first, then the next ones in the Bid queue. Of the first 3 (by position), those without a CV are
+    queued; in Out Bids the chats of jobs outside those 3 are closed (at most 3 ChatGPT tabs)."""
     pid = str((body or {}).get("profile_id") or "").strip()
     if not pid:
         raise HTTPException(status_code=400, detail="profile_id is required")
     R._check_profile_access(user, pid)
     jobs = [j for j in (body or {}).get("jobs") or [] if isinstance(j, dict) and j.get("id")][:20]
     with_cv = {r.get("job_id") for r in storage.get_generated_resumes_for_profile(pid) if r.get("status") == "generated"}
-    return {"threads": Q.prepare(storage.db_path, user, pid, jobs, lambda jid: jid in with_cv)}
+    # Out Bids (mode "out"): ChatGPT chats only for the job on screen + the next 2 (Q.AHEAD).
+    cap = str((body or {}).get("mode") or "") == "out"
+    return {"threads": Q.prepare(storage.db_path, user, pid, jobs, lambda jid: jid in with_cv, cap_chats=cap)}
 
 
 @router.get("/threads")

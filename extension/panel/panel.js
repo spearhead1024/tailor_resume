@@ -669,7 +669,7 @@ function gptPrepare() {
     : S.queue.slice(i, i + 3);
   const jobs = list.map((j) => ({ id: j.id, company: j.company, job_title: j.job_title }));
   // The server keeps the queue (3 ahead, skipping jobs with a CV); the worker is told to look.
-  if (jobs.length) api('/api/gpt/prepare', { method: 'POST', body: { profile_id: S.profileId, jobs } }).then(() => gpt('sync')).catch(() => {});
+  if (jobs.length) api('/api/gpt/prepare', { method: 'POST', body: { profile_id: S.profileId, jobs, mode: S.mode === 'easy' ? 'easy' : 'out' } }).then(() => gpt('sync')).catch(() => {});
 }
 async function connectGpt() {
   const ok = await requestChatAccess();   // first await of the click — Chrome's prompt needs it
