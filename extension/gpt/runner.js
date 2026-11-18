@@ -506,7 +506,7 @@ async function handle(msg) {
       tick(); return { ok: true };
     }
     case 'continue': await setState({ status: 'checking', notice: '', checkFrame: '' }); tick(); return { ok: true };   // check the account again
-    case 'sync': await syncMirror(); tick(); return { ok: true };   // the panel changed the queue on the server
+    case 'sync': tick(); syncMirror().catch(() => {}); return { ok: true };   // the panel changed the queue on the server: claim at once
     case 'openChat': return openChat(String(msg.key || ''));
     default: return { ok: false, error: `Unknown action ${msg.action}` };
   }

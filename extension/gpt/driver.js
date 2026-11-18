@@ -84,7 +84,7 @@
   // Chrome slows timers down in background tabs (to once a MINUTE in a tab hidden 5+ minutes),
   // which made a finished reply wait long before it was noticed. DOM changes are seen at once.
   // (Checks are bunched: one per burst of changes, through a MessageChannel — never throttled.)
-  function waitFor(fn, ms, step = 500) {
+  function waitFor(fn, ms, step = 500, first = 0) {
     return new Promise((resolve) => {
       let done = false, queued = false;
       const endAt = Date.now() + ms;
@@ -98,7 +98,7 @@
       ch.port1.onmessage = () => { queued = false; check(); };
       const obs = new MutationObserver(() => { if (!queued && !done) { queued = true; ch.port2.postMessage(0); } });
       obs.observe(document.documentElement, { subtree: true, childList: true, characterData: true, attributes: true });
-      (async () => { while (!done) { check(); if (!done) await sleep(step); } })();
+      (async () => { if (first) await sleep(first); while (!done) { check(); if (!done) await sleep(step); } })();
     });
   }
 
@@ -112,21 +112,19 @@
     // ProseMirror: execCommand goes through the editor's own input handling.
     document.execCommand('selectAll', false, null);
     let ok = document.execCommand('insertText', false, prompt);
-    await sleep(200);
     const typed = () => textOf(composer).trim().length >= Math.min(prompt.length, 200) * 0.8;
-    if (!ok || !typed()) {
-      try {
-        const dt = new DataTransfer(); dt.setData('text/plain', prompt);
-        composer.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
-        await sleep(300);
-      } catch { /* no DataTransfer — fall through */ }
-      if (!typed()) { try { composer.textContent = prompt; composer.dispatchEvent(new Event('input', { bubbles: true })); await sleep(200); } catch { /* */ } }
-      ok = typed();
-    }
+    if (ok && (typed() || await waitFor(typed, 600, 100))) return true;   // (normally at once)
+    try {
+      const dt = new DataTransfer(); dt.setData('text/plain', prompt);
+      composer.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+      await waitFor(typed, 600, 100);
+    } catch { /* no DataTransfer — fall through */ }
+    if (!typed()) { try { composer.textContent = prompt; composer.dispatchEvent(new Event('input', { bubbles: true })); await waitFor(typed, 400, 100); } catch { /* */ } }
+    ok = typed();
     return ok;
   }
   async function clickSend(composer) {
-    const btn = await waitFor(() => { const b = q(SEL.send); return b && !b.disabled && visible(b) ? b : null; }, 8000, 250);
+    const btn = await waitFor(() => { const b = q(SEL.send); return b && !b.disabled && visible(b) ? b : null; }, 8000, 100);
     if (btn) { btn.click(); return; }
     composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
   }
@@ -149,18 +147,19 @@
   // has stayed the same for 1.5 s.
   const signedOut = () => /^\/auth\//.test(location.pathname) || visible(q(SEL.login));
   async function waitForReply(baseline, timeoutMs, ready = () => false) {
-    const started = await waitFor(() => { const r = lastReply(); return (r.count > baseline.count || r.text !== baseline.text) || q(SEL.stop); }, 60_000, 500);
+    const started = await waitFor(() => q(SEL.stop) || (() => { const r = lastReply(); return r.count > baseline.count || r.text !== baseline.text; })(), 60_000, 250);
     if (!started && limitTextPresent()) return { kind: 'rate_limited' };
     let last = '', since = Date.now();
     const out = await waitFor(() => {
+      if (q(SEL.stop)) { since = Date.now(); return null; }          // still writing (cheap: no text read)
       if (signedOut()) return { kind: 'needs_login' };
       const r = lastReply();
       const changed = r.count > baseline.count || r.text !== baseline.text;
-      if (!changed || q(SEL.stop) || !r.text) { last = r.text; since = Date.now(); return null; }
+      if (!changed || !r.text) { last = r.text; since = Date.now(); return null; }
       if (ready(r)) return { done: true };
       if (r.text !== last) { last = r.text; since = Date.now(); return null; }
-      return Date.now() - since >= 1500 ? { done: true } : null;
-    }, timeoutMs, 700);
+      return Date.now() - since >= 1000 ? { done: true } : null;
+    }, timeoutMs, 1000, 3000);   // a check after 3 s, then every second — and on every change of the page
     return out || { kind: 'timeout' };
   }
 
@@ -204,7 +203,7 @@
     if (!composer) return { ok: false, kind: detectBlocker() || 'no_composer', error: 'Could not find the ChatGPT message box.', diag: diagnose() };
     const baseline = lastReply();
     if (!(await typePrompt(composer, prompt))) return { ok: false, kind: 'no_composer', error: 'Could not type the prompt into ChatGPT.', diag: diagnose() };
-    await sleep(300); await clickSend(composer);
+    await clickSend(composer);
     const salvage = () => { const r = lastReply(); return extractJson(r.el, r.text); };
     const isResume = (r) => !!extractJson(r.el, r.text);
     let reply = await waitForReply(baseline, timeoutMs, isResume);
@@ -215,7 +214,7 @@
       const c2 = q(SEL.composer); if (!c2) return { ok: false, kind: 'invalid_json', error: 'The reply was not valid JSON.', diag: diagnose() };
       const base2 = lastReply();
       await typePrompt(c2, 'Your previous reply was not valid JSON. Reply with ONLY the complete JSON object described above — no markdown fences, no commentary, no truncation.');
-      await sleep(300); await clickSend(c2);
+      await clickSend(c2);
       reply = await waitForReply(base2, Math.min(timeoutMs, 4 * 60_000), isResume);
       json = salvage();
       if (!json) return { ok: false, kind: reply.kind || 'invalid_json', error: 'ChatGPT replied, but not with a valid resume JSON object.', diag: diagnose() };
@@ -240,7 +239,7 @@
     if (!composer) return { ok: false, kind: detectBlocker() || 'no_composer', error: 'Could not find the ChatGPT message box.', diag: diagnose() };
     const baseline = lastReply();
     if (!(await typePrompt(composer, prompt))) return { ok: false, kind: 'no_composer', error: 'Could not type into ChatGPT.', diag: diagnose() };
-    await sleep(300); await clickSend(composer);
+    await clickSend(composer);
     const reply = await waitForReply(baseline, timeoutMs, ready);
     return reply.kind && reply.kind !== 'timeout' ? { ok: false, kind: reply.kind, error: `ChatGPT did not finish (${reply.kind}).`, diag: diagnose() } : { ok: true };
   }
@@ -292,7 +291,14 @@
     return { plan, active };
   }
   const isFreePlan = (plan) => /^free/.test(plan);   // "free", "free_workspace"
+  let paidUntil = 0, paidPlan = '';
   async function requirePaidPlan() {
+    if (Date.now() < paidUntil) return { ok: true, plan: paidPlan };   // checked in this page a moment ago
+    const res = await checkPaidPlan();
+    if (res.ok) { paidUntil = Date.now() + 10 * 60_000; paidPlan = res.plan; }
+    return res;
+  }
+  async function checkPaidPlan() {
     const p = await accountPlan();
     if (p.kind) return { ok: false, kind: 'needs_login', error: 'ChatGPT is not signed in.' };
     if (!p.plan && p.active == null) return { ok: false, kind: 'plan_unknown', error: 'Could not confirm which ChatGPT plan this account is on.' };
@@ -356,11 +362,11 @@
   }
   async function pullOnce() {
     let task = null;
-    for (let i = 0; i < 5 && !task; i++) {
+    for (let i = 0; i < 15 && !task; i++) {
       const r = await chrome.runtime.sendMessage({ type: 'gpt_ready' }).catch(() => null);
       if (r && r.ours === false) return;          // the bidder's own ChatGPT tab: nothing to do here
       task = r?.task || null;
-      if (!task) await sleep(1500);               // just opened: the worker is still recording its task
+      if (!task) await sleep(400);                // just opened: the worker is still recording its task
     }
     if (!task) return;
     FRAME = task.id;
