@@ -1,6 +1,6 @@
 {
-  "version": "1.9.2",
+  "version": "1.9.3",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "At most 3 ChatGPT tabs (Out Bids: the job on screen + next 2); ChatGPT tabs open next to your tab",
-  "built_at": "2026-11-18T12:55:53Z"
+  "changelog": "Opens on the right tab for your page (Easy Bids on LinkedIn, Out Bids on an empty tab, Add Jobs elsewhere); auto-download checks",
+  "built_at": "2026-11-18T13:45:14Z"
 }
