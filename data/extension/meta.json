@@ -1,6 +1,6 @@
 {
-  "version": "1.10.1",
+  "version": "1.10.2",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "Classic job search fixed: switches back from AI search even without the LinkedIn connection",
-  "built_at": "2026-11-18T14:45:13Z"
+  "changelog": "The panel switches by itself: LinkedIn \u2192 Easy Bids, a known job \u2192 Out Bids, a new job page \u2192 Add Jobs",
+  "built_at": "2026-11-18T15:23:51Z"
 }

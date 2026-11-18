@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TailorResume Assistant",
-  "version": "1.10.1",
+  "version": "1.10.2",
   "description": "Side panel to bid outside-apply jobs and LinkedIn Easy Apply jobs (duplicate check, ChatGPT CVs, classic job search kept), and to add jobs from postings.",
   "minimum_chrome_version": "116",
   "update_url": "https://tailorresume.duckdns.org/api/extension/update.xml",
