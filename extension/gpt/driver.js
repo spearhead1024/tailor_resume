@@ -163,6 +163,63 @@
     return out || { kind: 'timeout' };
   }
 
+  // ---- the model: ChatGPT's model menu (top left). Tech questions are sent with a fast model (⚙ Settings
+  // → ChatGPT models; "Instant" by default), and the menu is set back afterwards, so the next CV is
+  // written by the model it was before. A CV model can be pinned the same way (task.model).
+  // Items are found by their NAME ("Instant" also matches "GPT-5.1 Instant"). Best effort: no menu, or
+  // no such model → the message goes with whatever is selected, never an error.
+  const MODEL_BTN = ['button[data-testid="model-switcher-dropdown-button"]', 'button[aria-label*="model selector" i]',
+    'button[aria-haspopup="menu"][aria-label*="model" i]'];
+  const reEsc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const low = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const modelButton = () => { const b = q(MODEL_BTN); return b && visible(b) ? b : null; };
+  const modelNow = (b) => low(`${b.getAttribute('aria-label') || ''} ${textOf(b)}`);
+  const itemName = (el) => (textOf(el).split('\n').map((s) => s.trim()).find(Boolean) || '');
+  const menuItems = () => Array.from(document.querySelectorAll('[role="menu"] [role="menuitem"], [role="menu"] [role="menuitemradio"]')).filter(visible);
+  const hasWord = (text, w) => new RegExp(`(^|[^a-z0-9])${reEsc(low(w))}($|[^a-z0-9])`).test(low(text));
+  function press(el, kinds) {
+    for (const k of kinds) {
+      const C = k.startsWith('pointer') && typeof PointerEvent === 'function' ? PointerEvent : MouseEvent;
+      el.dispatchEvent(new C(k, { bubbles: true, cancelable: true, button: 0, buttons: /down$/.test(k) ? 1 : 0, pointerType: 'mouse', isPrimary: true }));
+    }
+  }
+  const closeMenu = () => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+  async function openModelMenu(b) {
+    const items = () => { const i = menuItems(); return i.length ? i : null; };
+    press(b, ['pointerdown', 'mousedown']);                     // a Radix menu opens on pointer-down
+    let got = await waitFor(items, 1000, 100);
+    if (!got) { press(b, ['pointerup', 'mouseup', 'click']); got = await waitFor(items, 1200, 100); }   // others: on click
+    return got || [];
+  }
+  function findItem(items, want) {
+    const w = low(want), named = items.map((el) => ({ el, n: low(itemName(el)) }));
+    return (named.find((x) => x.n === w) || named.find((x) => x.n.startsWith(`${w} `)) || named.find((x) => hasWord(x.n, w))
+      || named.find((x) => low(x.el.getAttribute('data-testid')).includes(w.replace(/ /g, '-'))))?.el || null;
+  }
+  function selectedItem(items, now) {
+    const marked = items.find((el) => el.getAttribute('aria-checked') === 'true' || el.getAttribute('data-state') === 'checked');
+    if (marked) return marked;
+    const named = items.filter((el) => { const n = low(itemName(el)); return n && hasWord(now, n); })
+      .sort((a, b) => itemName(b).length - itemName(a).length);
+    return named[0] || items.find((el) => /^auto\b/.test(low(itemName(el)))) || null;   // the button names no model: Auto
+  }
+  // → { ok, prev: the model it was on (to set back), why }
+  async function pickModel(want) {
+    if (!want) return null;
+    const b = modelButton();
+    if (!b) return { ok: false, prev: '', why: 'no model menu' };
+    const now = modelNow(b);
+    if (hasWord(now, want)) return { ok: true, prev: '' };                 // already on it
+    const items = await openModelMenu(b);
+    if (!items.length) return { ok: false, prev: '', why: 'the model menu did not open' };
+    const cur = selectedItem(items, now), target = findItem(items, want);
+    if (!target) { closeMenu(); return { ok: false, prev: '', why: `no "${want}" in the model menu` }; }
+    const prev = cur && cur !== target ? itemName(cur) : '';
+    target.click();
+    if (!(await waitFor(() => !menuItems().length || null, 1500, 100))) closeMenu();
+    return { ok: true, prev };
+  }
+
   // Every top-level {...} span (string-aware), tried last-to-first, so the reply's
   // object is found even next to the prompt's pseudo-JSON schema or prose.
   function jsonSpans(text, open = '{', close = '}') {
@@ -197,10 +254,11 @@
     return c;
   }
 
-  async function generate({ prompt, timeoutMs = 6 * 60_000 }) {
+  async function generate({ prompt, timeoutMs = 6 * 60_000, model = '' }) {
     const b0 = detectBlocker(); if (b0) return blockedResult(b0);
     const composer = await composerOrFail();
     if (!composer) return { ok: false, kind: detectBlocker() || 'no_composer', error: 'Could not find the ChatGPT message box.', diag: diagnose() };
+    if (model) await pickModel(model);                       // a pinned CV model (⚙ Settings)
     const baseline = lastReply();
     if (!(await typePrompt(composer, prompt))) return { ok: false, kind: 'no_composer', error: 'Could not type the prompt into ChatGPT.', diag: diagnose() };
     await clickSend(composer);
@@ -243,25 +301,32 @@
     const reply = await waitForReply(baseline, timeoutMs, ready);
     return reply.kind && reply.kind !== 'timeout' ? { ok: false, kind: reply.kind, error: `ChatGPT did not finish (${reply.kind}).`, diag: diagnose() } : { ok: true };
   }
-  async function answers({ prompt, count, timeoutMs = 3 * 60_000 }) {
-    const parsed = (l) => parseAnswers(l.el ? textOf(l.el) : l.text, count) || parseAnswers(l.text, count);
-    const isAnswers = (l) => !!parsed(l);       // the list is complete: reported the moment ChatGPT stops
-    let r = await send(prompt, timeoutMs, isAnswers);
-    if (!r.ok) return r;
-    const read = () => parsed(lastReply());
-    let out = read();
-    if (!out) {   // once more, strictly
-      r = await send(`Reply with ONLY the JSON array of ${count} strings, one answer per question, in order. No other text.`, timeoutMs, isAnswers);
+  async function answers({ prompt, count, timeoutMs = 3 * 60_000, model = '' }) {
+    if (!detectBlocker()) await composerOrFail();          // the page (and its model menu) is there
+    const sel = model ? await pickModel(model) : null;    // a fast model for tech questions (⚙ Settings)
+    try {
+      const parsed = (l) => parseAnswers(l.el ? textOf(l.el) : l.text, count) || parseAnswers(l.text, count);
+      const isAnswers = (l) => !!parsed(l);       // the list is complete: reported the moment ChatGPT stops
+      let r = await send(prompt, timeoutMs, isAnswers);
       if (!r.ok) return r;
-      out = read();
+      const read = () => parsed(lastReply());
+      let out = read();
+      if (!out) {   // once more, strictly
+        r = await send(`Reply with ONLY the JSON array of ${count} strings, one answer per question, in order. No other text.`, timeoutMs, isAnswers);
+        if (!r.ok) return r;
+        out = read();
+      }
+      return out ? { ok: true, answers: out, conversation: location.href, model: sel?.ok ? model : '' }
+        : { ok: false, kind: 'invalid_json', error: 'ChatGPT did not return the answers as a list.', diag: diagnose() };
+    } finally {
+      if (sel?.prev) await pickModel(sel.prev).catch(() => {});   // back to the model the CVs are written with
     }
-    return out ? { ok: true, answers: out, conversation: location.href } : { ok: false, kind: 'invalid_json', error: 'ChatGPT did not return the answers as a list.', diag: diagnose() };
   }
 
   async function write(task) {
     const res = await generate(task);
     if (!res.ok || !task.answersPrompt) return res;
-    const a = await answers({ prompt: task.answersPrompt, count: task.answersCount, timeoutMs: Math.min(task.timeoutMs || 360_000, 180_000) });
+    const a = await answers({ prompt: task.answersPrompt, count: task.answersCount, timeoutMs: Math.min(task.timeoutMs || 360_000, 180_000), model: task.answersModel || '' });
     return a.ok ? { ...res, answers: a.answers, conversation: a.conversation || res.conversation } : { ...res, answersError: a.error || a.kind };
   }
 

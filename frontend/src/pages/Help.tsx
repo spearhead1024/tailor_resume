@@ -128,9 +128,15 @@ function ExtensionGuide() {
             <strong> Download CV</strong>, apply, then <strong>Mark as Applied</strong> (or Report / Skip): its ChatGPT chat is
             deleted, the other one comes up, and the newest job in the queue joins it. A job that already has a CV is never sent to ChatGPT again.</li>
           <li><strong>Tech Questions</strong> — paste the application's questions (one per line) and click
-            <strong> Save &amp; Answer</strong>: ChatGPT answers them first, before any other CV, in the same chat that wrote the CV. Every bidder on
-            that job sees them; click <strong>Copy</strong> to use an answer.</li>
-          <li><strong>Add Jobs</strong> (job adders) — open a job posting and add it in one click; duplicates are flagged.</li>
+            <strong> Save &amp; Answer</strong>: ChatGPT answers them first, before any other CV, in the same chat that wrote the CV — with the
+            fast <strong>Instant</strong> model, then it is set back so CVs keep their model (⚙ Settings → <strong>ChatGPT models</strong>).
+            Every bidder on that job sees them; click <strong>Copy</strong> to use an answer.</li>
+          <li><strong>Add Jobs</strong> (job adders) — open a job posting and add it in one click; duplicates are flagged.
+            The <strong>AI check</strong> reads it in a few seconds: a clearly remote, paid software job goes live at once; an onsite /
+            hybrid / clearance job, or one that doesn't say where the work is, waits in <strong>Jobs → Pending</strong> for an admin.
+            If it is rejected, the reason shows under its status.</li>
+          <li><strong>Tech stack</strong> — every job shows its main stack (React, Python…) in Jobs, Applied, the panel, and
+            <strong> Schedule</strong> copies it into the Interviews board's Skillset.</li>
         </ul>
       </div>
 

@@ -25,10 +25,16 @@
   form button:disabled { background: #d7d7d7; cursor: default; }
   .center { max-width: 420px; margin: 80px auto; text-align: center; }
   .limit { background: #fff4e5; border: 1px solid #f0c27b; border-radius: 10px; padding: 12px; margin: 0 auto 10px; max-width: 760px; }
+  #modelBtn { border: 0; background: none; font: inherit; font-weight: 600; cursor: pointer; padding: 4px 8px; border-radius: 8px; }
+  #modelBtn:hover { background: #f4f4f4; }
+  .model-menu { position: absolute; top: 44px; left: 12px; z-index: 5; min-width: 240px; background: #fff; border: 1px solid #e5e5e5; border-radius: 14px; box-shadow: 0 8px 28px rgba(0,0,0,.12); padding: 6px; }
+  .model-menu [role="menuitem"] { display: flex; justify-content: space-between; gap: 10px; padding: 8px 10px; border-radius: 8px; cursor: pointer; }
+  .model-menu [role="menuitem"]:hover { background: #f4f4f4; }
+  .model-menu small { display: block; color: #8e8e8e; font-weight: 400; }
 </style>
 </head>
 <body>
-<header><span>ChatGPT <small>— harness stand-in (not the real site)</small></span><small id="where"></small></header>
+<header><span><button type="button" id="modelBtn" data-testid="model-switcher-dropdown-button" aria-haspopup="menu"></button> <small>— harness stand-in (not the real site)</small></span><small id="where"></small></header>
 <main><div class="turns" id="turns"></div></main>
 <form id="composer-form" onsubmit="return false">
   <div id="prompt-textarea" class="ProseMirror" contenteditable="true" role="textbox"></div>
@@ -49,6 +55,33 @@
   const load = () => { try { return JSON.parse(localStorage.getItem(key()) || '[]'); } catch { return []; } };
   const save = (turns) => localStorage.setItem(key(), JSON.stringify(turns));
   $('#where').textContent = convId() ? `conversation ${convId()}` : 'new chat';
+
+  // The model menu, like ChatGPT's (Radix): opens on pointer-down, items are role="menuitem", the
+  // choice is remembered for the next chats too. Each message is sent with the model shown — tests
+  // see it as a request to /__tr_model/<model>/<cv|answers|other>.
+  const MODELS = [['Auto', 'Decides how long to think'], ['Instant', 'Answers right away'], ['Thinking', 'Thinks longer for better answers'], ['Pro', 'Research-grade intelligence']];
+  let model = localStorage.getItem('fakegpt.model') || 'Thinking';
+  const mbtn = $('#modelBtn');
+  let menu = null;
+  function showModel() {
+    mbtn.textContent = model === 'Auto' ? 'ChatGPT 5.1 ▾' : `ChatGPT 5.1 ${model} ▾`;
+    mbtn.setAttribute('aria-label', `Model selector, current model is ${model === 'Auto' ? '5.1' : `5.1 ${model}`}`);
+  }
+  function closeMenu() { menu?.remove(); menu = null; mbtn.setAttribute('aria-expanded', 'false'); }
+  function openMenu() {
+    menu = document.createElement('div'); menu.className = 'model-menu'; menu.setAttribute('role', 'menu');
+    for (const [name, sub] of MODELS) {
+      const it = document.createElement('div');
+      it.setAttribute('role', 'menuitem'); it.setAttribute('data-testid', `model-switcher-gpt-5-1-${name.toLowerCase()}`);
+      it.innerHTML = `<div>${name}<small>${sub}</small></div><span>${name === model ? '✓' : ''}</span>`;
+      it.addEventListener('click', () => { model = name; localStorage.setItem('fakegpt.model', model); showModel(); closeMenu(); });
+      menu.append(it);
+    }
+    document.body.append(menu); mbtn.setAttribute('aria-expanded', 'true');
+  }
+  mbtn.addEventListener('pointerdown', (e) => { if (e.button !== 0) return; e.preventDefault(); menu ? closeMenu() : openMenu(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && menu) closeMenu(); }, true);
+  showModel();
 
   if (mode === 'login') {
     form.remove();
@@ -150,6 +183,8 @@
       try { if (parent.__harness) { parent.__harness.pushUrl(window, url); told = true; } } catch { /* cross-origin parent */ }
       if (!told) history.pushState(null, '', new URL(url).pathname);   // as the real app does
     }
+    const kind = /JSON array of \d+ string/.test(text) ? 'answers' : /work_history/.test(text) ? 'cv' : 'other';
+    realFetch(`/__tr_model/${encodeURIComponent(model)}/${kind}`).catch(() => {});   // tests only: which model got which message
     const turns = load(); turns.push({ role: 'user', text }); addTurn('user', text);
     const reply = replyFor(text);
     const el = addTurn('assistant', '');

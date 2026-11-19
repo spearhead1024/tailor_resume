@@ -544,6 +544,7 @@ def _eligible_bid_items(
             "region": job.get("region", "ANY"),
             "link": job.get("link", ""),
             "submitted_at": job.get("submitted_at", ""),
+            "tech_stack": job.get("tech_stack") or [],
             "resume_id": (existing or {}).get("saved_resume_id", ""),
             "ats_score": (existing or {}).get("ats_score", 0),
             "ats": (existing or {}).get("ats") or None,
@@ -680,6 +681,7 @@ def _easy_item(job: dict) -> dict:
         "region": job.get("region", "ANY"),
         "link": job.get("link", ""),
         "submitted_at": job.get("submitted_at", ""),
+        "tech_stack": job.get("tech_stack") or [],
         "apply_type": "easy" if easy_apply.is_easy_apply(job.get("link")) else "outside",
         "company_info": storage.company_info_for_names([company]).get(company),
         "resume_id": "", "ats_score": 0, "ats": None,
@@ -884,6 +886,7 @@ def bid_job_detail(job_id: str, user: dict = Depends(get_current_user)):
         "region": job.get("region", "ANY"),
         "link": job.get("link", ""),
         "description": job.get("description", ""),
+        "tech_stack": job.get("tech_stack") or [],
         "company_info": storage.company_info_for_names([job.get("company", "")]).get(job.get("company", "")),
         "questions": job_questions(job),
     }

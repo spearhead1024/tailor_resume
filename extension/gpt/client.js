@@ -8,6 +8,18 @@ export const CHAT_URL = 'https://chatgpt.com/';
 export const PARALLEL = 1;   // ONE ChatGPT tab: it writes the CVs of the jobs ahead (the server's queue of 2) one after another, and answers questions first
 export const threadKey = (profileId, jobId) => `${profileId}:${jobId}`;
 
+// Which ChatGPT model writes what (⚙ Settings → ChatGPT models). Names as ChatGPT's model menu shows
+// them; '' = leave ChatGPT's own choice. Tech questions go to Instant by default — the reply comes in
+// seconds instead of the minute a thinking model takes; the CV keeps the account's model.
+export const GPT_MODELS_KEY = 'gptModels';
+export const MODEL_CHOICES = ['Instant', 'Thinking', 'Auto', 'Pro'];
+export const DEFAULT_MODELS = { answers: 'Instant', cv: '' };
+export async function gptModels() {
+  const got = (await chrome.storage.local.get(GPT_MODELS_KEY).catch(() => ({})))[GPT_MODELS_KEY] || {};
+  const pick = (v, d) => (typeof v === 'string' ? v.trim().slice(0, 40) : d);
+  return { answers: pick(got.answers, DEFAULT_MODELS.answers), cv: pick(got.cv, DEFAULT_MODELS.cv) };
+}
+
 export async function gptSnapshot() {
   const got = await chrome.storage.local.get(Object.values(GPT_KEYS)).catch(() => ({}));
   return {

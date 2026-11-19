@@ -19,9 +19,21 @@ Full-stack rewrite of the Streamlit Resume Generator. FastAPI backend + React (V
 
 - **Login** — JWT, sign-in + request-access
 - **To-Do** — approved jobs that haven't been applied to per profile
-- **Jobs** — list / create / approve / delete
+- **Jobs** — list / create / approve / delete. **Pending** = the review queue of the AI job check
+  (`core/job_ai.py`, VPS1's OpenAI screener word for word): a job_adder's job waits there until OpenAI
+  reads it — remote / onsite / hybrid / travel / in-person / not stated, software, paid, clearance, main
+  stack. *Fit* (explicitly remote) is approved by the check; *Not fit* / *Check* wait for an admin, who
+  approves, rejects with a reason the adder sees, or compares it side by side with up to 10 similar jobs
+  (same link / company + title / company). Other jobs get only their tech stack; synced VPS1 jobs copy
+  VPS1's verdict and tags. Each call is logged with its cost (`openai_calls`); key = `OPENAI_API_KEY` in the
+  root `.env`, model `JOB_AI_MODEL` (default gpt-4.1); Settings → AI job check turns it off.
 - **Resumes** — generate, edit & fix, PDF preview & export, ATS notes, job application answers, structured data, source profile
-- **Profiles** — CRUD, DOCX template upload, technical-skills / work-history / education editing
+- **Profiles** — CRUD, DOCX template upload, technical-skills / work-history / education editing.
+  A detected company can be **Excluded** (kept as in the DOCX — not sent to ChatGPT, not rewritten), and
+  **CV file name** sets the download's name: `{name} {first} {last} {company} {role} {date}`.
+- **Applied** — the applied CVs: tech stack, **Share** (a public link to the PDF for 30 days, no login —
+  HMAC-signed, `/api/public/cv/<token>`), **Schedule** (a row on the Interviews board with the profile as
+  "Name(REGION)" and the job's stack as Skillset).
 - **Users** (admin) — CRUD, role + status, profile assignments
 - **Settings** (admin) — JSON-edited app settings
 
@@ -58,7 +70,9 @@ One side panel (`extension/panel/`), tabs by role: **Out Bids** and **Easy Bids*
   only, stored with the company's own link (an Out Bids job). A job with a CV stays the current job until
   Mark as Applied / Report / Skip, even when LinkedIn moves the tab ("Still on <company>").
 - **Tech Questions**: the application's questions, shared per job; ChatGPT answers them in the chat that
-  wrote the CV (`gpt/runner.js` keeps that tab open until the job is done).
+  wrote the CV (`gpt/runner.js` keeps that tab open until the job is done), with the model set in
+  ⚙ Settings → ChatGPT models (default **Instant**); the model menu is set back afterwards, so the CVs keep
+  theirs (a CV model can be pinned there too). `gpt/driver.js pickModel` finds the item by its name.
 - **⚙ Settings**: Connections (ChatGPT — real background tabs; LinkedIn — the optional host permission),
   which cards each tab shows, LinkedIn's classic job search (`lib/classic.js`, kept instead of the AI search),
   and Update Now.
@@ -66,7 +80,7 @@ One side panel (`extension/panel/`), tabs by role: **Out Bids** and **Easy Bids*
 - **Opening the panel** picks the tab from the page you're on: an empty tab → Out Bids (the latest job
   opens in it), LinkedIn → Easy Bids, any other site → Add Jobs (Out Bids for a bidder without it).
 - **CVs save to Downloads by themselves** as "<Profile> resume.pdf" (a name valid on Windows / macOS /
-  Linux; the same CV replaces the old file — `lib/save-file.js`). If the browser's "Ask where to save each
+  Linux; the same CV replaces the old file — `lib/save-file.js`), or by the profile's CV file name template. If the browser's "Ask where to save each
   file" setting is on, every save shows a dialog; the panel detects it and links to the setting. A Gen CV
   still waiting for its CV survives closing the panel (session storage).
 - **✕** (top right, every screen) closes the panel — `chrome.sidePanel.close()` in the side panel, or the

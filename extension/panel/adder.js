@@ -230,7 +230,9 @@ export function createAdder(ctx) {
       let closed = 'none';
       try { closed = await closeAndNext(target?.tabId, target?.url); } catch { /* tab vanished — nothing to close */ }
       A.result = { job: job || payload, closed };
-      ctx.toast(`Added ${payload.company}`);
+      // With the server's AI check on, it waits as pending until checked (seconds): a clearly remote
+      // job is approved by the check, anything else waits for an admin (Jobs → Pending).
+      ctx.toast(job?.status === 'pending' ? `Added ${payload.company} — the AI check is reading it` : `Added ${payload.company}`);
     } catch (e) { setError(e.message || String(e)); } finally { A.submitting = false; patchForm(); patchDup(); patchResult(); }
   }
 
@@ -385,8 +387,10 @@ export function createAdder(ctx) {
     if (!r) { el.innerHTML = ''; return; }
     el.className = 'card';
     const tabNote = { closed: 'Its tab is closed — this is the next one.', moved: 'Its tab was left open: it shows another page now.' }[r.closed] || '';
+    const pending = r.job.status === 'pending'
+      ? '<br><span class="small">Pending — the AI check approves a clearly remote job in a few seconds; anything else waits for an admin.</span>' : '';
     el.innerHTML = `<div class="alert ok"><span><strong>Added</strong> · ${esc(r.job.company)} — ${esc(r.job.job_title)} · ${esc(REGION_LABEL[r.job.region] || r.job.region || '')}
-      ${tabNote ? `<br><span class="small">${tabNote}</span>` : ''}</span></div>
+      ${pending}${tabNote ? `<br><span class="small">${tabNote}</span>` : ''}</span></div>
       <div class="row"><button class="secondary sm" data-ad="openWeb">Open in TailorResume</button></div>`;
   }
 
@@ -401,7 +405,7 @@ export function createAdder(ctx) {
         case 'dismiss': if (t.dataset.k === 'error') setError(''); else setMessage(''); break;
         case 'openWeb': {
           const q = A.result?.job?.company || '';
-          await chrome.tabs.create({ url: `${await ctx.webBase()}/jobs${q ? `?q=${encodeURIComponent(q)}` : ''}` });
+          await chrome.tabs.create({ url: `${await ctx.webBase()}/jobs?status=&from=&to=${q ? `&q=${encodeURIComponent(q)}` : ''}` });
           break;
         }
       }

@@ -31,7 +31,7 @@
  * older version left, until the server has them). */
 
 import { request } from '../lib/api.js';
-import { GPT_KEYS as K, CHAT_ORIGINS, CHAT_URL, PARALLEL } from './client.js';
+import { GPT_KEYS as K, CHAT_ORIGINS, CHAT_URL, PARALLEL, gptModels } from './client.js';
 import { answersPrompt, cleanAnswer } from './prompts.js';
 
 const TIMEOUT_MIN = 6;                  // ChatGPT's answer to the CV prompt
@@ -384,13 +384,16 @@ async function finishCheck(frame, res) {
 }
 
 // ---------- running a leased task ----------
-function frameTask(lease) {
+// models: { cv, answers } — the model ChatGPT's menu is set to for each (client.js gptModels).
+function frameTask(lease, models = {}) {
   if (lease.work === 'delete') return { kind: 'delete', ids: lease.ids };
   if (lease.work === 'write') {
     const qs = lease.questions || [];
-    return { kind: 'write', prompt: lease.prompt, timeoutMs: TIMEOUT_MIN * 60_000, answersPrompt: qs.length ? answersPrompt(qs) : '', answersCount: qs.length };
+    return { kind: 'write', prompt: lease.prompt, timeoutMs: TIMEOUT_MIN * 60_000, answersPrompt: qs.length ? answersPrompt(qs) : '', answersCount: qs.length,
+      model: models.cv || '', answersModel: models.answers || '' };
   }
-  return { kind: 'answers', prompt: answersPrompt(lease.questions, { context: lease.context || '' }), count: lease.questions.length, timeoutMs: 3 * 60_000 };
+  return { kind: 'answers', prompt: answersPrompt(lease.questions, { context: lease.context || '' }), count: lease.questions.length, timeoutMs: 3 * 60_000,
+    model: models.answers || '' };
 }
 async function startWork(lease) {
   // Chats to delete: in a ChatGPT tab that is already open, when there is one — no extra tab.
@@ -404,7 +407,8 @@ async function startWork(lease) {
   if (lease.work === 'answer' && lease.key && await answerInPlace(lease, url)) return;
   if (lease.work === 'answer' && lease.key) await closeKept((key) => key === lease.key);   // one tab per chat
   const id = await openFrame(url);
-  await frames(async (all) => { all[id] = { lease, task: frameTask(lease), startedAt: now(), aliveAt: now() }; });
+  const models = await gptModels();
+  await frames(async (all) => { all[id] = { lease, task: frameTask(lease, models), startedAt: now(), aliveAt: now() }; });
 }
 async function answerInPlace(lease, url) {
   const kept = (await keptTabs())[lease.key];
@@ -414,7 +418,8 @@ async function answerInPlace(lease, url) {
   await withKept(async (all) => { delete all[lease.key]; });
   await withTabs(async (set) => { set.add(t.id); });
   const id = frameOfTab(t.id);
-  await frames(async (all) => { all[id] = { lease, task: frameTask(lease), startedAt: now(), aliveAt: now(), conversation: kept.conversation }; });
+  const models = await gptModels();
+  await frames(async (all) => { all[id] = { lease, task: frameTask(lease, models), startedAt: now(), aliveAt: now(), conversation: kept.conversation }; });
   const poked = await chrome.tabs.sendMessage(t.id, { type: 'gpt_poke' }, { frameId: 0 }).then((r) => !!r?.ok).catch(() => false);
   if (!poked) await chrome.tabs.reload(t.id).catch(() => {});   // its driver is gone (the extension updated): load it again
   return true;

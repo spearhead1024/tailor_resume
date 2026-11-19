@@ -23,7 +23,7 @@ import { requestSiteAccess } from '../lib/access.js';
 import { createAdder } from './adder.js';
 import { linkedinJobId, readLinkedInJob, readOutsideLink } from './linkedin.js';
 import { CLASSIC_ON, CLASSIC_SEARCH, classicTabKey, classicUrl, isAiSearch, isClassicSearch, describeSearch, applicationOpen } from '../lib/classic.js';
-import { gpt, gptSnapshot, onGptChange, requestChatAccess, threadKey } from '../gpt/client.js';
+import { gpt, gptSnapshot, onGptChange, requestChatAccess, threadKey, gptModels, GPT_MODELS_KEY, MODEL_CHOICES } from '../gpt/client.js';
 import { UPDATE_KEY, diskVersion } from '../lib/self-update.js';
 import { saveFile, cvPdfName, nameHasJob } from '../lib/save-file.js';
 
@@ -1071,6 +1071,7 @@ function patchEasy() {
       <div class="job-title easy-job">${esc(page.title)}</div>
       <div class="job-sub"><span class="txt"><b>${esc(page.company)}</b>${page.location ? ` · ${esc(page.location)}` : ''}</span></div>
       ${link ? `<a class="job-link easy-link" href="${esc(link)}" data-action="easyCopyLink" title="The job link stored in TailorResume — click to copy">${esc(link.replace(/^https?:\/\/(www\.)?/, ''))}</a>` : ''}
+      ${stackChips(res?.job?.tech_stack)}
     </div>` : '';
   let badge = '', body = '', buttons = '';
   const btn = (action, label, title, cls = '') => `<button class="${cls}" data-action="${action}" ${S.genBusy || S.busy ? 'disabled' : ''} title="${title}">${label}</button>`;
@@ -1246,13 +1247,33 @@ function renderSettings() {
         <div class="conn" id="settingsProject"></div>
         <div class="conn" id="settingsLinkedIn"></div>
       </section>
+      <section class="card"><div class="card-head"><span class="card-title">ChatGPT models</span></div><div id="settingsModels" class="fld"></div></section>
       <section class="card"><div class="card-head"><span class="card-title">Show on ${tabName}</span></div>
         <div class="set-grid">${SHOW_ITEMS.map(([k, label]) => `<label class="set-switch"><input type="checkbox" data-action="showToggle" data-k="${k}" ${v[k] ? 'checked' : ''}> ${esc(label)}</label>`).join('')}</div>
       </section>` : ''}
       <section class="card"><div class="card-head"><span class="card-title">Classic job search</span></div><div id="settingsClassic" class="fld"></div></section>
       <section class="card"><div class="card-head"><span class="card-title">Extension</span></div><div id="settingsExt" class="fld"></div></section>
     </main>`;
-  patchSettingsGpt(); patchSettingsProject(); patchSettingsLinkedIn(); patchClassic(); patchSettingsExt();
+  patchSettingsGpt(); patchSettingsProject(); patchSettingsLinkedIn(); patchSettingsModels(); patchClassic(); patchSettingsExt();
+}
+// Which ChatGPT model answers tech questions and which writes CVs (gpt/client.js gptModels). The
+// ChatGPT tab sets its model menu before sending, and sets it back after the answers.
+async function patchSettingsModels() {
+  const el = $('#settingsModels'); if (!el) return;
+  const m = await gptModels();
+  const opts = (cur, keep) => [['', keep], ...MODEL_CHOICES.map((c) => [c, c])]
+    .map(([v, l]) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(l)}</option>`).join('');
+  el.innerHTML = `
+    <div class="fld-2 model-row"><span class="fld-l">Tech questions</span>
+      <select data-model="answers">${opts(m.answers, 'ChatGPT\'s choice')}</select></div>
+    <div class="fld-2 model-row"><span class="fld-l">CVs</span>
+      <select data-model="cv">${opts(m.cv, 'ChatGPT\'s choice')}</select></div>
+    <div class="muted small">Instant answers tech questions in seconds. After answering, ChatGPT is set back to the model it was on, so CVs keep theirs.</div>`;
+  el.querySelectorAll('select[data-model]').forEach((sel) => sel.addEventListener('change', async () => {
+    const cur = await gptModels();
+    await chrome.storage.local.set({ [GPT_MODELS_KEY]: { ...cur, [sel.dataset.model]: sel.value } });
+    toast(`${sel.dataset.model === 'cv' ? 'CVs' : 'Tech questions'}: ${sel.value || 'ChatGPT\'s choice'}`);
+  }));
 }
 const connRow = (name, pill, desc, acts) => `<div class="who-c"><div class="name">${name} ${pill}</div><div class="desc">${desc}</div></div>${acts ? `<div class="acts">${acts}</div>` : ''}`;
 // ChatGPT: state, plan, CVs ready, chats waiting to be deleted, Connect / Continue / Disconnect.
@@ -1689,7 +1710,16 @@ function patchJob() {
     <div class="job-block" title="${esc(`${j.job_title} · ${j.company} · ${j.region || 'ANY'}`)}">
       <div class="job-title"><a class="role" href="${esc(j.link)}" data-action="openJob">${esc(j.job_title)}</a></div>
       <div class="job-sub"><span class="txt">${esc(j.company)}</span><span class="region">${esc(j.region || 'ANY')}</span>${companyPill(info)}</div>
+      ${stackChips(S.job?.tech_stack || j.tech_stack)}
     </div>${winLine()}`;
+}
+
+// The job's main tech stack (the server's AI check, or VPS1's tags) as small chips.
+function stackChips(stack, max = 6) {
+  const list = (stack || []).filter(Boolean);
+  if (!list.length) return '';
+  const more = list.length > max ? `<span class="stack-chip more">+${list.length - max}</span>` : '';
+  return `<div class="stack-chips" title="Tech stack: ${esc(list.join(', '))}">${list.slice(0, max).map((s) => `<span class="stack-chip">${esc(s)}</span>`).join('')}${more}</div>`;
 }
 
 const ATS_MAX = { 'Keyword Match': 30, 'Title Alignment': 15, 'Skills Alignment': 15, 'Experience Evidence': 20, Structure: 15, 'Fit Bonus': 10 };
