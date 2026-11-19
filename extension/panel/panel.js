@@ -303,7 +303,7 @@ function cvBlob(id) {
   }
   return pdfCache.promise;
 }
-// "<Profile name> resume.pdf" — the same name the web app's Bid tab saves, so either place
+// "<Profile name> Resume.pdf" — the same name the web app's Bid tab saves, so either place
 // replaces the file the other saved. Made safe for every OS (Windows forbids \/:*?"<>| and
 // a trailing dot or space; Chrome rejects control characters and a leading dot).
 // A profile with its own file-name template (Profiles → CV file name) names it after the job.
@@ -703,15 +703,23 @@ const currentThread = () => (S.gptSnap && S.profileId && S.jobId ? S.gptSnap.thr
 // Out Bids: the working set (the job on screen + the next one — core/cv_queue.AHEAD) gets its CVs written
 // ahead, never more. Easy Bids: only the
 // jobs Gen CV was pressed for (the one on screen first) — nothing is written just by looking at a job.
+let prepChain = Promise.resolve();
 function gptPrepare() {
   if (!gptOn() || !S.profileId) return;
-  if (S.mode !== 'easy' && !S.jobId) return;
+  if (!S.jobId) return;
+  // Easy Bids has no queue: only the job on screen, once Gen CV was pressed for it (a job left before
+  // ChatGPT started on it is dropped; one it is writing is finished).
   const list = S.mode === 'easy'
-    ? [...S.gen.values()].sort((a, b) => (b.id === S.jobId) - (a.id === S.jobId))
+    ? (S.gen.has(S.jobId) ? [S.gen.get(S.jobId)] : [])
     : S.win.map((id) => S.queue.find((j) => j.id === id)).filter(Boolean);   // the working set, the job on screen first
   const jobs = list.map((j) => ({ id: j.id, company: j.company, job_title: j.job_title }));
   // The server keeps the queue (2 ahead, skipping jobs with a CV); the worker is told to look.
-  if (jobs.length) api('/api/gpt/prepare', { method: 'POST', body: { profile_id: S.profileId, jobs, mode: S.mode === 'easy' ? 'easy' : 'out' } }).then(() => gpt('sync')).catch(() => {});
+  // One after another, in order: an older list arriving last would undo the newer one (Easy Bids: the
+  // empty list sent as the job changes, then the one with Gen CV's job — reversed, the CV was never written).
+  if (jobs.length || S.mode === 'easy') {
+    const body = { profile_id: S.profileId, jobs, mode: S.mode === 'easy' ? 'easy' : 'out' };
+    prepChain = prepChain.then(() => api('/api/gpt/prepare', { method: 'POST', body })).then(() => gpt('sync')).catch(() => {});
+  }
 }
 async function connectGpt() {
   const ok = await requestChatAccess();   // first await of the click — Chrome's prompt needs it
@@ -1009,7 +1017,7 @@ async function addJob({ gen }) {
     // Add Job alone (a CV later) never takes the place of a job being worked on.
     if (S.jobId !== item.id && (gen || !easyPinned())) { await selectJob(item.id, { open: false, item }); track('open_link', item); }
     if (!gen) return;
-    S.gen.set(item.id, { id: item.id, company: item.company, job_title: item.job_title }); saveGen();
+    S.gen = new Map([[item.id, { id: item.id, company: item.company, job_title: item.job_title }]]); saveGen();   // no queue: only this job
     if (S.resumeId) { maybeAutoDownload(); return; }      // it already has a CV: save it now
     if (gptOn()) gptPrepare();
     else setMessage(`Connect ChatGPT to write the CV automatically — or write it by hand in the Resume card below.`);
@@ -1696,7 +1704,18 @@ function winLine() {
   }).join('');
   return `<div class="win-line" title="The 2 jobs ChatGPT works on — done ones are replaced by the newest job">${chips}</div>`;
 }
+// The job on screen → the ChatGPT worker: its chat is the one ChatGPT tab the bidder sees (in this
+// window); the next job's is prepared out of sight (gpt/runner.js setFocus).
+let focusSent = null, panelWin = null;
+chrome.windows.getCurrent().then((w) => { panelWin = w?.id ?? null; }).catch(() => {});
+function sendFocus() {
+  const key = S.profileId && S.jobId && (S.mode === 'bid' || S.mode === 'easy') ? threadKey(S.profileId, S.jobId) : '';
+  if (key === focusSent) return;
+  focusSent = key;
+  gpt('focus', { key, windowId: panelWin }).catch(() => { focusSent = null; });
+}
 function patchJob() {
+  sendFocus();
   patchCombo();
   const el = $('#jobLine'); if (!el) return;
   const j = currentJob();

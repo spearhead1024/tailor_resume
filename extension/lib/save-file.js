@@ -1,6 +1,6 @@
 // Saving a CV into Downloads (panel/panel.js download()) — its own module so it can be tested alone.
 
-// The CV's file name. By default "<Profile name> resume.pdf" — a name every OS accepts (Windows,
+// The CV's file name. By default "<Profile name> Resume.pdf" — a name every OS accepts (Windows,
 // macOS, Linux, ChromeOS): no \ / : * ? " < > | or control characters, no leading / trailing dots
 // or spaces (Windows drops them), not too long. Letters of any language and apostrophes stay.
 // A profile can set its own template (Profiles → CV file name, VPS1's naming feature):
@@ -14,7 +14,7 @@ export function cvPdfName(profile, job = null, now = new Date()) {
   const p = typeof profile === 'string' ? { name: profile } : (profile || {});
   const name = safeName(p.name);
   const tpl = String(p.resume_filename || '').trim();
-  if (!tpl) return `${name || 'Resume'} resume.pdf`;
+  if (!tpl) return `${name || 'Resume'} Resume.pdf`;
   const parts = name.split(' ').filter(Boolean);
   const pad = (n) => String(n).padStart(2, '0');
   const vals = {

@@ -88,6 +88,21 @@ def _trash(session, user_id: str, conversation: str, *, device: str = "", label:
     session.flush()
 
 
+def foreign_chat(session, r: CvQueueRow, conversation: str) -> bool:
+    """Is this conversation NOT one this row's work may take? Another job's chat (a chat belongs to
+    one job only), or — for answers — anything but the job's own chat when it has one. A report naming
+    such a chat came from a tab that was on the wrong page: it is ignored, never adopted or deleted."""
+    cid = conversation_id(conversation)
+    if not cid:
+        return False
+    if r.work == "answer" and r.conversation and conversation_id(r.conversation) != cid:
+        return True
+    others = session.scalars(select(CvQueueRow.conversation).where(
+        CvQueueRow.user_id == r.user_id, CvQueueRow.conversation.contains(cid))).all()
+    mine = conversation_id(r.conversation) == cid
+    return sum(1 for c in others if conversation_id(c) == cid) > (1 if mine else 0)
+
+
 def _drop_chat(session, r: CvQueueRow, device: str = "") -> None:
     """The row's conversation goes to the delete list; the row (its CV, its answers) stays."""
     if r.conversation:
@@ -410,6 +425,8 @@ def started(db_path, user: dict, profile_id: str, job_id: str, conversation: str
         if r is None or r.user_id != uid or not r.work:
             _trash(session, uid, url, device=device)    # nobody needs it
             return "gone"
+        if foreign_chat(session, r, url):
+            return "wrong"                              # another job's chat: left alone (see foreign_chat)
         if r.stage == "closing":
             _trash(session, uid, url, device=device, label=f"{r.company} — {r.job_title}")
             return "closing"

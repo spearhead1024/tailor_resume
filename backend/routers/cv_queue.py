@@ -322,6 +322,8 @@ def trash(body: dict, user: dict = Depends(_bidder)):
 def _adopt(session, r, conversation: str, device: str) -> None:
     """The report names the work's conversation: the row's own (started may have been missed)."""
     if conversation and Q.conversation_id(conversation) != Q.conversation_id(r.conversation):
+        if Q.foreign_chat(session, r, conversation):
+            return                                    # another job's chat: never this row's (cv_queue.foreign_chat)
         Q._drop_chat(session, r, device)
         r.conversation = conversation
 

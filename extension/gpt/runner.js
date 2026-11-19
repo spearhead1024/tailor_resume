@@ -43,8 +43,20 @@ const DRIVER_ID = 'tr-gpt-driver';
 const FRAMES = 'gptFrames';
 const OUR_TABS = 'gptTabs';             // session storage: the ids of the ChatGPT tabs this extension opened
 const KEPT = 'gptKept';                 // session storage: { "<profile>:<job>": { tabId, conversation } } — see keepTab
+const FOCUS = 'gptFocus';               // session storage: { key, windowId } — the job selected in the panel (see place)
+const HIDDEN_WIN = 'gptHiddenWin';      // session storage: the id of the minimized window the other ChatGPT tabs live in
+const MAX_TABS = PARALLEL + 1;          // our ChatGPT tabs in all: the selected job's, the next job's, one more chat
 
 const now = () => Date.now();
+// The last 60 things the worker did with tabs (session storage 'gptLog') — for diagnosing a bidder's report.
+let logLock = Promise.resolve();
+function dlog(...parts) {
+  const line = `${new Date().toISOString().slice(11, 23)} ${parts.join(' ')}`;
+  logLock = logLock.then(async () => {
+    const got = (await chrome.storage.session.get('gptLog').catch(() => ({}))).gptLog || [];
+    await chrome.storage.session.set({ gptLog: [...got.slice(-59), line] }).catch(() => {});
+  }).catch(() => {});
+}
 const read = async (key, fallback) => (await chrome.storage.local.get(key))[key] ?? fallback;
 const state = async () => ({ enabled: false, status: 'off', notice: '', cooldownUntil: 0, plan: '', checkFrame: '', checkStartedAt: 0, toDelete: 0, ...(await read(K.state, {})) });
 const setState = async (patch) => chrome.storage.local.set({ [K.state]: { ...(await state()), ...patch } });
@@ -96,31 +108,118 @@ export async function ensureDriver() {
     id: DRIVER_ID, matches: CHAT_ORIGINS, js: ['gpt/driver.js'], allFrames: true, runAt: 'document_idle', persistAcrossSessions: true,
   }]);
 }
-// ONE ChatGPT tab (PARALLEL = 1): the next task goes to the tab already open — it loads the new
-// chat (or, for answers in the chat it is on, is just poked: see startWork) — instead of a new tab.
-// The tab the bidder is looking at is left alone.
-async function takeIdleTab(url) {
-  const kept = Object.entries(await keptTabs()).sort((a, b) => (b[1].at || 0) - (a[1].at || 0));
-  for (const [key, v] of kept) {
+// ---------- placing tabs: the bidder sees ONE ChatGPT tab — the selected job's chat ----------
+// The panel tells the worker which job is on screen (action 'focus'). That job's tab sits in the
+// bidder's window, next to their tab; every other ChatGPT tab of ours — the next job's CV being
+// written ahead, a chat kept for later, the account check — lives in a minimized window of its own.
+// When the bidder moves to another job, the tabs swap places (chrome.tabs.move keeps the page, and
+// whatever ChatGPT is writing in it, alive). A tab is never reused for another job while it is the
+// job on screen, so the chat the bidder looks at is always that job's.
+const focusNow = async () => (await chrome.storage.session.get(FOCUS).catch(() => ({})))[FOCUS] || { key: '', windowId: null };
+async function hiddenWindowId() {
+  const id = (await chrome.storage.session.get(HIDDEN_WIN).catch(() => ({})))[HIDDEN_WIN];
+  return id != null && await chrome.windows.get(id).catch(() => null) ? id : null;
+}
+// The minimized window, opened with this first tab when there is none (one at a time: never two). → the tab
+let hiddenLock = Promise.resolve();
+function inHiddenWindow(make) {
+  const run = hiddenLock.then(async () => {
+    const win = await hiddenWindowId();
+    if (win != null) return make(win);
+    const w = await make(null);
+    if (w?.windowId != null) await chrome.storage.session.set({ [HIDDEN_WIN]: w.windowId }).catch(() => {});
+    return w;
+  });
+  hiddenLock = run.catch(() => {});
+  return run;
+}
+const tabInHiddenWindow = (url) => inHiddenWindow(async (win) => (win != null
+  ? chrome.tabs.create({ windowId: win, url, active: false })
+  : (await chrome.windows.create({ url, state: 'minimized', focused: false, type: 'normal' })).tabs[0]));
+// The bidder's window: the panel's, else the last one they used (never the minimized one).
+async function viewWindowId() {
+  const hidden = await hiddenWindowId();
+  const { windowId } = await focusNow();
+  if (windowId != null && windowId !== hidden && await chrome.windows.get(windowId).catch(() => null)) return windowId;
+  const wins = (await chrome.windows.getAll({ windowTypes: ['normal'] }).catch(() => [])).filter((w) => w.id !== hidden);
+  return (wins.find((w) => w.focused) || wins[0])?.id ?? null;
+}
+async function moveTab(tabId, windowId) {
+  if (windowId == null) return;
+  const t = await chrome.tabs.get(tabId).catch(() => null);
+  if (!t || t.windowId === windowId) return;
+  if (t.active && t.windowId !== (await hiddenWindowId())) return;   // the bidder is reading it right now: left where it is
+  let index = -1;
+  if (windowId !== (await hiddenWindowId())) {                          // into view: right next to the bidder's tab
+    const [cur] = await chrome.tabs.query({ active: true, windowId }).catch(() => []);
+    if (cur) index = cur.index + 1;
+  }
+  await chrome.tabs.move(tabId, { windowId, index }).catch(() => {});
+  if (windowId === (await hiddenWindowId())) await chrome.windows.update(windowId, { state: 'minimized' }).catch(() => {});
+}
+// Every tab of ours where it belongs: the selected job's in view, the rest in the minimized window.
+let placing = Promise.resolve();
+function place() {
+  const run = placing.then(async () => {
+    const { key: focus } = await focusNow();
+    const owned = [];                                                    // [tabId, job key]
+    for (const [id, f] of Object.entries(await read(FRAMES, {}))) owned.push([tabOfFrame(id), f.lease?.key || '']);
+    const check = (await state()).checkFrame; if (check) owned.push([tabOfFrame(check), '']);
+    for (const [k, v] of Object.entries(await keptTabs())) owned.push([v.tabId, k === IDLE ? '' : k]);
+    const view = await viewWindowId();
+    // Out of view first, then into view — so two ChatGPT tabs are never in sight at once.
+    owned.sort((a, b) => (a[1] === focus && focus ? 1 : 0) - (b[1] === focus && focus ? 1 : 0));
+    for (const [tabId, key] of owned) {
+      if (focus && key === focus) await moveTab(tabId, view);
+      else {
+        const t = await chrome.tabs.get(tabId).catch(() => null);
+        if (!t) continue;
+        await inHiddenWindow(async (win) => {
+          if (win == null) {                                             // the first hidden tab opens the window
+            const w = await chrome.windows.create({ tabId, state: 'minimized', focused: false }).catch(() => null);
+            return w ? { windowId: w.id } : null;
+          }
+          if (t.windowId !== win) await moveTab(tabId, win);
+          return null;
+        });
+      }
+    }
+  });
+  placing = run.catch(() => {});
+  return run;
+}
+// A tab to reuse for new work: the idle one, or the job's own old tab. Another job's chat is never
+// taken over (it would have to load again when the bidder gets to that job); a new tab opens instead,
+// and makeRoom closes the oldest chat once there are MAX_TABS.
+async function takeIdleTab(url, key) {
+  const kept = Object.entries(await keptTabs()).filter(([k]) => k === IDLE || (key && k === key));
+  for (const [k, v] of kept) {
     const t = await chrome.tabs.get(v.tabId).catch(() => null);
-    if (!t || t.active) continue;
-    await withKept(async (all) => { delete all[key]; });
+    if (!t || (t.active && t.windowId !== await hiddenWindowId())) continue;   // never the tab the bidder is reading
+    await withKept(async (all) => { delete all[k]; });
     await withTabs(async (set) => { set.add(t.id); });
     await chrome.tabs.update(t.id, { url }).catch(() => {});
     return t.id;
   }
   return null;
 }
-async function openFrame(url) {
+// key: the job the tab works for ('' = no job: the account check). It opens where it belongs: the job
+// on screen in the bidder's window, anything else in the minimized window.
+async function openFrame(url, key = '') {
   await ensureDriver();
-  const reused = await takeIdleTab(url);
+  const reused = await takeIdleTab(url, key);
+  dlog('open', key || '-', reused != null ? `reuse ${reused}` : 'new', url.slice(-20));
   await makeRoom();
   if (reused != null) return frameOfTab(reused);
-  // In the background (the bidder's focus stays where it is), right NEXT TO the bidder's current tab
-  // — where it is seen, not at the far end of a long tab strip.
-  const [cur] = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => []);
-  const near = cur && !/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(cur.url || '') ? { windowId: cur.windowId, index: cur.index + 1 } : {};
-  const tab = await chrome.tabs.create({ url, active: false, ...near });
+  const { key: focus } = await focusNow();
+  let tab;
+  if (key && key === focus) {
+    const view = await viewWindowId();
+    const [cur] = view != null ? await chrome.tabs.query({ active: true, windowId: view }).catch(() => []) : [];
+    tab = await chrome.tabs.create({ url, active: false, ...(cur ? { windowId: view, index: cur.index + 1 } : {}) });
+  } else {
+    tab = await tabInHiddenWindow(url);
+  }
   await withTabs(async (set) => { set.add(tab.id); });
   // Chrome may discard background tabs to save memory — that would kill a CV half-written.
   await chrome.tabs.update(tab.id, { autoDiscardable: false }).catch(() => {});
@@ -138,6 +237,14 @@ async function tabConversation(id) {
   const tab = await chrome.tabs.get(tabOfFrame(id)).catch(() => null);
   return /\/c\/[A-Za-z0-9][A-Za-z0-9_-]{7,}/.test(tab?.url || '') ? tab.url : '';
 }
+// …but only when it is the task's own chat (see alive): never the chat the tab showed before.
+async function taskConversation(id, f) {
+  const url = await tabConversation(id);
+  const want = f?.task?.expect?.chat || '';
+  if (!url) return '';
+  if (want) return convId(url) === want ? url : '';
+  return f?.sent ? url : '';
+}
 // ---------- kept tabs: a CV's chat stays open for the bidder ----------
 // When a CV (or answers) is done, its tab is NOT closed: the bidder can ask ChatGPT more (tech
 // questions…) in that very chat. It is closed — and the chat deleted by the server — once the job is
@@ -149,20 +256,46 @@ let keptLock = Promise.resolve();
 const withKept = (fn) => { const run = keptLock.then(async () => { const all = await keptTabs(); const out = await fn(all); await chrome.storage.session.set({ [KEPT]: all }).catch(() => {}); return out; }); keptLock = run.catch(() => {}); return run; };
 async function keepTab(frame, key, conversation) {
   const tabId = tabOfFrame(frame);
+  dlog('keep', key, tabId);
   await withTabs(async (set) => { set.delete(tabId); });       // not a work tab any more: the driver is done
   const old = await withKept(async (all) => { const prev = all[key]; all[key] = { tabId, conversation, at: now() }; return prev; });
   if (old && old.tabId !== tabId) await chrome.tabs.remove(old.tabId).catch(() => {});
+  await place();
 }
-// At most PARALLEL ChatGPT tabs in all — working tabs AND kept chats. Before a new working tab opens,
-// the oldest kept chats' tabs are closed if needed. Their chats stay: the server still holds them,
-// so "Open Chat" (openChat) opens one again, and questions still go to it.
+// The job on screen changed (the panel). Its chat comes into view — its tab moved in, or, when the
+// chat has no tab open, opened again (read-only until it gets work); every other ChatGPT tab goes to
+// the minimized window.
+async function setFocus(key, windowId) {
+  dlog('focus', key);
+  await chrome.storage.session.set({ [FOCUS]: { key: String(key || ''), windowId: windowId ?? null } }).catch(() => {});
+  await place();
+  if (!key || !(await state()).enabled) return;
+  const busy = Object.values(await read(FRAMES, {})).some((f) => f.lease?.key === key);
+  if (busy || (await keptTabs())[key]) return;
+  const thread = (await read(K.threads, {}))[key];
+  if (!/\/c\//.test(thread?.conversation || '') || thread.stage === 'closing') return;
+  await makeRoom();
+  const view = await viewWindowId();
+  const [cur] = view != null ? await chrome.tabs.query({ active: true, windowId: view }).catch(() => []) : [];
+  const tab = await chrome.tabs.create({ url: thread.conversation, active: false, ...(cur ? { windowId: view, index: cur.index + 1 } : {}) }).catch(() => null);
+  if (!tab) return;
+  dlog('focus-open', key, tab.id);
+  await chrome.tabs.update(tab.id, { autoDiscardable: false }).catch(() => {});
+  const old = await withKept(async (all) => { const prev = all[key]; all[key] = { tabId: tab.id, conversation: thread.conversation, at: now() }; return prev; });
+  if (old && old.tabId !== tab.id) await chrome.tabs.remove(old.tabId).catch(() => {});
+}
+// At most MAX_TABS ChatGPT tabs in all — working tabs AND kept chats. Before a new working tab opens,
+// the oldest kept chats' tabs are closed if needed (never the job on screen's). Their chats stay: the
+// server still holds them, so "Open Chat" (openChat) opens one again, and questions still go to it.
 async function makeRoom() {
   const working = Object.keys(await read(FRAMES, {})).length + ((await state()).checkFrame ? 1 : 0);
-  const keep = Math.max(0, PARALLEL - 1 - working);
-  const active = new Set((await chrome.tabs.query({ active: true }).catch(() => [])).map((t) => t.id));
+  const keep = Math.max(0, MAX_TABS - 1 - working);
+  const { key: focus } = await focusNow();
+  const hidden = await hiddenWindowId();
+  const active = new Set((await chrome.tabs.query({ active: true }).catch(() => [])).filter((t) => t.windowId !== hidden).map((t) => t.id));
   const gone = await withKept(async (all) => {
-    // (a chat the bidder is reading right now stays open)
-    const old = Object.entries(all).filter(([, v]) => !active.has(v.tabId)).sort((a, b) => (a[1].at || 0) - (b[1].at || 0));
+    // (a chat the bidder is reading right now stays open, and so does the job on screen's)
+    const old = Object.entries(all).filter(([k, v]) => !active.has(v.tabId) && k !== focus).sort((a, b) => (a[1].at || 0) - (b[1].at || 0));
     const out = [];
     while (old.length > keep) { const [k, v] = old.shift(); out.push(v.tabId); delete all[k]; }
     return out;
@@ -177,6 +310,7 @@ const IDLE = 'idle';
 async function closeKept(test, { deleteChats = false, keepOne = false } = {}) {
   let idle = null;
   if (keepOne && !(await state()).enabled) keepOne = false;          // disconnected: no tab stays
+  const before = Object.keys(await keptTabs());
   const working = keepOne ? (await ourTabs()).size : 1;
   const gone = await withKept(async (all) => {
     const out = [];
@@ -188,6 +322,7 @@ async function closeKept(test, { deleteChats = false, keepOne = false } = {}) {
     }
     return out;
   });
+  if (gone.length) dlog('close-kept', before.join(','), '→', gone.map((v) => v.tabId).join(','), idle ? `idle ${idle.tabId}` : '');
   const done = [];
   for (const v of gone) {
     const id = convId(v.conversation);
@@ -195,6 +330,7 @@ async function closeKept(test, { deleteChats = false, keepOne = false } = {}) {
     if (v !== idle) await chrome.tabs.remove(v.tabId).catch(() => {});
   }
   if (done.length) await api('/api/gpt/deleted', { done, failed: [] }).catch(() => {});
+  if (gone.length) await place();
 }
 // Hide (= delete) chats from inside an open chatgpt.com tab, with the page's own session — what
 // ChatGPT's own "Delete chat" does. null: not possible there (not a ChatGPT page, signed out…).
@@ -260,7 +396,7 @@ async function liveFrames() {
 // waits for a timer that Chrome slows down in background tabs.
 chrome.tabs.onUpdated.addListener((tabId, change) => {
   if (!change.url || !/\/c\/[A-Za-z0-9][A-Za-z0-9_-]{7,}/.test(change.url)) return;
-  ourTabs().then((set) => { if (set.has(tabId)) return alive(frameOfTab(tabId), change.url); }).catch((e) => noteError('alive', e));
+  ourTabs().then((set) => { if (set.has(tabId)) return alive(frameOfTab(tabId), change.url, { fromTab: true }); }).catch((e) => noteError('alive', e));
 });
 // The bidder closed one of our tabs: its work goes back to the queue (and is picked up again).
 chrome.tabs.onRemoved.addListener((tabId) => {
@@ -315,7 +451,7 @@ async function tickOnce() {
   });
   if (gone.length) await release(gone);
   for (const s of stuck) {
-    if (s.f.lease?.work !== 'delete') s.f.conversation = s.f.conversation || await tabConversation(s.id);
+    if (s.f.lease?.work !== 'delete') s.f.conversation = s.f.conversation || await taskConversation(s.id, s.f);
     await closeFrame(s.id); await reportFailure(s.f, s.why);
   }
   await flushLegacyChats();
@@ -366,7 +502,7 @@ async function runCheck(st, live) {
   if (st.checkFrame && live.has(st.checkFrame) && now() - (st.checkStartedAt || 0) < CHECK_LIMIT_MS) return;   // still checking
   if (st.checkFrame) await closeFrame(st.checkFrame);   // stuck or gone: check again
   await setState({ status: 'checking', cooldownUntil: 0, notice: '', checkFrame: '' });
-  const frame = await openFrame(CHAT_URL);
+  const frame = await openFrame(CHAT_URL, '');                // (in the minimized window)
   await setState({ checkFrame: frame, checkStartedAt: now() });
 }
 async function finishCheck(frame, res) {
@@ -385,15 +521,20 @@ async function finishCheck(frame, res) {
 
 // ---------- running a leased task ----------
 // models: { cv, answers } — the model ChatGPT's menu is set to for each (client.js gptModels).
-function frameTask(lease, models = {}) {
+// expect: the chat the page must be on before ChatGPT is sent anything — `chat` (the job's own
+// conversation id) or a new chat ('') — the driver refuses any other page (kind wrong_page), so a
+// message can never land in another job's chat.
+function frameTask(lease, models = {}, url = '') {
   if (lease.work === 'delete') return { kind: 'delete', ids: lease.ids };
+  const expect = { chat: convId(url), key: lease.key };
   if (lease.work === 'write') {
     const qs = lease.questions || [];
     return { kind: 'write', prompt: lease.prompt, timeoutMs: TIMEOUT_MIN * 60_000, answersPrompt: qs.length ? answersPrompt(qs) : '', answersCount: qs.length,
-      model: models.cv || '', answersModel: models.answers || '' };
+      model: models.cv || '', answersModel: models.answers || '', expect: { ...expect, chat: '' } };
   }
-  return { kind: 'answers', prompt: answersPrompt(lease.questions, { context: lease.context || '' }), count: lease.questions.length, timeoutMs: 3 * 60_000,
-    model: models.answers || '' };
+  // A new chat for answers (the CV has no chat): it carries the job and the CV (context).
+  return { kind: 'answers', prompt: answersPrompt(lease.questions, { context: expect.chat ? '' : (lease.context || '') }), count: lease.questions.length,
+    timeoutMs: 3 * 60_000, model: models.answers || '', expect };
 }
 async function startWork(lease) {
   // Chats to delete: in a ChatGPT tab that is already open, when there is one — no extra tab.
@@ -404,11 +545,13 @@ async function startWork(lease) {
   const fresh = lease.project_url || CHAT_URL;
   const url = lease.work === 'answer' && /\/c\//.test(lease.conversation || '') ? lease.conversation : fresh;
   // Answers in a chat whose tab is still open on it: asked right there — no page load.
+  dlog('start', lease.work, lease.key || '', url.slice(-14));
   if (lease.work === 'answer' && lease.key && await answerInPlace(lease, url)) return;
   if (lease.work === 'answer' && lease.key) await closeKept((key) => key === lease.key);   // one tab per chat
-  const id = await openFrame(url);
   const models = await gptModels();
-  await frames(async (all) => { all[id] = { lease, task: frameTask(lease, models), startedAt: now(), aliveAt: now() }; });
+  const id = await openFrame(url, lease.key || '');
+  await frames(async (all) => { all[id] = { lease, task: frameTask(lease, models, url), startedAt: now(), aliveAt: now() }; });
+  await place();
 }
 async function answerInPlace(lease, url) {
   const kept = (await keptTabs())[lease.key];
@@ -419,7 +562,7 @@ async function answerInPlace(lease, url) {
   await withTabs(async (set) => { set.add(t.id); });
   const id = frameOfTab(t.id);
   const models = await gptModels();
-  await frames(async (all) => { all[id] = { lease, task: frameTask(lease, models), startedAt: now(), aliveAt: now(), conversation: kept.conversation }; });
+  await frames(async (all) => { all[id] = { lease, task: frameTask(lease, models, url), startedAt: now(), aliveAt: now(), conversation: kept.conversation }; });
   const poked = await chrome.tabs.sendMessage(t.id, { type: 'gpt_poke' }, { frameId: 0 }).then((r) => !!r?.ok).catch(() => false);
   if (!poked) await chrome.tabs.reload(t.id).catch(() => {});   // its driver is gone (the extension updated): load it again
   return true;
@@ -433,11 +576,19 @@ async function taskFor(frame) {
 }
 // A heartbeat; `conversation`: the chat ChatGPT opened for this work — recorded on the server at
 // once, so it is deleted even if this frame never finishes.
-async function alive(frame, conversation) {
+// Only the task's own chat is taken: the job's chat it was opened on (task.expect.chat), or the new chat
+// ChatGPT opened after the driver sent its first message (`sent`) — and once known it is fixed. A tab
+// URL seen before that, or another chat later (the bidder clicked one in ChatGPT's sidebar), is not it.
+async function alive(frame, conversation, { sent = false, fromTab = false } = {}) {
   const fresh = await frames(async (all) => {
     const f = all[frame]; if (!f) return null;
     f.aliveAt = now();
+    if (sent) f.sent = true;
     if (!conversation || conversation === f.conversation || f.lease.work === 'delete') return null;
+    const want = f.task?.expect?.chat || '';
+    if (want && convId(conversation) !== want) return null;
+    if (convId(f.conversation) && convId(f.conversation) !== convId(conversation)) return null;
+    if (fromTab && !want && !f.sent) return null;
     f.conversation = conversation;
     return f;
   });
@@ -456,43 +607,59 @@ async function reportFailure(f, error) {
   else await api('/api/gpt/fail', { profile_id: lease.profile_id, job_id: lease.job_id, work: lease.work, error, conversation: f.conversation || '', device: await deviceId() }).catch(() => {});
 }
 
+// The result is told to the server BEFORE the frame is forgotten: while the report is on its way the
+// frame still counts as this browser's work, so a claim sent meanwhile can't take it for an abandoned
+// lease (which put the job back in the queue, deleted its fresh chat and wrote the CV a second time).
+const finishing = new Set();
 async function finish(frame, res) {
   if ((await state()).checkFrame === frame) { await finishCheck(frame, res); return; }
-  const f = await frames(async (all) => { const x = all[frame]; delete all[frame]; return x; });
-  if (!f) { await closeFrame(frame); return; }   // stale: stopped meanwhile
-  const { lease } = f;
-  f.conversation = res?.conversation || f.conversation || '';
-  const device = await deviceId();
-  const kind = res?.ok ? '' : (res?.kind || 'error');
-  // A written CV / answers: the chat stays open for the bidder (keepTab). Anything else: closed.
-  if (!kind && (lease.work === 'write' || lease.work === 'answer') && lease.key && /\/c\//.test(f.conversation)) await keepTab(frame, lease.key, f.conversation);
-  else if (!kind && lease.work === 'delete' && (await state()).enabled && !Object.keys(await keptTabs()).length) await keepTab(frame, IDLE, '');   // the one tab stays for the next CV
-  else await closeFrame(frame);
-  if (res?.ok && res.plan) await setState({ plan: res.plan });
-  if (lease.work === 'delete' && kind === 'needs_login' && !(await state()).enabled) {
-    // Disconnected and ChatGPT signed out: try the deletes again later.
-    await release([f]);
-    await setState({ cooldownUntil: now() + 15 * 60_000 });
-  } else if (kind === 'needs_login' || kind === 'free_plan' || kind === 'plan_unknown') {
-    // Signed out, or the account is (now) Free: hand everything back and stop until it is fixed.
-    await release([f]);
-    await stopAllWork();
-    await setState({ status: kind === 'needs_login' ? 'needs_login' : 'needs_plan', plan: res?.plan || '', notice: PLAN_NOTICE[kind] });
-  } else if (kind === 'rate_limited') {
-    await release([f]);
-    await setState({ status: 'limited', cooldownUntil: now() + 120_000, notice: 'ChatGPT reported a usage limit — waiting 2 minutes, then it carries on by itself.' });
-  } else if (kind) {
-    await reportFailure(f, res?.error || kind);
-  } else if (lease.work === 'write') {
-    const answers = (res.answers || []).map(cleanAnswer);
-    await api('/api/gpt/result', { profile_id: lease.profile_id, job_id: lease.job_id, resume_json: res.resume_json, conversation: f.conversation,
-      questions: answers.length ? lease.questions : [], answers, device }).catch((e) => noteError('result', e));
-  } else if (lease.work === 'answer') {
-    await api('/api/gpt/answers', { profile_id: lease.profile_id, job_id: lease.job_id, questions: lease.questions,
-      answers: (res.answers || []).map(cleanAnswer), conversation: f.conversation, device }).catch((e) => noteError('answers', e));
-  } else if (lease.work === 'delete') {
-    await api('/api/gpt/deleted', { done: res.done || [], failed: res.failed || [] }).catch(() => {});
-  }
+  if (finishing.has(frame)) return;                         // the driver's report came twice
+  const f = (await read(FRAMES, {}))[frame];
+  if (!f) { await closeFrame(frame); return; }              // stale: stopped meanwhile
+  finishing.add(frame);
+  try {
+    const { lease } = f;
+    f.conversation = res?.conversation || f.conversation || '';
+    const device = await deviceId();
+    const kind = res?.ok ? '' : (res?.kind || 'error');
+    dlog('done', lease.work, lease.key || '', kind || 'ok', convId(f.conversation).slice(-12));
+    if (!kind && lease.work === 'write') {
+      const answers = (res.answers || []).map(cleanAnswer);
+      await api('/api/gpt/result', { profile_id: lease.profile_id, job_id: lease.job_id, resume_json: res.resume_json, conversation: f.conversation,
+        questions: answers.length ? lease.questions : [], answers, device }).catch((e) => noteError('result', e));
+    } else if (!kind && lease.work === 'answer') {
+      await api('/api/gpt/answers', { profile_id: lease.profile_id, job_id: lease.job_id, questions: lease.questions,
+        answers: (res.answers || []).map(cleanAnswer), conversation: f.conversation, device }).catch((e) => noteError('answers', e));
+    } else if (!kind && lease.work === 'delete') {
+      await api('/api/gpt/deleted', { done: res.done || [], failed: res.failed || [] }).catch(() => {});
+    }
+    await frames(async (all) => { delete all[frame]; });
+    // A written CV / answers: the chat stays open for the bidder (keepTab). Anything else: closed.
+    if (!kind && (lease.work === 'write' || lease.work === 'answer') && lease.key && /\/c\//.test(f.conversation)) await keepTab(frame, lease.key, f.conversation);
+    else if (!kind && lease.work === 'delete' && (await state()).enabled && !Object.keys(await keptTabs()).length) await keepTab(frame, IDLE, '');   // the one tab stays for the next CV
+    else await closeFrame(frame);
+    if (res?.ok && res.plan) await setState({ plan: res.plan });
+    if (lease.work === 'delete' && kind === 'needs_login' && !(await state()).enabled) {
+      // Disconnected and ChatGPT signed out: try the deletes again later.
+      await release([f]);
+      await setState({ cooldownUntil: now() + 15 * 60_000 });
+    } else if (kind === 'needs_login' || kind === 'free_plan' || kind === 'plan_unknown') {
+      // Signed out, or the account is (now) Free: hand everything back and stop until it is fixed.
+      await release([f]);
+      await stopAllWork();
+      await setState({ status: kind === 'needs_login' ? 'needs_login' : 'needs_plan', plan: res?.plan || '', notice: PLAN_NOTICE[kind] });
+    } else if (kind === 'wrong_page') {
+      // The tab was not on the job's chat (it moved, or ChatGPT sent it elsewhere): nothing was sent —
+      // the work goes back to the queue and starts again in a tab of its own.
+      await noteError('wrong_page', new Error(`${lease.key}: ${res?.error || ''}`));
+      await release([f]);
+    } else if (kind === 'rate_limited') {
+      await release([f]);
+      await setState({ status: 'limited', cooldownUntil: now() + 120_000, notice: 'ChatGPT reported a usage limit — waiting 2 minutes, then it carries on by itself.' });
+    } else if (kind) {
+      await reportFailure(f, res?.error || kind);
+    }
+  } finally { finishing.delete(frame); }
   await syncMirror();
   tick().catch(() => {});
 }
@@ -502,7 +669,7 @@ async function finish(frame, res) {
 async function stopAllWork(keep = () => false) {
   const all = await frames(async (a) => { const list = Object.entries(a).filter(([, f]) => !keep(f)); for (const [id] of list) delete a[id]; return list; });
   for (const [id, f] of all) {
-    if (f.lease?.work !== 'delete') f.conversation = f.conversation || await tabConversation(id);
+    if (f.lease?.work !== 'delete') f.conversation = f.conversation || await taskConversation(id, f);
     await closeFrame(id);
   }
   await release(all.map(([, f]) => f));
@@ -529,6 +696,7 @@ async function handle(msg) {
     case 'continue': await setState({ status: 'checking', notice: '', checkFrame: '' }); tick(); return { ok: true };   // check the account again
     case 'sync': tick(); syncMirror().catch(() => {}); return { ok: true };   // the panel changed the queue on the server: claim at once
     case 'openChat': return openChat(String(msg.key || ''));
+    case 'focus': await setFocus(String(msg.key || ''), Number.isInteger(msg.windowId) ? msg.windowId : null); return { ok: true };
     default: return { ok: false, error: `Unknown action ${msg.action}` };
   }
 }
@@ -566,7 +734,7 @@ export function installGptRunner() {
     }
     // The driver's pauses (gpt/driver.js sleep): timed here, where Chrome doesn't slow timers down.
     if (msg?.type === 'gpt_sleep') { setTimeout(() => sendResponse({}), Math.max(0, Math.min(Number(msg.ms) || 0, 5000))); return true; }
-    if (msg?.type === 'gpt_alive' && msg.frame) { alive(msg.frame, msg.conversation || '').catch((e) => noteError('alive', e)); return; }
+    if (msg?.type === 'gpt_alive' && msg.frame) { alive(msg.frame, msg.conversation || '', { sent: !!msg.sent }).catch((e) => noteError('alive', e)); return; }
     if (msg?.type === 'gpt_done' && msg.frame) { finish(msg.frame, msg.result).then(() => sendResponse({ ok: true }), () => sendResponse({ ok: false })); return true; }
     if (msg?.type === 'gpt') {
       handle(msg).then(sendResponse, (e) => sendResponse({ ok: false, error: String(e?.message || e) }));

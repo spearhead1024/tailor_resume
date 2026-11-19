@@ -5,7 +5,9 @@
 export const GPT_KEYS = { threads: 'gptThreads', state: 'gptState' };
 export const CHAT_ORIGINS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
 export const CHAT_URL = 'https://chatgpt.com/';
-export const PARALLEL = 1;   // ONE ChatGPT tab: it writes the CVs of the jobs ahead (the server's queue of 2) one after another, and answers questions first
+// Two ChatGPT tabs work at once: the selected job's (in the bidder's window — the ONLY ChatGPT tab they
+// see) and the next job's (prepared in a minimized window of its own). See gpt/runner.js "placing tabs".
+export const PARALLEL = 2;
 export const threadKey = (profileId, jobId) => `${profileId}:${jobId}`;
 
 // Which ChatGPT model writes what (⚙ Settings → ChatGPT models). Names as ChatGPT's model menu shows

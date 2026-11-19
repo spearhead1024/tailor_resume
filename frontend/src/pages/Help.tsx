@@ -116,7 +116,7 @@ function ExtensionGuide() {
             and <strong>LinkedIn</strong> (Easy Bids reads the job you have open). Pick a profile at the top of the panel.</li>
           <li><strong>Easy Bids</strong> — LinkedIn Easy Apply. Open a job on LinkedIn; the panel checks it first:
             <em> New Job</em>, <em>CV Ready</em>, <em>Duplicate</em> or <em>Applied</em>. Click <strong>Add + Gen CV</strong>:
-            the CV is written and saved to Downloads. Apply on LinkedIn, then <strong>Mark as Applied</strong>.
+            the CV is written (only that job — Easy Bids has no queue) and saved to Downloads as “Name Resume.pdf”. Apply on LinkedIn, then <strong>Mark as Applied</strong>.
             A posting that applies on the company's site gets <strong>Add Job</strong> only — it goes to Out Bids.</li>
           <li><strong>ChatGPT project — one per profile (do this once)</strong>. Everyone shares one ChatGPT account, and its
             memory mixes profiles up (Farhan's chat answering with Stefan's details). In ChatGPT: <strong>New project</strong> →
@@ -124,9 +124,11 @@ function ExtensionGuide() {
             ⚙ Settings → <strong>Project · &lt;profile&gt;</strong> → <strong>Use This Tab</strong>. It's saved for every bidder; that
             profile's CVs and answers are then written inside its project.</li>
           <li><strong>Out Bids</strong> — jobs that apply on the company's site. ChatGPT prepares <strong>2 jobs</strong>
-            (shown under the job): the one on screen and the next one, one after another in <strong>one ChatGPT tab</strong>.
-            <strong> Download CV</strong>, apply, then <strong>Mark as Applied</strong> (or Report / Skip): its ChatGPT chat is
-            deleted, the other one comes up, and the newest job in the queue joins it. A job that already has a CV is never sent to ChatGPT again.</li>
+            (shown under the job): the one on screen and the next one. You see <strong>one ChatGPT tab</strong>: the chat of
+            the job on screen. The next job's CV is written out of sight, in a minimized ChatGPT window — when you move to
+            that job, its chat comes into view. <strong>Download CV</strong>, apply, then <strong>Mark as Applied</strong> (or Report / Skip):
+            its ChatGPT chat is deleted, the next one comes up, and the newest job in the queue joins. A job that already has a CV is never sent to ChatGPT again.
+            Each job has its own chat; its questions are always answered there.</li>
           <li><strong>Tech Questions</strong> — paste the application's questions (one per line) and click
             <strong> Save &amp; Answer</strong>: ChatGPT answers them first, before any other CV, in the same chat that wrote the CV — with the
             fast <strong>Instant</strong> model, then it is set back so CVs keep their model (⚙ Settings → <strong>ChatGPT models</strong>).

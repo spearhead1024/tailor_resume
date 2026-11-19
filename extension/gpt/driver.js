@@ -24,6 +24,17 @@
   if (window.top !== window || window.__trGptDriver) return;   // the tab's page only (not ChatGPT's own frames)
   window.__trGptDriver = true;
   let FRAME = '';                                                 // this tab's work id, from the worker
+  // The chat this task works in: the job's own (task.expect.chat) or the new one ChatGPT opened for it.
+  // Every message is sent only while the page is on it, and only it is ever reported — whatever the
+  // tab shows otherwise (the bidder clicked another chat in ChatGPT's sidebar…) is not this job's.
+  let TASK_CHAT = '';
+  const chatOf = (href) => (String(href || '').match(/\/c\/([A-Za-z0-9][A-Za-z0-9_-]{7,})/) || [])[1] || '';
+  const wrongPage = () => ({ ok: false, kind: 'wrong_page', error: `This ChatGPT tab is not on the job's chat (it shows ${chatOf(location.href) || 'a new chat'}${TASK_CHAT ? `, not ${TASK_CHAT}` : ''}) — nothing was sent.` });
+  let sentOnce = false;                                          // this task sent its first message
+  const adoptChat = () => { if (!TASK_CHAT && sentOnce) TASK_CHAT = chatOf(location.href); };
+  const onTaskChat = () => { adoptChat(); return !TASK_CHAT || chatOf(location.href) === TASK_CHAT; };
+  // The task's chat as a link — the page's own address while it is on it (keeps a project's /g/… path).
+  const ownChat = () => (!TASK_CHAT ? '' : chatOf(location.href) === TASK_CHAT ? location.href.split('#')[0] : `${location.origin}/c/${TASK_CHAT}`);
 
   // A pause that background tabs don't stretch: Chrome slows a hidden tab's timers (to once a MINUTE
   // after 5 minutes hidden), so the service worker — whose timers run normally — answers when the time
@@ -124,6 +135,10 @@
     return ok;
   }
   async function clickSend(composer) {
+    if (!sentOnce) {                     // the chat ChatGPT opens now is this task's (the worker may trust the tab's URL from here)
+      sentOnce = true;
+      chrome.runtime.sendMessage({ type: 'gpt_alive', frame: FRAME, conversation: '', sent: true }).catch(() => {});
+    }
     const btn = await waitFor(() => { const b = q(SEL.send); return b && !b.disabled && visible(b) ? b : null; }, 8000, 100);
     if (btn) { btn.click(); return; }
     composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
@@ -269,6 +284,7 @@
     if (reply.kind) return { ok: false, kind: reply.kind, error: `ChatGPT did not finish (${reply.kind}).`, diag: diagnose() };
     let json = salvage();
     if (!json) {
+      if (!onTaskChat()) return wrongPage();
       const c2 = q(SEL.composer); if (!c2) return { ok: false, kind: 'invalid_json', error: 'The reply was not valid JSON.', diag: diagnose() };
       const base2 = lastReply();
       await typePrompt(c2, 'Your previous reply was not valid JSON. Reply with ONLY the complete JSON object described above — no markdown fences, no commentary, no truncation.');
@@ -277,6 +293,7 @@
       json = salvage();
       if (!json) return { ok: false, kind: reply.kind || 'invalid_json', error: 'ChatGPT replied, but not with a valid resume JSON object.', diag: diagnose() };
     }
+    if (!onTaskChat()) return wrongPage();             // the reply read must be THIS chat's
     return { ok: true, resume_json: json, conversation: location.href };
   }
 
@@ -293,6 +310,7 @@
   }
   async function send(prompt, timeoutMs, ready) {
     const b0 = detectBlocker(); if (b0) return blockedResult(b0);
+    if (!onTaskChat()) return wrongPage();
     const composer = await composerOrFail();
     if (!composer) return { ok: false, kind: detectBlocker() || 'no_composer', error: 'Could not find the ChatGPT message box.', diag: diagnose() };
     const baseline = lastReply();
@@ -316,6 +334,7 @@
         if (!r.ok) return r;
         out = read();
       }
+      if (!onTaskChat()) return wrongPage();
       return out ? { ok: true, answers: out, conversation: location.href, model: sel?.ok ? model : '' }
         : { ok: false, kind: 'invalid_json', error: 'ChatGPT did not return the answers as a list.', diag: diagnose() };
     } finally {
@@ -394,8 +413,19 @@
   }
 
   const openConversation = () => (/\/c\/[\w-]{8,}/.test(location.pathname) ? location.href.split('#')[0] : '');
+  // The page must be the chat the worker opened this tab for: the job's own chat, or a new chat. (A
+  // tab still showing the previous chat — the page not loaded yet — or one the bidder moved elsewhere
+  // gets nothing: the worker starts the work again in a tab of its own.)
+  async function rightPage(expect) {
+    if (!expect) return true;
+    const want = expect.chat || '';
+    const ok = () => (chatOf(location.href) === want ? true : null);
+    return !!(ok() || await waitFor(ok, 8000, 250));
+  }
   async function work(task) {
     if (task.kind === 'delete') return deleteConversations(task);
+    if ((task.kind === 'write' || task.kind === 'answers') && !(await rightPage(task.expect))) return wrongPage();
+    TASK_CHAT = task.expect?.chat || '';
     // Everything else writes with ChatGPT: a paid plan only.
     const paid = await requirePaidPlan();
     if (!paid.ok || task.kind === 'check') return paid;
@@ -406,7 +436,11 @@
     let res;
     try { res = await work(task); } catch (e) { res = { ok: false, kind: 'error', error: String(e?.message || e) }; }
     // Failed or not, the conversation this frame opened is named — so it is deleted, never left behind.
-    if (task.kind === 'write' || task.kind === 'answers') res.conversation = res.conversation || openConversation();
+    // Only the task's own chat, never what the tab happens to show.
+    if (task.kind === 'write' || task.kind === 'answers') {
+      if (res.kind !== 'wrong_page') adoptChat();
+      res.conversation = res.kind === 'wrong_page' ? '' : ownChat();
+    }
     return res;
   }
 
@@ -434,12 +468,17 @@
       if (!task) await sleep(400);                // just opened: the worker is still recording its task
     }
     if (!task) return;
-    FRAME = task.id;
-    const beat = (conversation = openConversation()) => chrome.runtime.sendMessage({ type: 'gpt_alive', frame: FRAME, conversation }).catch(() => {});
+    FRAME = task.id; TASK_CHAT = ''; sentOnce = false;
+    const beat = () => chrome.runtime.sendMessage({ type: 'gpt_alive', frame: FRAME, conversation: ownChat() }).catch(() => {});
     const alive = setInterval(beat, 20_000);
-    // ChatGPT opens the conversation (/c/<id>) right after the prompt is sent: report it at once.
-    let told = '';
-    const watch = setInterval(() => { const c = openConversation(); if (c && c !== told) { told = c; beat(c); } }, 1000);
+    // ChatGPT opens the conversation (/c/<id>) right after the prompt is sent: report it at once. A new
+    // chat becomes the task's chat once (from then on it is fixed — see TASK_CHAT).
+    const started = !!task.expect;
+    const watch = setInterval(() => {
+      if (!started || TASK_CHAT || !(task.kind === 'write' || task.kind === 'answers')) return;
+      adoptChat();
+      if (TASK_CHAT) beat();
+    }, 300);
     const result = await run(task);
     clearInterval(alive); clearInterval(watch);
     for (let i = 0; i < 3; i++) {

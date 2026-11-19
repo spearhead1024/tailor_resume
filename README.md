@@ -79,7 +79,7 @@ One side panel (`extension/panel/`), tabs by role: **Out Bids** and **Easy Bids*
 - The layout is one fluid column (centred past 600px), so it works from Chrome's narrowest side panel up.
 - **Opening the panel** picks the tab from the page you're on: an empty tab → Out Bids (the latest job
   opens in it), LinkedIn → Easy Bids, any other site → Add Jobs (Out Bids for a bidder without it).
-- **CVs save to Downloads by themselves** as "<Profile> resume.pdf" (a name valid on Windows / macOS /
+- **CVs save to Downloads by themselves** as "<Profile> Resume.pdf" (a name valid on Windows / macOS /
   Linux; the same CV replaces the old file — `lib/save-file.js`), or by the profile's CV file name template. If the browser's "Ask where to save each
   file" setting is on, every save shows a dialog; the panel detects it and links to the setting. A Gen CV
   still waiting for its CV survives closing the panel (session storage).
@@ -89,7 +89,13 @@ One side panel (`extension/panel/`), tabs by role: **Out Bids** and **Easy Bids*
   screen + the next one, their CVs written one after another. Mark as Applied / Report / Skip →
   that job's chat is deleted (in the open ChatGPT tab), the set's next job comes up, and the
   NEWEST queue job not in the set joins it. The set is kept per profile, so new jobs at the top of the queue
-  never make the bidder jump. ONE ChatGPT tab: it writes those CVs one after another, answers tech questions first (in the chat it is on, without reloading), and deletes chats in place.
+  never make the bidder jump. Two ChatGPT tabs work at once (`gpt/runner.js` "placing tabs"): the job on
+  screen's sits in the bidder's window — the ONE ChatGPT tab they see — and the next job's is written in a
+  minimized window of its own; the panel reports the job on screen (`gpt('focus')`) and the tabs swap
+  windows (`chrome.tabs.move`, the page stays alive). Answers go first, in the job's own chat without a
+  reload; chats are deleted in place. **One chat per job**: every task carries the chat it must be on
+  (`expect`) — the driver sends nothing on any other page, reports only that chat, and the server never
+  lets one chat belong to two jobs (`cv_queue.foreign_chat`). Easy Bids has no queue: only the job on screen.
 - **ChatGPT project per profile** (`profile.gpt_project_url`, ⚙ Settings → Use This Tab, `PUT /api/gpt/project`):
   the bidders share one ChatGPT account whose memory mixed profiles up; chats start inside the profile's
   project (create it with "Project-only" memory). Also: the CV prompt names the candidate and fences out
