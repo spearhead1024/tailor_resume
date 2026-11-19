@@ -1,6 +1,6 @@
 {
-  "version": "1.10.7",
+  "version": "1.11.0",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "Queue of 2; a job with a CV is never sent to ChatGPT again; the one ChatGPT tab stays open.",
-  "built_at": "2026-11-18T19:01:01Z"
+  "changelog": "Tech questions are answered with ChatGPT Instant (set back after, so CVs keep their model) \u2014 choose in Settings \u2192 ChatGPT models. Job cards show the tech stack. CV file name follows the profile's template. Added jobs wait for the AI check.",
+  "built_at": "2026-11-19T12:23:37Z"
 }
