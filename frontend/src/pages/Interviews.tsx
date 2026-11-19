@@ -702,7 +702,7 @@ function ResumeCell({ value, editing, seed, onCommit, onDone }: Omit<CellProps, 
   const isExternal = /^https?:\/\//i.test(raw);
   const isApi = raw.startsWith('/api/') || raw.includes('/api/resumes/');
   const downloadable = isExternal || isApi;
-  const label = isApi ? 'Resume' : raw;                               // internal path → friendly label
+  const label = isApi || /\/api\/public\/cv\//.test(raw) ? 'Resume' : raw;   // our CV links → friendly label
   const open = async (e: ReactMouseEvent) => {
     e.stopPropagation();
     try {

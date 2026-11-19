@@ -120,15 +120,19 @@ export default function Applied() {
       const link = (r.job_link || jd?.link || '').trim();
       const desc = (jd?.description || '').trim();
       const c_jd = [link && `Job link: ${link}`, desc].filter(Boolean).join('\n\n');
-      // Skillset = the job's main tech stack; Account Profile = the board's "Name(REGION)" option.
+      // Skillset = the job's main tech stack; Account Profile = the board's "Name(REGION)" option;
+      // Resume = a PUBLIC link to the CV (opens without login, for a year) — callers and the client can open it.
       const stack = (jd?.tech_stack?.length ? jd.tech_stack : r.tech_stack) || [];
+      const share = await api.post<{ url: string }>(`/api/resumes/${encodeURIComponent(r.saved_resume_id)}/share?days=365`).catch(() => null);
+      const resumeLink = share?.url ? (share.url.startsWith('/') ? `${window.location.origin}${share.url}` : share.url)
+        : `/api/resumes/${r.saved_resume_id}/pdf`;
       await api.post('/api/interviews/rows', {
         cells: {
           c_title: r.job_title || '',
           c_company: r.job_company || '',
           c_skill: stack.slice(0, 6).join(', '),
           c_account: r.profile_label || r.profile_name || '',
-          c_resume: `/api/resumes/${r.saved_resume_id}/pdf`,   // downloadable resume link (see ResumeCell)
+          c_resume: resumeLink,   // the public CV link (see ResumeCell)
           c_jd,   // Index + status/approved/type defaults are filled server-side (see add_row)
         },
       });

@@ -1515,3 +1515,30 @@ body.cal-dragging .cal-ev { cursor: grabbing; }
   .cmp-grid { grid-template-columns: 1fr; overflow-y: auto; }
   .cmp-desc { max-height: 40vh; }
 }
+
+/* ── Jobs table: every cell two short lines, one row height ─────────────── */
+.jobs-table { table-layout: auto; }
+.jobs-table th { padding: 0.5rem 0.6rem; }
+.jobs-table td { padding: 0.45rem 0.6rem; vertical-align: middle; }
+.jobs-table td .l1 { display: flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.35; }
+.jobs-table td .l1 > a, .jobs-table td .l1 > .jt-company { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.jobs-table td .l1 .easy-badge { flex: none; margin-left: 2px; }
+.jobs-table td .l2 { margin-top: 3px; min-width: 0; max-width: 100%; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; font-size: 0.75rem; line-height: 1.3; }
+.jobs-table td .l2 .stack-chips { flex-wrap: nowrap; }
+.jobs-table td .ai-reason.l2, .jobs-table td .reject-why.l2 { max-width: 260px; }
+.jobs-table td .jt-company { font-weight: 500; }
+.jobs-table tr.group-row td { padding: 0.4rem 0.75rem; font-weight: 600; font-size: 0.82rem; color: var(--muted);
+  background: var(--panel-2); border-top: 2px solid var(--border); }
+.jobs-table .row-acts select, .jobs-table .row-acts button { height: 30px; box-sizing: border-box; margin: 0; font-size: 0.82rem; }
+.jobs-table .row-acts button.icon { width: 32px; padding: 0; justify-content: center; }
+.status-select { width: 134px; padding: 0 0.5rem; font-weight: 600; border-radius: 999px; }
+.status-select.approved { color: var(--st-success-fg); background-color: rgba(16,185,129,0.1); border-color: rgba(16,185,129,0.35); }
+.status-select.pending  { color: var(--st-warning-fg); background-color: rgba(245,158,11,0.1); border-color: rgba(245,158,11,0.35); }
+.status-select.rejected { color: var(--st-danger-fg); background-color: rgba(239,68,68,0.1); border-color: rgba(239,68,68,0.35); }
+.status-select.deleted  { color: var(--st-neutral-fg); background-color: rgba(100,116,139,0.1); border-color: rgba(100,116,139,0.35); }
+.status-select option { color: var(--text); background: var(--panel); font-weight: 400; }
+.jobs-table td.c-company { max-width: 230px; }
+.jobs-table td.c-title { max-width: 360px; }
+.jobs-table td.c-ai { max-width: 280px; }

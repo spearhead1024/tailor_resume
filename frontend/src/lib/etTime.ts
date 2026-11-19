@@ -54,6 +54,12 @@ export function etDateTime(iso: string, fallback = '—'): string {
 
 /** "May 31, 2026, 3:42 PM PDT" — date + time in the viewer's own time zone: the one
  *  set on their Account (`tz`), else the browser's. The zone name is part of the text. */
+/** The time of day in ET, e.g. "6:57 AM ET" — the second line under etDateShort. */
+export function etTime(iso: string, fallback = ''): string {
+  const d = safeDate(iso);
+  if (!d) return fallback;
+  return `${d.toLocaleTimeString('en-US', { timeZone: ET, hour: 'numeric', minute: '2-digit' })} ET`;
+}
 export function userDateTime(iso: string, tz?: string, fallback = '—'): string {
   const d = safeDate(iso);
   if (!d) return fallback;

@@ -72,7 +72,8 @@ const QUICK_REASONS = ['Onsite / hybrid', 'Remote not stated', 'Duplicate postin
 export function RejectDialog({ count, single, onClose, onConfirm }: {
   count: number; single?: any; onClose: () => void; onConfirm: (reason: string) => Promise<void> | void;
 }) {
-  const [reason, setReason] = useState('');
+  // One job the AI marked Not fit / Check: its reason is the default text (edit it, or keep it).
+  const [reason, setReason] = useState(() => (single?.ai_reason && single.ai_status && single.ai_status !== 'fit' ? String(single.ai_reason) : ''));
   const [busy, setBusy] = useState(false);
   useEsc(onClose);
   const auto = single
@@ -92,6 +93,7 @@ export function RejectDialog({ count, single, onClose, onConfirm }: {
         <div className="cal-modal-b" style={{ display: 'block' }}>
           <label className="cal-fld-l" htmlFor="rej-reason">Reason — the person who added it sees this</label>
           <textarea id="rej-reason" rows={2} autoFocus value={reason} maxLength={300}
+            onFocus={(e) => e.currentTarget.select()}
             placeholder={`Empty: ${auto}`} onChange={(e) => setReason(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) go(); }}
             style={{ width: '100%', marginTop: 4 }} />

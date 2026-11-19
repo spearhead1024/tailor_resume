@@ -67,7 +67,7 @@ function cvFileName(p: any, job: { company?: string; job_title?: string } | null
   const name = String(p?.name || '').normalize('NFC').replace(/[\\/:*?"<>|\u0000-\u001f\u007f]+/g, ' ')
     .replace(/\s+/g, ' ').trim().replace(/^[.\s]+|[.\s]+$/g, '').slice(0, 120).trim();
   const tpl = String(p?.resume_filename || '').trim();
-  if (!tpl) return `${name || 'Resume'} resume.pdf`;
+  if (!tpl) return `${name || 'Resume'} Resume.pdf`;
   const parts = name.split(' ').filter(Boolean);
   const d = new Date(); const pad = (n: number) => String(n).padStart(2, '0');
   const vals: Record<string, string> = {
@@ -590,7 +590,7 @@ export default function Profiles() {
                 <div style={{ marginTop: '1.25rem', borderTop: '1px solid var(--border)', paddingTop: '1rem' }}>
                   <div style={{ fontWeight: 600, marginBottom: '0.75rem' }}>CV file name</div>
                   {editing ? (
-                    <Field label="Template (empty = “Name resume.pdf”)">
+                    <Field label="Template (empty = “Name Resume.pdf”)">
                       <input value={selected.resume_filename || ''} maxLength={120}
                         onChange={(e) => setSelected({ ...selected, resume_filename: e.target.value })}
                         placeholder="e.g. {first}_{last}_{company}_{role}" />

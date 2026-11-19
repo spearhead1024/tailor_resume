@@ -1679,7 +1679,7 @@ def cv_file_name(profile: dict, job: dict | None = None) -> str:
     name = re.sub(r"\s+", " ", name).strip().strip(". ")[:120].strip()
     tpl = str((profile or {}).get("resume_filename") or "").strip()
     if not tpl:
-        return f"{name or 'Resume'} resume.pdf"
+        return f"{name or 'Resume'} Resume.pdf"
     parts = name.split()
     vals = {"name": name, "first": parts[0] if parts else "", "last": parts[-1] if len(parts) > 1 else "",
             "company": str((job or {}).get("company") or ""), "role": str((job or {}).get("job_title") or ""),
@@ -1693,9 +1693,10 @@ def cv_file_name(profile: dict, job: dict | None = None) -> str:
 
 
 @router.post("/{resume_id}/share")
-def share_resume(resume_id: str, user: dict = Depends(get_current_user)):
-    """A public link to this CV's PDF: anyone with it can open it for 30 days, no login. Who may
-    open the CV here may share it. A VPS_1 CV gets VPS_1's own public link."""
+def share_resume(resume_id: str, days: int = Query(SHARE_DAYS, ge=1, le=365), user: dict = Depends(get_current_user)):
+    """A public link to this CV's PDF: anyone with it can open it for `days` days (30 by default; the
+    Interviews board's Schedule asks for a year, as a call can come late), no login. Who may open the
+    CV here may share it. A VPS_1 CV gets VPS_1's own public link."""
     if resume_id.startswith("vps1:"):
         if not has_role(user, "admin"):
             raise HTTPException(status_code=403, detail="Forbidden")
@@ -1713,7 +1714,7 @@ def share_resume(resume_id: str, user: dict = Depends(get_current_user)):
             and record.get("profile_id", "") not in (user.get("assigned_profile_ids") or []) \
             and not _resume_on_visible_call(user, resume_id):
         raise HTTPException(status_code=403, detail="Forbidden")
-    expires = datetime.now(timezone.utc) + timedelta(days=SHARE_DAYS)
+    expires = datetime.now(timezone.utc) + timedelta(days=days)
     token = _share_token(resume_id, int(expires.timestamp()))
     return {"url": f"/api/public/cv/{token}", "expires_at": expires.strftime("%Y-%m-%dT%H:%M:%SZ")}
 
@@ -1733,7 +1734,7 @@ def public_resume_pdf(token: str):
     profile = next((p for p in storage.get_profiles() if p.get("id") == record.get("profile_id")), {}) or {}
     from urllib.parse import quote
     fname = cv_file_name(profile, {"company": record.get("job_company"), "job_title": record.get("job_title")})
-    ascii_name = re.sub(r"[^A-Za-z0-9._ -]+", "", fname) or "resume.pdf"
+    ascii_name = re.sub(r"[^A-Za-z0-9._ -]+", "", fname) or "Resume.pdf"
     return Response(content=cached.read_bytes(), media_type="application/pdf", headers={
         "Content-Disposition": f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(fname)}",
         "Cache-Control": "private, max-age=300",

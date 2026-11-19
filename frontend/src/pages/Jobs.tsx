@@ -4,7 +4,7 @@ import { useUrlState, useOnChange } from '../lib/urlState';
 import { api } from '../api/client';
 import { useAuth, hasRole } from '../lib/auth';
 import { useToast } from '../lib/toast';
-import { etDateShort, etDateTime, workDayKey, workDayLong, todayWorkDayKey } from '../lib/etTime';
+import { etDateShort, etDateTime, etTime, workDayKey, workDayLong, todayWorkDayKey } from '../lib/etTime';
 import { ApplyBadge, ApplyTypeSelect } from '../lib/ApplyBadge';
 import CompanyBadge from '../lib/CompanyBadge';
 import { TechStack, AiBadge, aiRowStyle, RejectDialog, CompareDialog } from '../lib/JobAi';
@@ -57,11 +57,6 @@ function formatJobError(err: any, fallback: string): string {
   return err?.message || fallback;
 }
 
-// Status dropdown and Edit button share one size so the row's actions line up.
-const JOB_ACTION_CTRL: React.CSSProperties = {
-  height: 32, boxSizing: 'border-box', padding: '0 0.6rem', fontSize: '0.85rem', lineHeight: 1,
-  width: 120, margin: 0,
-};
 
 type DupConflict = { kind: string; message: string; existing_id?: string; existing_company?: string; existing_title?: string };
 
@@ -635,7 +630,7 @@ export default function Jobs() {
             {bulkBusy && <span className="spinner" />}
           </div>
         )}
-        <table>
+        <table className="jobs-table">
           <thead>
             <tr>
               {isAdmin && (
@@ -645,21 +640,20 @@ export default function Jobs() {
                     onChange={toggleAll} />
                 </th>
               )}
-              <th>Company</th><th style={{ width: '24%' }}>Job title</th><th>Region</th><th>Status</th>
-              <th title="The AI check: Fit / Not fit / Check, and why">AI</th>
-              <th style={{ whiteSpace: 'nowrap' }}>AddedAt</th>
-              {isAdmin && <th style={{ whiteSpace: 'nowrap' }}>Added by</th>}
-              {isAdmin && <th></th>}
+              <th style={{ width: '19%' }}>Company</th>
+              <th style={{ width: '27%' }}>Job title</th>
+              <th style={{ width: 64 }}>Region</th>
+              <th style={{ minWidth: 210 }} title="The AI check: Fit / Not fit / Check, and why">AI</th>
+              <th style={{ width: 112 }}>Added</th>
+              {isAdmin && <th style={{ width: 110 }}>Added by</th>}
+              <th style={{ width: isAdmin ? (isPendingView ? 250 : 210) : 110 }}>Status</th>
             </tr>
           </thead>
           <tbody>
             {groups.map((group) => (
               <React.Fragment key={group.key}>
-                <tr>
-                  <td colSpan={isAdmin ? 9 : 6} style={{
-                    padding: '0.5rem 0.75rem', fontWeight: 600, fontSize: '0.85rem',
-                    color: 'var(--muted)', background: 'var(--panel-2)', borderTop: '2px solid var(--border)',
-                  }}>
+                <tr className="group-row">
+                  <td colSpan={isAdmin ? 8 : 6}>
                     {group.label} — {group.jobs.length} {group.jobs.length === 1 ? 'job' : 'jobs'}
                   </td>
                 </tr>
@@ -671,78 +665,81 @@ export default function Jobs() {
                           <input type="checkbox" checked={selected.has(job.id)} onChange={() => toggleOne(job.id)} />
                         </td>
                       )}
-                      <td>
-                        {job.flagged && (
-                          <span title={`Reported ${job.reports_count}×`} style={{ color: 'var(--danger,#dc2626)', marginRight: 5 }}>⚑</span>
-                        )}
-                        {job.company}
-                        <div style={{ marginTop: 2 }}>
+                      {/* Every cell is two short lines, so all rows are one height. */}
+                      <td className="c-company">
+                        <div className="l1" title={job.company}>
+                          {job.flagged && <span title={`Reported ${job.reports_count}×`} style={{ color: 'var(--danger,#dc2626)', marginRight: 5 }}>⚑</span>}
+                          <span className="jt-company">{job.company}</span><ApplyBadge type={job.apply_type} />
+                        </div>
+                        <div className="l2">
                           <CompanyBadge info={job.company_info} isAdmin={isAdmin} compact
                             onChanged={() => qc.invalidateQueries({ queryKey: ['jobs'] })} />
                         </div>
                       </td>
-                      <td style={{ maxWidth: 300, overflowWrap: 'anywhere' }}>
-                        {job.link ? <a href={job.link} target="_blank" rel="noreferrer">{job.job_title}</a> : job.job_title}<ApplyBadge type={job.apply_type} />
-                        <TechStack stack={job.tech_stack} style={{ display: 'flex', marginTop: 3 }} />
+                      <td className="c-title">
+                        <div className="l1" title={job.job_title}>
+                          {job.link ? <a href={job.link} target="_blank" rel="noreferrer">{job.job_title}</a> : job.job_title}
+                        </div>
+                        <div className="l2"><TechStack stack={job.tech_stack} max={4} style={{ flexWrap: 'nowrap', overflow: 'hidden' }} /></div>
                       </td>
-                      <td>{job.region}</td>
-                      <td>
-                        <span className={`pill ${job.status}`}
-                          title={job.status === 'approved' && job.approved_by_username ? `Approved by ${job.approved_by_username}` : undefined}>{job.status}</span>
-                        {job.status === 'approved' && job.approved_by_username === 'AI check' && <div className="muted" style={{ fontSize: '0.72rem', marginTop: 2 }}>by AI check</div>}
-                        {job.status === 'rejected' && job.reject_reason && (
-                          <div className="reject-why" title={job.rejected_by_username ? `Rejected by ${job.rejected_by_username}` : undefined}>Why: {job.reject_reason}</div>
-                        )}
-                        {!isAdmin && job.status === 'pending' && job.analyzed && job.ai_status !== 'fit' && (
-                          <div className="muted" style={{ fontSize: '0.74rem', marginTop: 2 }}>Waiting for an admin</div>
-                        )}
+                      <td>{job.region === 'ANY' ? 'Any' : job.region}</td>
+                      <td className="c-ai">
+                        <AiBadge job={job} withReason={false} />
+                        {job.status === 'rejected' && job.reject_reason ? (
+                          <div className="l2 reject-why" title={`Rejected${job.rejected_by_username ? ` by ${job.rejected_by_username}` : ''}: ${job.reject_reason}`}>Rejected: {job.reject_reason}</div>
+                        ) : job.ai_reason ? (
+                          <div className="l2 ai-reason" title={job.ai_reason}>{job.ai_reason}</div>
+                        ) : null}
                       </td>
-                      <td><AiBadge job={job} /></td>
-                      <td style={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }} title="US Eastern time">{etDateTime(job.submitted_at || job.approved_at)}</td>
+                      <td title="US Eastern time">
+                        <div className="l1" style={{ fontSize: '0.84rem' }}>{etDateShort(job.submitted_at || job.approved_at)}</div>
+                        <div className="l2 muted">{etTime(job.submitted_at || job.approved_at)}</div>
+                      </td>
                       {isAdmin && (
-                        <td style={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }}>
-                          {job.created_by_username || <span className="muted">—</span>}
-                        </td>
+                        <td><div className="l1" style={{ fontSize: '0.85rem' }}>{job.created_by_username || <span className="muted">—</span>}</div></td>
                       )}
-                      {isAdmin && isPendingView && (
-                        <td style={{ whiteSpace: 'nowrap' }}>
+                      <td>
+                        {isAdmin && isPendingView ? (
                           <div className="row-acts">
                             <button onClick={() => approveIds([job.id])} title="Approve — bidders get it">✓ Approve</button>
                             <button className="danger" onClick={() => setRejecting({ ids: [job.id], single: job })} title="Reject with a reason the adder sees">✕ Reject</button>
-                            <button className="secondary" onClick={() => setComparing(job.id)} title="Side by side with up to 10 similar jobs (same link / company)">⇆ Compare</button>
-                            <button className="secondary" onClick={() => editingId === job.id ? setEditingId(null) : startEdit(job)}>
-                              {editingId === job.id ? 'Cancel' : 'Edit'}
+                            <button className="secondary icon" onClick={() => setComparing(job.id)} title="Compare side by side with up to 10 similar jobs (same link / company)">⇆</button>
+                            <button className="secondary icon" onClick={() => editingId === job.id ? setEditingId(null) : startEdit(job)} title={editingId === job.id ? 'Cancel editing' : 'Edit'}>
+                              {editingId === job.id ? '✕' : '✎'}
                             </button>
                           </div>
-                        </td>
-                      )}
-                      {isAdmin && !isPendingView && (
-                        <td style={{ whiteSpace: 'nowrap' }}>
-                          <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                            <select value={job.status} disabled={updateMutation.isPending}
+                        ) : isAdmin ? (
+                          <div className="row-acts">
+                            {/* The status IS this dropdown (coloured like its pill): approved / pending / rejected / deleted. */}
+                            <select value={job.status} disabled={updateMutation.isPending} className={`status-select ${job.status}`}
+                              title={job.status === 'approved' && job.approved_by_username ? `Approved by ${job.approved_by_username}` : 'Set the status'}
                               onChange={(e) => {
                                 const next = e.target.value;
                                 if (next === 'rejected') { setRejecting({ ids: [job.id], single: job }); return; }
                                 if (next === 'deleted' && !confirm(`Mark "${job.company} — ${job.job_title}" as deleted? It will be permanently hidden and never re-synced.`)) return;
                                 updateMutation.mutate({ id: job.id, payload: { status: next } });
-                              }}
-                              style={JOB_ACTION_CTRL}>
-                              <option value="approved">approved</option>
-                              <option value="pending">pending</option>
-                              <option value="rejected">rejected</option>
-                              <option value="deleted">deleted</option>
+                              }}>
+                              <option value="approved">{job.approved_by_username === 'AI check' && job.status === 'approved' ? 'Approved · AI' : 'Approved'}</option>
+                              <option value="pending">Pending</option>
+                              <option value="rejected">Rejected</option>
+                              <option value="deleted">Deleted</option>
                             </select>
-                            <button className="secondary" style={{ ...JOB_ACTION_CTRL, width: 76 }}
+                            <button className="secondary" style={{ minWidth: 58 }}
                               onClick={() => editingId === job.id ? setEditingId(null) : startEdit(job)}>
                               {editingId === job.id ? 'Cancel' : 'Edit'}
                             </button>
                           </div>
-                        </td>
-                      )}
+                        ) : (
+                          <>
+                            <span className={`pill ${job.status}`}>{job.status}</span>
+                            {job.status === 'pending' && job.analyzed && job.ai_status !== 'fit' && <div className="l2 muted">Waiting for an admin</div>}
+                          </>
+                        )}
+                      </td>
                     </tr>
                     {job.flagged && (job.reports?.length || 0) > 0 && (
                       <tr>
-                        <td colSpan={isAdmin ? 9 : 6} style={{ padding: '0.75rem 1rem', background: 'rgba(220,38,38,0.06)', borderBottom: '1px solid var(--border)' }}>
+                        <td colSpan={isAdmin ? 8 : 6} style={{ padding: '0.75rem 1rem', background: 'rgba(220,38,38,0.06)', borderBottom: '1px solid var(--border)' }}>
                           <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: 12 }}>
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <div style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--danger,#dc2626)', marginBottom: 4 }}>
@@ -780,7 +777,7 @@ export default function Jobs() {
                     )}
                     {editingId === job.id && (
                       <tr>
-                        <td colSpan={isAdmin ? 9 : 6} style={{ padding: '1rem', background: 'var(--panel-2)' }}>
+                        <td colSpan={isAdmin ? 8 : 6} style={{ padding: '1rem', background: 'var(--panel-2)' }}>
                           <div className="row">
                             <div className="field"><label>Company{REQ}</label><input value={editDraft.company} onChange={(e) => setEditDraft({ ...editDraft, company: e.target.value })} /></div>
                             <div className="field"><label>Job title{REQ}</label><input value={editDraft.job_title} onChange={(e) => setEditDraft({ ...editDraft, job_title: e.target.value })} /></div>
