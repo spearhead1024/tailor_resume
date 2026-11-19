@@ -1,6 +1,6 @@
 {
-  "version": "1.11.0",
+  "version": "1.12.0",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "Tech questions are answered with ChatGPT Instant (set back after, so CVs keep their model) \u2014 choose in Settings \u2192 ChatGPT models. Job cards show the tech stack. CV file name follows the profile's template. Added jobs wait for the AI check.",
-  "built_at": "2026-11-19T12:23:37Z"
+  "changelog": "You see one ChatGPT tab: the chat of the job on screen. The next job's CV is written out of sight. Each job has its own chat; questions always go there. Chats are deleted when the job is done. Easy Bids writes only the job on screen. CVs save as \"Name Resume.pdf\".",
+  "built_at": "2026-11-19T19:55:32Z"
 }
