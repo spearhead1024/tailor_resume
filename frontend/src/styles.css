@@ -1470,3 +1470,48 @@ body.cal-dragging .cal-ev { cursor: grabbing; }
   background: var(--lk-line, #fbbf24); color: var(--lk-ink, #1c1917);
   text-transform: none; letter-spacing: 0;
 }
+
+/* ── AI job check (lib/JobAi.tsx) ───────────────────────────────────────── */
+.stack-chips { display: inline-flex; flex-wrap: wrap; gap: 3px; vertical-align: middle; }
+.stack-chip { display: inline-block; padding: 0 6px; border-radius: 4px; font-size: 0.7rem; line-height: 1.55;
+  font-weight: 500; white-space: nowrap; color: var(--st-info-fg); background: rgba(59,130,246,0.09);
+  border: 1px solid rgba(59,130,246,0.22); }
+.stack-chip.more { color: var(--muted); background: var(--panel-2); border-color: var(--border); }
+.ai-badge { display: inline-flex; align-items: center; gap: 5px; width: max-content; padding: 1px 8px; border-radius: 999px;
+  font-size: 0.7rem; font-weight: 700; letter-spacing: 0.02em; text-transform: uppercase; border: 1px solid var(--border);
+  color: var(--muted); background: var(--panel-2); white-space: nowrap; }
+.ai-badge .spinner { width: 0.8em; height: 0.8em; border-width: 1.5px; }
+.ai-badge.fit { color: var(--st-success-fg); background: rgba(16,185,129,0.12); border-color: rgba(16,185,129,0.35); }
+.ai-badge.not_fit { color: var(--st-danger-fg); background: rgba(239,68,68,0.12); border-color: rgba(239,68,68,0.35); }
+.ai-badge.needs_check { color: var(--st-info-fg); background: rgba(59,130,246,0.12); border-color: rgba(59,130,246,0.35); }
+.ai-reason { font-size: 0.74rem; color: var(--muted); line-height: 1.25; max-width: 190px; overflow-wrap: anywhere; }
+.reject-why { margin-top: 3px; font-size: 0.76rem; color: var(--st-danger-fg); max-width: 220px; overflow-wrap: anywhere; line-height: 1.25; }
+.ai-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px; padding: 0.5rem 0.8rem; margin-bottom: 0.75rem;
+  border-radius: 8px; border: 1px solid var(--border); background: var(--panel-2); font-size: 0.84rem; }
+.ai-bar.err { border-color: rgba(239,68,68,0.45); background: var(--danger-bg); color: var(--st-danger-fg); }
+.row-acts { display: flex; gap: 4px; align-items: center; }
+.row-acts button { height: 30px; padding: 0 0.6rem; font-size: 0.82rem; white-space: nowrap; }
+
+/* Compare: two jobs side by side */
+.cal-modal.cmp-modal { width: min(1180px, 96vw); max-height: 92vh; }
+.cmp-body { display: flex; flex-direction: column; min-height: 0; flex: 1; overflow: hidden; }
+.cmp-tabs { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 16px 0; }
+.cmp-tabs button { padding: 3px 10px; font-size: 0.8rem; }
+.cmp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 12px 16px 16px; min-height: 0; flex: 1; overflow: hidden; }
+.cmp-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; border: 1px solid var(--border); border-radius: 10px;
+  padding: 10px 12px; background: var(--panel); }
+.cmp-empty { align-items: center; justify-content: center; color: var(--muted); text-align: center; font-size: 0.88rem; }
+.cmp-head { margin-bottom: 6px; }
+.cmp-tag { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; padding: 1px 8px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--muted); }
+.cmp-tag.this { color: var(--st-info-fg); border-color: rgba(59,130,246,0.35); background: rgba(59,130,246,0.1); }
+.cmp-tag.link, .cmp-tag.role { color: var(--st-danger-fg); border-color: rgba(239,68,68,0.35); background: rgba(239,68,68,0.1); }
+.cmp-tag.company { color: var(--st-warning-fg); border-color: rgba(245,158,11,0.35); background: rgba(245,158,11,0.1); }
+.cmp-title { font-size: 0.92rem; margin-bottom: 4px; overflow-wrap: anywhere; }
+.cmp-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 0.8rem; color: var(--muted); }
+.cmp-desc { flex: 1; min-height: 120px; overflow-y: auto; white-space: pre-wrap; font-size: 0.82rem; line-height: 1.45;
+  color: var(--text-soft); border-top: 1px solid var(--border); padding-top: 8px; }
+@media (max-width: 760px) {
+  .cmp-grid { grid-template-columns: 1fr; overflow-y: auto; }
+  .cmp-desc { max-height: 40vh; }
+}

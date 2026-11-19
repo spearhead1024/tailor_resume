@@ -205,6 +205,42 @@ def _remote_submitted_at(job: dict) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _fetch_categories() -> dict[str, str]:
+    """VPS1's main-stack tags: {category id: name} ({} when VPS1 can't be asked)."""
+    try:
+        rows = _api_get("/api/categories") or []
+    except Exception as exc:
+        log.warning("Could not fetch VPS1 categories: %s", exc)
+        return {}
+    return {str(r.get("id") or ""): str(r.get("name") or "").strip() for r in rows if isinstance(r, dict) and r.get("id")}
+
+
+def _ai_fields(job: dict, categories: dict[str, str]) -> dict:
+    """VPS1's own AI check on this job: its main-stack tags (category ids → names) and verdict.
+    Empty when VPS1 has neither — then nothing is written (a value already held stays)."""
+    out: dict = {}
+    stack = [categories[c] for c in (job.get("category_ids") or []) if categories.get(str(c))]
+    if stack:
+        out["tech_stack"] = stack
+    status = str(job.get("ai_status") or "").strip()
+    if status in ("fit", "not_fit", "needs_check"):
+        out.update(ai_status=status, ai_reason=str(job.get("ai_reason") or "").strip(), analyzed=True)
+    return out
+
+
+def sync_ai_fields(remote_jobs: list[dict], categories: dict[str, str]) -> int:
+    """Copy VPS1's tech stack + verdict onto the synced jobs we already hold, where they differ
+    (a job VPS1 analyzed or re-tagged after we synced it). Returns how many jobs changed."""
+    if not categories:
+        return 0
+    wanted = {str(j.get("id") or ""): _ai_fields(j, categories) for j in remote_jobs if j.get("id")}
+    wanted = {rid: f for rid, f in wanted.items() if f}
+    changed = storage.update_synced_ai_fields(wanted)
+    if changed:
+        log.info("VPS1 tech stack / AI verdict copied onto %d synced jobs", changed)
+    return changed
+
+
 def _build_payload(job: dict, status: str) -> dict:
     # Date the job by when it was ADDED on VPS1 (its submitted_at), not by when we
     # happened to sync it. Stamping the sync time made any backlog that arrived late
@@ -413,6 +449,7 @@ def _sync(remote_jobs: list[dict]) -> dict:
     known_remote_ids = storage.sync_remote_ids()
 
     blocked = 0
+    categories = _fetch_categories()
     for listitem in remote_jobs:
         link      = str(listitem.get("link") or "").strip()
         company   = str(listitem.get("company") or "").strip()
@@ -451,6 +488,7 @@ def _sync(remote_jobs: list[dict]) -> dict:
         job = _with_full_description(listitem)
         status = _status_for(job)
         payload = _build_payload(job, status)
+        payload.update(_ai_fields(listitem, categories))
 
         # Defence-in-depth: drop placeholder "Manual Job" even if the title is
         # only resolved after the detail fetch (the early skip above catches the
@@ -482,6 +520,11 @@ def _sync(remote_jobs: list[dict]) -> dict:
         except Exception as exc:
             log.error("Failed to insert %s/%s: %s", company, job_title, exc)
             skipped += 1
+
+    try:
+        sync_ai_fields(remote_jobs, categories)
+    except Exception as exc:
+        log.error("Copying VPS1 tech stacks failed: %s", exc)
 
     log.info(
         "Sync done — fetched=%d inserted=%d skipped=%d blocked=%d",

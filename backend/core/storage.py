@@ -12,6 +12,7 @@ they can be deleted later once the migration is verified.
 """
 from __future__ import annotations
 
+import json
 import hashlib
 import re
 import secrets
@@ -433,6 +434,8 @@ def _default_settings() -> dict:
         # Rolling deadline (hours): how long a job stays in the Resumes queue,
         # and how long a generated resume stays in the Apply queue.
         'job_deadline_hours': 12,
+        # AI job check (core/job_ai.py): a job_adder's job waits as pending until OpenAI checks it.
+        'ai_job_check': True,
         # Interview reminder push notifications. Hours are on the CALLER's clock. Only interviews whose
         # Status is "Scheduled" ever notify. creator_enabled/cbm_enabled are whole-feature admin
         # switches; WHEN each actually fires is each person's OWN lead-time list, set on their own
@@ -1038,7 +1041,43 @@ def _normalize_job(item: dict) -> dict:
         # The LinkedIn posting a job was added from (Easy Bids) — kept for outside-apply jobs too,
         # whose link is the company's own site, so the same posting is recognised again.
         'linkedin_job_id': str(item.get('linkedin_job_id', '')).strip(),
+        # AI job check (core/job_ai.py; synced jobs: VPS1's own verdict + main-stack tags).
+        'tech_stack': _clean_tech_stack(item.get('tech_stack')),
+        'ai_status': str(item.get('ai_status', '') or '').strip() if str(item.get('ai_status', '') or '').strip() in ('fit', 'not_fit', 'needs_check') else '',
+        'ai_reason': str(item.get('ai_reason', '') or '').strip()[:80],
+        'ai_work_mode': str(item.get('ai_work_mode', '') or '').strip()[:20],
+        'ai_error': str(item.get('ai_error', '') or '').strip()[:300],
+        'ai_checked_at': str(item.get('ai_checked_at', '') or '').strip(),
+        'analyzed': bool(item.get('analyzed', False)),
+        # A job_adder's job waits (pending) for the AI check; a 'fit' verdict approves it.
+        'ai_auto': bool(item.get('ai_auto', False)),
+        # Why an admin rejected it — shown to the person who added it.
+        'reject_reason': str(item.get('reject_reason', '') or '').strip()[:300],
+        'rejected_at': str(item.get('rejected_at', '') or '').strip(),
+        'rejected_by_username': str(item.get('rejected_by_username', '') or '').strip(),
     }
+
+
+def _json_list(raw) -> list:
+    """A JSON array read by json_extract (a str) or already decoded → a list ([] for anything else)."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return []
+    return raw if isinstance(raw, list) else []
+
+
+def _clean_tech_stack(raw) -> list[str]:
+    """A job's main tech stack: short names, no repeats (case-insensitive), at most 12."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for s in raw if isinstance(raw, (list, tuple)) else []:
+        name = ' '.join(str(s or '').split())[:40]
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            out.append(name)
+    return out[:12]
 
 
 def _normalize_job_reports(items: Any) -> list[dict]:
@@ -2042,6 +2081,14 @@ class Storage:
                     'source': d.get('source', ''),
                     'created_by_user_id': d.get('created_by_user_id', ''),
                     'created_by_username': d.get('created_by_username', ''),
+                    'tech_stack': d.get('tech_stack', []),
+                    'ai_status': d.get('ai_status', ''),
+                    'ai_reason': d.get('ai_reason', ''),
+                    'ai_auto': d.get('ai_auto', False),
+                    'analyzed': d.get('analyzed', False),
+                    'reject_reason': d.get('reject_reason', ''),
+                    'rejected_by_username': d.get('rejected_by_username', ''),
+                    'approved_by_username': d.get('approved_by_username', ''),
                 })
 
         infos = self.company_info_for_names([j['company'] for j in jobs])
@@ -2384,6 +2431,109 @@ class Storage:
         with session_scope(self.db_path) as session:
             return set(session.scalars(select(JobRow.id).where(JobRow.id.in_(ids), _easy_link_sql())).all())
 
+    # ── AI job check (core/job_ai.py) ───────────────────────────────────────
+    def jobs_due_for_ai(self, *, limit: int = 20, since: datetime | None = None) -> list[str]:
+        """Ids of jobs the AI check should look at next: a pending job waiting for it (ai_auto)
+        first, oldest first; then live jobs this server added since `since` that were never
+        checked (their tech stack). Synced VPS1 jobs never — they carry VPS1's own check.
+        A reported (flagged) job is left for a person."""
+        from sqlalchemy import and_, func, or_
+        analyzed = func.coalesce(func.json_extract(JobRow.data, '$.analyzed'), 0)
+        auto = func.coalesce(func.json_extract(JobRow.data, '$.ai_auto'), 0)
+        flagged = func.coalesce(func.json_extract(JobRow.data, '$.flagged'), 0)
+        source = func.coalesce(func.json_extract(JobRow.data, '$.source'), '')
+        waiting = and_(JobRow.status == 'pending', auto == 1)
+        conds = [waiting]
+        if since is not None:
+            conds.append(and_(JobRow.status == 'approved', JobRow.submitted_at >= since))
+        stmt = (select(JobRow.id)
+                .where(analyzed == 0, flagged == 0, source != 'sync', or_(*conds))
+                .order_by(auto.desc(), JobRow.submitted_at.asc())
+                .limit(max(1, int(limit))))
+        with session_scope(self.db_path) as session:
+            return [str(i) for i in session.scalars(stmt).all()]
+
+    def job_tech_stacks(self, job_ids=(), remote_ids=()) -> dict[str, list[str]]:
+        """{job id: tech stack} for these jobs, plus {"vps1:<VPS1 job id>": stack} for the synced
+        copies of these VPS1 jobs — without loading the jobs' descriptions."""
+        from sqlalchemy import func
+        ids = [str(i) for i in job_ids or () if i]
+        rids = [str(i) for i in remote_ids or () if i]
+        out: dict[str, list[str]] = {}
+        stack = func.json_extract(JobRow.data, '$.tech_stack')
+        rid = func.json_extract(JobRow.data, '$.sync_remote_id')
+        with session_scope(self.db_path) as session:
+            for chunk in (ids[i:i + 500] for i in range(0, len(ids), 500)):
+                for jid, raw in session.execute(select(JobRow.id, stack).where(JobRow.id.in_(chunk))).all():
+                    out[str(jid)] = _clean_tech_stack(_json_list(raw))
+            for chunk in (rids[i:i + 500] for i in range(0, len(rids), 500)):
+                for r, raw in session.execute(select(rid, stack).where(rid.in_(chunk))).all():
+                    out[f"vps1:{r}"] = _clean_tech_stack(_json_list(raw))
+        return out
+
+    def update_synced_ai_fields(self, wanted: dict[str, dict]) -> int:
+        """job_sync: {VPS1 job id: {tech_stack?, ai_status?, ai_reason?, analyzed?}} → written onto
+        our synced copies where something differs. Returns the number of jobs changed."""
+        from sqlalchemy import func
+        if not wanted:
+            return 0
+        rid = func.json_extract(JobRow.data, '$.sync_remote_id')
+        stale: list[tuple[str, dict]] = []
+        with session_scope(self.db_path) as session:
+            rows = session.execute(select(JobRow.id, rid, func.json_extract(JobRow.data, '$.tech_stack'),
+                                          func.json_extract(JobRow.data, '$.ai_status'),
+                                          func.json_extract(JobRow.data, '$.ai_reason'))
+                                   .where(rid.is_not(None), rid != '')).all()
+        for jid, r, stack, status, reason in rows:
+            want = wanted.get(str(r))
+            if not want:
+                continue
+            have = {'tech_stack': _clean_tech_stack(_json_list(stack)), 'ai_status': status or '', 'ai_reason': reason or ''}
+            patch = {k: v for k, v in want.items() if k in have and have[k] != (_clean_tech_stack(v) if k == 'tech_stack' else v)}
+            if patch:
+                if 'ai_status' in want:
+                    patch['analyzed'] = True
+                stale.append((str(jid), patch))
+        for jid, patch in stale:
+            self.update_job(jid, patch)
+        return len(stale)
+
+    def similar_jobs(self, job_id: str, limit: int = 10) -> list[dict]:
+        """Up to `limit` OTHER jobs that look like this one, for a side-by-side check: the same link
+        first, then the same company + title, then the same company — newest first in each.
+        Deleted jobs are left out. Each carries its description (capped) and match_kind
+        ('link' | 'role' | 'company')."""
+        from sqlalchemy import or_
+        jid = str(job_id or '').strip()
+        with session_scope(self.db_path) as session:
+            me = session.get(JobRow, jid)
+            if me is None:
+                return []
+            conds = []
+            if me.normalized_url:
+                conds.append(JobRow.normalized_url == me.normalized_url)
+            if me.company_key:
+                conds.append(JobRow.company_key == me.company_key)
+            if not conds:
+                return []
+            rows = session.scalars(select(JobRow).where(JobRow.id != jid, JobRow.status != 'deleted', or_(*conds))
+                                   .order_by(JobRow.submitted_at.desc().nullslast()).limit(200)).all()
+            found = []
+            for r in rows:
+                kind = ('link' if me.normalized_url and r.normalized_url == me.normalized_url
+                        else 'role' if me.title_key and r.title_key == me.title_key else 'company')
+                d = _normalize_job(dict(r.data or {}))
+                found.append({
+                    'id': d['id'], 'company': d['company'], 'job_title': d['job_title'], 'link': d['link'],
+                    'region': d['region'], 'status': d['status'], 'submitted_at': d['submitted_at'],
+                    'created_by_username': d['created_by_username'], 'tech_stack': d['tech_stack'],
+                    'ai_status': d['ai_status'], 'ai_reason': d['ai_reason'],
+                    'description': d['description'][:8000], 'match_kind': kind,
+                })
+        order = {'link': 0, 'role': 1, 'company': 2}
+        found.sort(key=lambda j: order[j['match_kind']])      # stable: newest first within a kind
+        return found[:max(1, int(limit))]
+
     def find_job_by_url(self, url: str, exclude_job_id: str = '') -> dict | None:
         normalized = normalize_job_url(url)
         if not normalized:
@@ -2528,6 +2678,14 @@ class Storage:
                 recorded_at=_parse_iso_datetime(entry['recorded_at']) or datetime.utcnow(),
                 data=entry,
             ))
+
+    def get_openai_calls_since(self, since_iso: str) -> list[dict]:
+        """OpenAI calls recorded on or after this date/time (UTC 'YYYY-MM-DD[THH:MM:SS]')."""
+        since = _parse_iso_datetime(since_iso) or datetime.utcnow()
+        with session_scope(self.db_path) as session:
+            rows = session.scalars(select(OpenAICallRow).where(OpenAICallRow.recorded_at >= since)
+                                   .order_by(OpenAICallRow.recorded_at)).all()
+            return [_normalize_openai_call(dict(row.data or {})) for row in rows]
 
     def get_openai_calls(self) -> list[dict]:
         with session_scope(self.db_path) as session:

@@ -7,6 +7,13 @@ import { useToast } from '../lib/toast';
 import { etDateShort, etDateTime, workDayKey, workDayLong, todayWorkDayKey } from '../lib/etTime';
 import { ApplyBadge, ApplyTypeSelect } from '../lib/ApplyBadge';
 import CompanyBadge from '../lib/CompanyBadge';
+import { TechStack, AiBadge, aiRowStyle, RejectDialog, CompareDialog } from '../lib/JobAi';
+
+type AiStatus = { enabled: boolean; key_present: boolean; model: string; last_error: string; last_error_at: string;
+  retry_at: string; spent_today_usd: number; spent_30d_usd: number; calls_30d: number };
+const usd = (n: number) => `$${(n || 0) < 1 ? (n || 0).toFixed(3) : (n || 0).toFixed(2)}`;
+const stackText = (s: any) => (Array.isArray(s) ? s.join(', ') : '');
+const stackList = (t: string) => String(t || '').split(/[,\n]/).map((x) => x.trim()).filter(Boolean);
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const BLANK_JOB = { company: '', job_title: '', description: '', link: '', region: 'US', note: '' };
@@ -200,8 +207,25 @@ export default function Jobs() {
     placeholderData: keepPreviousData,
     // While any visible company is still being checked (a just-added job), poll so
     // its startup/size badge fills in on its own; stop once all are resolved.
-    refetchInterval: (q) => (q.state.data?.jobs || []).some((j: any) => j.company_info?.status === 'pending') ? 5000 : false,
+    // A job the AI check is still reading shows "Checking…" — poll faster until its verdict is in.
+    refetchInterval: (q) => {
+      const list = q.state.data?.jobs || [];
+      if (list.some((j: any) => j.ai_auto && !j.analyzed)) return 3000;
+      return list.some((j: any) => j.company_info?.status === 'pending') ? 5000 : false;
+    },
   });
+
+  // The Pending review: the AI check's verdicts, side by side with the jobs they resemble.
+  const isPendingView = isAdmin && statusFilter === 'pending' && !reportedOnly;
+  const { data: ai } = useQuery({
+    queryKey: ['jobs', 'ai-status'],
+    queryFn: () => api.get<AiStatus>('/api/jobs/ai-status'),
+    enabled: isPendingView,
+    refetchInterval: isPendingView ? 30000 : false,
+  });
+  const [rejecting, setRejecting] = useState<{ ids: string[]; single?: any } | null>(null);
+  const [comparing, setComparing] = useState<string | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
 
   // Options for the "Added by" filter — adders with jobs in the current filters (period, status,
   // region, search…), each with that count. Kept while the next one loads so the list doesn't blink.
@@ -289,7 +313,45 @@ export default function Jobs() {
     toast(`${label}: ${ok} done${fail ? `, ${fail} failed` : ''}`, fail ? 'error' : 'success');
   }
   const bulkApprove = () => runBulk('Approved', (id) => api.patch(`/api/jobs/${id}`, { payload: { status: 'approved' } }));
-  const bulkReject = () => runBulk('Rejected', (id) => api.patch(`/api/jobs/${id}`, { payload: { status: 'rejected' } }));
+  // Reject asks for a reason (the adder sees it) — RejectDialog → POST /api/jobs/reject.
+  const bulkReject = () => setRejecting({ ids: [...selected] });
+  async function doReject(ids: string[], reason: string) {
+    try {
+      const r = await api.post<{ rejected: number }>('/api/jobs/reject', { ids, reason });
+      toast(`Rejected ${r.rejected} job${r.rejected === 1 ? '' : 's'}`, 'success');
+      setSelected(new Set()); setRejecting(null); setComparing(null);
+      qc.invalidateQueries({ queryKey: ['jobs'] });
+    } catch (e: any) { toast(formatJobError(e, 'Failed to reject'), 'error'); }
+  }
+  async function approveIds(ids: string[], all = false) {
+    try {
+      const r = await api.post<{ approved: number }>('/api/jobs/approve', all ? { all: true } : { ids });
+      toast(`Approved ${r.approved} job${r.approved === 1 ? '' : 's'}`, 'success');
+      setSelected(new Set()); setComparing(null);
+      qc.invalidateQueries({ queryKey: ['jobs'] });
+    } catch (e: any) { toast(formatJobError(e, 'Failed to approve'), 'error'); }
+  }
+  const approveAllPending = () => {
+    const n = counts.pending ?? 0;
+    if (!n || !confirm(`Approve ALL ${n} pending job(s) — including the ones the AI marked Not fit or Check? Reported jobs are left out.`)) return;
+    approveIds([], true);
+  };
+  // Run the AI check now (25 per call). It saves each verdict + tech stack; it never changes a status.
+  async function analyzeIds(ids: string[]) {
+    if (!ids.length) return;
+    setAnalyzing(true);
+    let done = 0; const errors: string[] = [];
+    try {
+      for (let i = 0; i < ids.length; i += 25) {
+        const r = await api.post<{ results: any[]; errors: { error: string }[] }>('/api/jobs/analyze', { ids: ids.slice(i, i + 25) });
+        done += r.results.length; errors.push(...r.errors.map((e) => e.error));
+        qc.invalidateQueries({ queryKey: ['jobs'] });
+        if (r.errors.length && !r.results.length) break;
+      }
+      toast(`AI checked ${done} job${done === 1 ? '' : 's'}${errors.length ? ` — ${errors[0]}` : ''}`, errors.length ? 'error' : 'success');
+    } catch (e: any) { toast(formatJobError(e, 'AI check failed'), 'error'); }
+    finally { setAnalyzing(false); }
+  }
   // Copy the job links of the selected jobs, one per line, in the order shown on the page.
   const copyLinks = async () => {
     const links = jobs.filter((j: any) => selected.has(j.id)).map((j: any) => String(j.link || '').trim()).filter(Boolean);
@@ -343,6 +405,7 @@ export default function Jobs() {
         company: full.company || '', job_title: full.job_title || '',
         link: full.link || '', region: normRegion(full.region),
         description: full.description || '', note: full.note || '',
+        tech_stack: stackText(full.tech_stack),
       });
     } catch {
       setEditDraft({
@@ -465,6 +528,32 @@ export default function Jobs() {
         <span className="muted">/ {counts.total ?? 0} match{(counts.total ?? 0) === 1 ? '' : 'es'} filters</span>
       </div>
 
+      {/* Pending review: the AI check's state + the whole-queue actions */}
+      {isPendingView && (
+        <div className={`ai-bar${ai && (ai.last_error || !ai.enabled) ? ' err' : ''}`}>
+          <strong>AI check</strong>
+          {!ai ? <span className="spinner" />
+            : !ai.key_present ? <span>off — no OpenAI key on the server (OPENAI_API_KEY in .env)</span>
+            : !ai.enabled ? <span>off (Settings → AI job check) — a job adder’s job goes live without a check</span>
+            : <span className="muted" title={`${ai.calls_30d} checks in the last 30 days`}>
+                on · {ai.model} · today {usd(ai.spent_today_usd)} · 30 days {usd(ai.spent_30d_usd)}
+              </span>}
+          {ai?.last_error && <span>⚠ {ai.last_error}{ai.retry_at ? ` (retrying ${etDateTime(ai.retry_at)})` : ''}</span>}
+          <span className="muted" style={{ fontSize: '0.8rem' }}>
+            Fit jobs are approved by the check · Not fit / Check wait here for you
+          </span>
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+            <button className="secondary" disabled={analyzing || !jobs.some((j: any) => !j.analyzed)}
+              onClick={() => analyzeIds(jobs.filter((j: any) => !j.analyzed).map((j: any) => j.id))}
+              title="Run the AI check on the jobs on this page it has not checked yet">
+              {analyzing ? <span className="spinner" /> : '✦ Check unchecked'}
+            </button>
+            <button className="secondary" disabled={!(counts.pending ?? 0)} onClick={approveAllPending}
+              title="Approve every pending job (reported ones are left out)">✓ Approve all ({counts.pending ?? 0})</button>
+          </div>
+        </div>
+      )}
+
       {/* Add Job form */}
       {showForm && (
         <div className="card" style={{ marginBottom: '1rem' }}>
@@ -534,8 +623,12 @@ export default function Jobs() {
         {isAdmin && selected.size > 0 && (
           <div className="card" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '0.5rem 0.8rem', marginBottom: 8 }}>
             <strong>{selected.size} selected</strong>
-            <button className="secondary" onClick={bulkApprove} disabled={bulkBusy}>Approve</button>
-            <button className="secondary" onClick={bulkReject} disabled={bulkBusy}>Reject</button>
+            <button className="secondary" onClick={isPendingView ? () => approveIds([...selected]) : bulkApprove} disabled={bulkBusy}>Approve</button>
+            <button className="secondary" onClick={bulkReject} disabled={bulkBusy}>Reject…</button>
+            <button className="secondary" onClick={() => analyzeIds([...selected])} disabled={bulkBusy || analyzing}
+              title="Run the AI check now on the selected jobs (verdict + tech stack; the status stays)">
+              {analyzing ? <span className="spinner" /> : '✦ AI check'}
+            </button>
             <button className="secondary" onClick={copyLinks} disabled={bulkBusy} title="Copy the job links of the selected jobs, one per line">⧉ Copy links</button>
             <button className="danger" onClick={bulkDelete} disabled={bulkBusy}>Delete</button>
             <button className="ghost" style={{ marginLeft: 'auto' }} onClick={() => setSelected(new Set())} disabled={bulkBusy}>Clear</button>
@@ -552,7 +645,8 @@ export default function Jobs() {
                     onChange={toggleAll} />
                 </th>
               )}
-              <th>Company</th><th style={{ width: '22%' }}>Job title</th><th>Region</th><th>Status</th>
+              <th>Company</th><th style={{ width: '24%' }}>Job title</th><th>Region</th><th>Status</th>
+              <th title="The AI check: Fit / Not fit / Check, and why">AI</th>
               <th style={{ whiteSpace: 'nowrap' }}>AddedAt</th>
               {isAdmin && <th style={{ whiteSpace: 'nowrap' }}>Added by</th>}
               {isAdmin && <th></th>}
@@ -562,7 +656,7 @@ export default function Jobs() {
             {groups.map((group) => (
               <React.Fragment key={group.key}>
                 <tr>
-                  <td colSpan={isAdmin ? 8 : 5} style={{
+                  <td colSpan={isAdmin ? 9 : 6} style={{
                     padding: '0.5rem 0.75rem', fontWeight: 600, fontSize: '0.85rem',
                     color: 'var(--muted)', background: 'var(--panel-2)', borderTop: '2px solid var(--border)',
                   }}>
@@ -571,7 +665,7 @@ export default function Jobs() {
                 </tr>
                 {group.jobs.map((job) => (
                   <React.Fragment key={job.id}>
-                    <tr style={job.flagged ? { background: 'rgba(220,38,38,0.06)' } : undefined}>
+                    <tr style={job.flagged ? { background: 'rgba(220,38,38,0.06)' } : isPendingView ? aiRowStyle(job) : undefined}>
                       {isAdmin && (
                         <td style={{ width: 28 }}>
                           <input type="checkbox" checked={selected.has(job.id)} onChange={() => toggleOne(job.id)} />
@@ -587,21 +681,48 @@ export default function Jobs() {
                             onChanged={() => qc.invalidateQueries({ queryKey: ['jobs'] })} />
                         </div>
                       </td>
-                      <td style={{ maxWidth: 260, overflowWrap: 'anywhere' }}>{job.link ? <a href={job.link} target="_blank" rel="noreferrer">{job.job_title}</a> : job.job_title}<ApplyBadge type={job.apply_type} /></td>
+                      <td style={{ maxWidth: 300, overflowWrap: 'anywhere' }}>
+                        {job.link ? <a href={job.link} target="_blank" rel="noreferrer">{job.job_title}</a> : job.job_title}<ApplyBadge type={job.apply_type} />
+                        <TechStack stack={job.tech_stack} style={{ display: 'flex', marginTop: 3 }} />
+                      </td>
                       <td>{job.region}</td>
-                      <td><span className={`pill ${job.status}`}>{job.status}</span></td>
+                      <td>
+                        <span className={`pill ${job.status}`}
+                          title={job.status === 'approved' && job.approved_by_username ? `Approved by ${job.approved_by_username}` : undefined}>{job.status}</span>
+                        {job.status === 'approved' && job.approved_by_username === 'AI check' && <div className="muted" style={{ fontSize: '0.72rem', marginTop: 2 }}>by AI check</div>}
+                        {job.status === 'rejected' && job.reject_reason && (
+                          <div className="reject-why" title={job.rejected_by_username ? `Rejected by ${job.rejected_by_username}` : undefined}>Why: {job.reject_reason}</div>
+                        )}
+                        {!isAdmin && job.status === 'pending' && job.analyzed && job.ai_status !== 'fit' && (
+                          <div className="muted" style={{ fontSize: '0.74rem', marginTop: 2 }}>Waiting for an admin</div>
+                        )}
+                      </td>
+                      <td><AiBadge job={job} /></td>
                       <td style={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }} title="US Eastern time">{etDateTime(job.submitted_at || job.approved_at)}</td>
                       {isAdmin && (
                         <td style={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }}>
                           {job.created_by_username || <span className="muted">—</span>}
                         </td>
                       )}
-                      {isAdmin && (
+                      {isAdmin && isPendingView && (
+                        <td style={{ whiteSpace: 'nowrap' }}>
+                          <div className="row-acts">
+                            <button onClick={() => approveIds([job.id])} title="Approve — bidders get it">✓ Approve</button>
+                            <button className="danger" onClick={() => setRejecting({ ids: [job.id], single: job })} title="Reject with a reason the adder sees">✕ Reject</button>
+                            <button className="secondary" onClick={() => setComparing(job.id)} title="Side by side with up to 10 similar jobs (same link / company)">⇆ Compare</button>
+                            <button className="secondary" onClick={() => editingId === job.id ? setEditingId(null) : startEdit(job)}>
+                              {editingId === job.id ? 'Cancel' : 'Edit'}
+                            </button>
+                          </div>
+                        </td>
+                      )}
+                      {isAdmin && !isPendingView && (
                         <td style={{ whiteSpace: 'nowrap' }}>
                           <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
                             <select value={job.status} disabled={updateMutation.isPending}
                               onChange={(e) => {
                                 const next = e.target.value;
+                                if (next === 'rejected') { setRejecting({ ids: [job.id], single: job }); return; }
                                 if (next === 'deleted' && !confirm(`Mark "${job.company} — ${job.job_title}" as deleted? It will be permanently hidden and never re-synced.`)) return;
                                 updateMutation.mutate({ id: job.id, payload: { status: next } });
                               }}
@@ -621,7 +742,7 @@ export default function Jobs() {
                     </tr>
                     {job.flagged && (job.reports?.length || 0) > 0 && (
                       <tr>
-                        <td colSpan={isAdmin ? 8 : 5} style={{ padding: '0.75rem 1rem', background: 'rgba(220,38,38,0.06)', borderBottom: '1px solid var(--border)' }}>
+                        <td colSpan={isAdmin ? 9 : 6} style={{ padding: '0.75rem 1rem', background: 'rgba(220,38,38,0.06)', borderBottom: '1px solid var(--border)' }}>
                           <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: 12 }}>
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <div style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--danger,#dc2626)', marginBottom: 4 }}>
@@ -647,7 +768,8 @@ export default function Jobs() {
                                 <button className="danger"
                                   disabled={updateMutation.isPending}
                                   title="Reject the job — keeps it out of circulation"
-                                  onClick={() => updateMutation.mutate({ id: job.id, payload: { status: 'rejected' } })}>
+                                  onClick={() => isAdmin ? setRejecting({ ids: [job.id], single: job })
+                                    : updateMutation.mutate({ id: job.id, payload: { status: 'rejected' } })}>
                                   Reject job
                                 </button>
                               </div>
@@ -658,7 +780,7 @@ export default function Jobs() {
                     )}
                     {editingId === job.id && (
                       <tr>
-                        <td colSpan={isAdmin ? 8 : 5} style={{ padding: '1rem', background: 'var(--panel-2)' }}>
+                        <td colSpan={isAdmin ? 9 : 6} style={{ padding: '1rem', background: 'var(--panel-2)' }}>
                           <div className="row">
                             <div className="field"><label>Company{REQ}</label><input value={editDraft.company} onChange={(e) => setEditDraft({ ...editDraft, company: e.target.value })} /></div>
                             <div className="field"><label>Job title{REQ}</label><input value={editDraft.job_title} onChange={(e) => setEditDraft({ ...editDraft, job_title: e.target.value })} /></div>
@@ -673,12 +795,19 @@ export default function Jobs() {
                           </div>
                           <DuplicateNotice checking={editDup.checking} conflicts={editDup.conflicts} />
                           <div className="field"><label>Description{REQ}</label><textarea rows={6} value={editDraft.description} onChange={(e) => setEditDraft({ ...editDraft, description: e.target.value })} /></div>
+                          {isAdmin && (
+                            <div className="field">
+                              <label>Tech stack <span className="muted" style={{ textTransform: 'none', fontWeight: 400 }}>(comma-separated — the AI check fills it in)</span></label>
+                              <input value={editDraft.tech_stack || ''} placeholder="React, TypeScript, Node.js"
+                                onChange={(e) => setEditDraft({ ...editDraft, tech_stack: e.target.value })} />
+                            </div>
+                          )}
                           <div className="field">
                             <label>Application questions (one per line)</label>
                             <textarea rows={4} value={editDraft.note} onChange={(e) => setEditDraft({ ...editDraft, note: e.target.value })} />
                           </div>
                           <div style={{ display: 'flex', gap: 8 }}>
-                            <button onClick={() => updateMutation.mutate({ id: job.id, payload: editDraft })} disabled={editProblems.length > 0 || updateMutation.isPending || editDup.conflicts.length > 0}
+                            <button onClick={() => updateMutation.mutate({ id: job.id, payload: isAdmin ? { ...editDraft, tech_stack: stackList(editDraft.tech_stack) } : (({ tech_stack: _t, ...rest }: any) => rest)(editDraft) })} disabled={editProblems.length > 0 || updateMutation.isPending || editDup.conflicts.length > 0}
                               title={editProblems.join(' · ') || undefined}>
                               {updateMutation.isPending ? <span className="spinner" /> : 'Save changes'}
                             </button>
@@ -697,6 +826,23 @@ export default function Jobs() {
           </tbody>
         </table>
         </>
+      )}
+
+      {rejecting && (
+        <RejectDialog count={rejecting.ids.length} single={rejecting.single}
+          onClose={() => setRejecting(null)} onConfirm={(reason) => doReject(rejecting.ids, reason)} />
+      )}
+      {comparing && (
+        <CompareDialog jobId={comparing} onClose={() => setComparing(null)}
+          actions={(job) => (
+            <>
+              <span className="muted" style={{ fontSize: '0.8rem' }}>Same posting again? Reject it. A different role? Approve it.</span>
+              <div style={{ flex: 1 }} />
+              {job.status !== 'approved' && <button onClick={() => approveIds([job.id])}>✓ Approve</button>}
+              {job.status !== 'rejected' && <button className="danger" onClick={() => setRejecting({ ids: [job.id], single: job })}>✕ Reject</button>}
+              <button className="secondary" onClick={() => setComparing(null)}>Close</button>
+            </>
+          )} />
       )}
 
       {/* Pagination — bottom */}

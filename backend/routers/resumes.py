@@ -792,6 +792,8 @@ def bid_easy(body: dict, user: dict = Depends(get_current_user)):
         })
         if not storage.upsert_job(payload):
             return {"state": "blocked", "conflicts": [{"kind": "blacklist", "message": "Blocked by the blacklist (Settings → Blacklist)."}]}
+        from core import job_ai
+        job_ai.kick()                          # its tech stack + verdict (it is live already)
         job = storage.get_job_by_id(payload["id"]) or payload
     item = _easy_item(job)
     return {"state": "added", "match": "", "job": item, "profile": _easy_profile_state(profile, job, item)}

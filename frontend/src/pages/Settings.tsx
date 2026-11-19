@@ -268,6 +268,23 @@ export default function Settings() {
               {deadlineDirty && <span className="muted" style={{ fontSize: '0.82rem' }}>Unsaved changes</span>}
             </div>
           </div>
+
+          <p className="muted" style={{ marginTop: '1.5rem' }}>
+            AI job check — OpenAI reads each new job: remote or not, software or not, paid, security clearance, and
+            its main tech stack. A <strong>job adder’s</strong> job waits in <strong>Jobs → Pending</strong> until it
+            is checked: <em>Fit</em> (clearly remote) is approved at once, <em>Not fit</em> and <em>Check</em> wait
+            there for an admin. Other jobs only get their tech stack. About $0.002 per job.
+          </p>
+          <div className="card">
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: '0.92rem' }}>
+              <input type="checkbox" checked={data?.ai_job_check !== false} disabled={saveMutation.isPending}
+                onChange={(e) => save({ ai_job_check: e.target.checked }, 'AI job check')} />
+              <strong>AI job check</strong>
+              <span className="muted" style={{ fontSize: '0.84rem' }}>
+                {data?.ai_job_check !== false ? 'on' : 'off — a job adder’s job goes live without a check'}
+              </span>
+            </label>
+          </div>
         </>
       )}
 

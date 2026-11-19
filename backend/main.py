@@ -126,6 +126,16 @@ def _start_reminder_scheduler():
     threading.Thread(target=notify.scheduler_loop, kwargs={"interval_s": 60}, daemon=True).start()
 
 
+# The AI job check (core/job_ai.py): one background thread that checks each new job with OpenAI.
+# JOB_AI_WORKER=0 turns it off in this process (e.g. a test run against a copy of the data).
+@app.on_event("startup")
+def _start_job_ai():
+    if os.environ.get("JOB_AI_WORKER", "1") == "0":
+        return
+    from core import job_ai
+    job_ai.start()
+
+
 @app.on_event("shutdown")
 def _flush_board_notifications():
     """Board notifications wait a minute for the editor to finish (core/live.py). Announce any still
