@@ -376,6 +376,7 @@ def search_applied_resumes(
     total = len(rows)
     start = (page - 1) * page_size
     page_rows = rows[start:start + page_size]
+    _add_stack_and_profile_label(page_rows, profiles)
 
     return {
         "results": page_rows,
@@ -391,6 +392,29 @@ def search_applied_resumes(
         "bidders": sorted((b for b in facet_bidders if active is None or b.lower() in active
                            or b.lower() == bl), key=str.lower),
     }
+
+
+def _profile_label(name: str, region: str) -> str:
+    """The Interviews board's name for a profile: "Name(REGION)" (routers/interviews.list_profiles)."""
+    name, region = str(name or "").strip(), str(region or "").strip()
+    return f"{name}({region})" if name and region else name
+
+
+def _add_stack_and_profile_label(rows: list[dict], profiles: dict) -> None:
+    """Each Applied row gets its job's tech stack (the AI check / VPS1's tags) and the profile's
+    board label "Name(REGION)" — what Schedule writes onto the Interviews board."""
+    local_jobs = [r["job_id"] for r in rows if r.get("source") != vps1_adapt.SOURCE_REMOTE and r.get("job_id")]
+    remote_jobs = [r["job_id"] for r in rows if r.get("source") == vps1_adapt.SOURCE_REMOTE and r.get("job_id")]
+    stacks = storage.job_tech_stacks(local_jobs, remote_jobs) if (local_jobs or remote_jobs) else {}
+    remote_regions: dict[str, str] = {}
+    if any(r.get("source") == vps1_adapt.SOURCE_REMOTE for r in rows):
+        remote_regions = {f"vps1:{p.get('id', '')}": str(p.get("region") or "") for p in storage.get_vps1_profiles()}
+    for r in rows:
+        remote = r.get("source") == vps1_adapt.SOURCE_REMOTE
+        r["tech_stack"] = stacks.get(f"vps1:{r['job_id']}" if remote else r.get("job_id", ""), [])
+        region = remote_regions.get(r.get("profile_id", ""), "") if remote else (profiles.get(r.get("profile_id"), {}) or {}).get("region", "")
+        r["profile_region"] = region
+        r["profile_label"] = _profile_label(r.get("profile_name", ""), region)
 
 
 @router.get("/{resume_id}/job")
@@ -415,6 +439,7 @@ def get_resume_job_detail(resume_id: str, user: dict = Depends(get_current_user)
             "status": app.get("current_status", ""),
             "description": str(app.get("target_role") or ""),   # VPS_1 doesn't ship the JD in the summary
             "job_exists": bool(app.get("job_id")),
+            "tech_stack": storage.job_tech_stacks((), [app.get("job_id", "")]).get(f"vps1:{app.get('job_id', '')}", []),
         }
 
     rec = storage.get_generated_resume_by_id(resume_id) if hasattr(storage, "get_generated_resume_by_id") else None
@@ -434,6 +459,7 @@ def get_resume_job_detail(resume_id: str, user: dict = Depends(get_current_user)
         "status": job.get("status", ""),
         "description": description,
         "job_exists": bool(job),
+        "tech_stack": job.get("tech_stack") or [],
     }
 
 

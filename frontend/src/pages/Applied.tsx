@@ -6,6 +6,7 @@ import { userDateTime } from '../lib/etTime';
 import { useAuth } from '../lib/auth';
 import { useUrlState, useOnChange } from '../lib/urlState';
 import { ApplyBadge, ApplyTypeSelect } from '../lib/ApplyBadge';
+import { TechStack } from '../lib/JobAi';
 
 // The From/To filter's day: from 5pm GMT+9 to 5pm GMT+9 the next day. ("Etc/GMT-9" IS GMT+9 —
 // the Etc zones' sign is inverted.)
@@ -20,6 +21,8 @@ type Row = {
   job_region: string;
   profile_id: string;
   profile_name: string;
+  profile_label?: string;  // "Name(REGION)" — the Interviews board's Account Profile option
+  tech_stack?: string[];   // the job's main tech stack (AI check / VPS1's tags)
   bidder: string;
   applied_at: string;
   created_at: string;
@@ -36,7 +39,7 @@ type SearchResp = {
 };
 type JobDetail = {
   job_id: string; company: string; job_title: string; link: string;
-  region: string; status: string; description: string; job_exists: boolean;
+  region: string; status: string; description: string; job_exists: boolean; tech_stack?: string[];
 };
 
 export default function Applied() {
@@ -117,11 +120,14 @@ export default function Applied() {
       const link = (r.job_link || jd?.link || '').trim();
       const desc = (jd?.description || '').trim();
       const c_jd = [link && `Job link: ${link}`, desc].filter(Boolean).join('\n\n');
+      // Skillset = the job's main tech stack; Account Profile = the board's "Name(REGION)" option.
+      const stack = (jd?.tech_stack?.length ? jd.tech_stack : r.tech_stack) || [];
       await api.post('/api/interviews/rows', {
         cells: {
           c_title: r.job_title || '',
           c_company: r.job_company || '',
-          c_account: r.profile_name || '',
+          c_skill: stack.slice(0, 6).join(', '),
+          c_account: r.profile_label || r.profile_name || '',
           c_resume: `/api/resumes/${r.saved_resume_id}/pdf`,   // downloadable resume link (see ResumeCell)
           c_jd,   // Index + status/approved/type defaults are filled server-side (see add_row)
         },
@@ -232,8 +238,9 @@ function RowView({ row, open, onToggle, onPdf, onSchedule, tz }: {
         <td>{row.job_company || '—'}</td>
         <td>{row.job_link
           ? <a href={row.job_link} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>{row.job_title}</a>
-          : row.job_title}<ApplyBadge type={row.apply_type} /></td>
-        <td>{row.profile_name || '—'}</td>
+          : row.job_title}<ApplyBadge type={row.apply_type} />
+          <TechStack stack={row.tech_stack} style={{ display: 'flex', marginTop: 3 }} /></td>
+        <td title={row.profile_label || undefined}>{row.profile_name || '—'}</td>
         <td>{row.bidder || '—'}</td>
         <td style={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }}>{userDateTime(row.applied_at || row.created_at, tz)}</td>
         <td style={{ whiteSpace: 'nowrap' }}>
