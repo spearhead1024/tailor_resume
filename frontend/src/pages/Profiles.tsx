@@ -62,6 +62,25 @@ function errText(e: any, fallback: string): string {
   return typeof d === 'string' && d ? d : fallback;
 }
 
+// The extension's CV file name (extension/lib/save-file.js cvPdfName — keep the two the same).
+function cvFileName(p: any, job: { company?: string; job_title?: string } | null): string {
+  const name = String(p?.name || '').normalize('NFC').replace(/[\\/:*?"<>|\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ').trim().replace(/^[.\s]+|[.\s]+$/g, '').slice(0, 120).trim();
+  const tpl = String(p?.resume_filename || '').trim();
+  if (!tpl) return `${name || 'Resume'} resume.pdf`;
+  const parts = name.split(' ').filter(Boolean);
+  const d = new Date(); const pad = (n: number) => String(n).padStart(2, '0');
+  const vals: Record<string, string> = {
+    name, first: parts[0] || '', last: parts.length > 1 ? parts[parts.length - 1] : '',
+    company: job?.company || '', role: job?.job_title || '',
+    date: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
+  };
+  const out = tpl.replace(/\{(name|first|last|company|role|date)\}/gi, (_m, k: string) => String(vals[k.toLowerCase()] || '').trim())
+    .replace(/\.pdf$/i, '').normalize('NFC').replace(/\s+/g, '_').replace(/[^\p{L}\p{N}._-]+/gu, '')
+    .replace(/_{2,}/g, '_').replace(/^[._-]+|[._-]+$/g, '').slice(0, 120);
+  return `${out || name || 'Resume'}.pdf`;
+}
+
 export default function Profiles() {
   const { user } = useAuth();
   const qc = useQueryClient();
@@ -561,6 +580,33 @@ export default function Profiles() {
                       <ReadValue value={((selected.tech_stacks as string[]) || []).length
                         ? (selected.tech_stacks as string[]).join(', ')
                         : 'All-Stack (matches every job)'} />
+                    </Field>
+                  ) : null}
+                </div>
+              )}
+
+              {/* ── CV file name (admin) — what the extension's Download CV saves the PDF as ── */}
+              {isAdmin && (
+                <div style={{ marginTop: '1.25rem', borderTop: '1px solid var(--border)', paddingTop: '1rem' }}>
+                  <div style={{ fontWeight: 600, marginBottom: '0.75rem' }}>CV file name</div>
+                  {editing ? (
+                    <Field label="Template (empty = “Name resume.pdf”)">
+                      <input value={selected.resume_filename || ''} maxLength={120}
+                        onChange={(e) => setSelected({ ...selected, resume_filename: e.target.value })}
+                        placeholder="e.g. {first}_{last}_{company}_{role}" />
+                      <div className="muted" style={{ fontSize: '0.8rem', marginTop: 4 }}>
+                        Use <code>{'{name}'}</code> <code>{'{first}'}</code> <code>{'{last}'}</code> <code>{'{company}'}</code> <code>{'{role}'}</code> <code>{'{date}'}</code>.
+                        {' '}Example: <code>{cvFileName(selected, { company: 'Acme Inc', job_title: 'Senior Backend Engineer' })}</code>
+                        {/\{(company|role|date)\}/i.test(selected.resume_filename || '')
+                          ? ' — each job gets its own file.'
+                          : ' — every new CV replaces the last one in Downloads.'}
+                      </div>
+                    </Field>
+                  ) : selected.id ? (
+                    <Field label="CV file name">
+                      <ReadValue value={selected.resume_filename
+                        ? `${selected.resume_filename}  →  ${cvFileName(selected, { company: 'Acme Inc', job_title: 'Senior Backend Engineer' })}`
+                        : `${cvFileName(selected, null)} (default)`} />
                     </Field>
                   ) : null}
                 </div>

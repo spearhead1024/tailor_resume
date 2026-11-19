@@ -567,6 +567,7 @@ def _bid_public_profile(p: dict) -> dict:
         "github": p.get("github", ""),
         "portfolio": p.get("portfolio", ""),
         "status": p.get("status", "active"),
+        "resume_filename": p.get("resume_filename", ""),     # the CV's file-name template
         "education_history": [
             {
                 "university": e.get("university", ""),

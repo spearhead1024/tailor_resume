@@ -25,7 +25,7 @@ import { linkedinJobId, readLinkedInJob, readOutsideLink } from './linkedin.js';
 import { CLASSIC_ON, CLASSIC_SEARCH, classicTabKey, classicUrl, isAiSearch, isClassicSearch, describeSearch, applicationOpen } from '../lib/classic.js';
 import { gpt, gptSnapshot, onGptChange, requestChatAccess, threadKey } from '../gpt/client.js';
 import { UPDATE_KEY, diskVersion } from '../lib/self-update.js';
-import { saveFile, cvPdfName } from '../lib/save-file.js';
+import { saveFile, cvPdfName, nameHasJob } from '../lib/save-file.js';
 
 // ---------- tiny utils ----------
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -306,7 +306,8 @@ function cvBlob(id) {
 // "<Profile name> resume.pdf" — the same name the web app's Bid tab saves, so either place
 // replaces the file the other saved. Made safe for every OS (Windows forbids \/:*?"<>| and
 // a trailing dot or space; Chrome rejects control characters and a leading dot).
-const cvFilename = () => cvPdfName(selectedProfile()?.name);
+// A profile with its own file-name template (Profiles → CV file name) names it after the job.
+const cvFilename = () => cvPdfName(selectedProfile(), currentJob());
 
 // ---------- alerts ----------
 // Success notes fade after 6s. A network error fades after 10s, or the moment the
@@ -1740,7 +1741,7 @@ function patchBuild() {
     <div id="gptLine"></div>
     ${S.resumeId ? `
       <button class="success lg dl-btn" data-action="download" ${b ? 'disabled' : ''} title="Saves it straight to Downloads, replacing the previous file of the same name">${b === 'dl' ? spin : I.download} Download CV</button>
-      <div class="muted dl-hint">Saves “${esc(cvFilename())}” to Downloads — replaces the old one.</div>` : ''}
+      <div class="muted dl-hint">Saves “${esc(cvFilename())}” to Downloads${nameHasJob(selectedProfile()?.resume_filename) ? '' : ' — replaces the old one'}.</div>` : ''}
     ${manual ? `
       <div class="build-row">
         <button class="secondary" data-action="copyPrompt" ${b ? 'disabled' : ''}>${b === 'prompt' ? spin : I.sparkle} Copy GPT Prompt</button>

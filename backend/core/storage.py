@@ -704,6 +704,12 @@ def _normalize_expected_salary(raw) -> dict:
     }
 
 
+def _clean_filename_template(raw) -> str:
+    """A CV file-name template: one line, at most 120 characters, its extension dropped."""
+    t = ' '.join(str(raw or '').split())[:120]
+    return re.sub(r'(?i)\.(pdf|docx?)$', '', t).strip()
+
+
 def _normalize_profile(item: dict) -> dict:
     work_history = []
     for raw_job in item.get('work_history', []) or []:
@@ -745,6 +751,9 @@ def _normalize_profile(item: dict) -> dict:
         # The profile's ChatGPT PROJECT link (routers/cv_queue.py set_project): the extension writes this
         # profile's CVs and answers in chats inside it, apart from the other profiles' (shared account).
         'gpt_project_url': str(item.get('gpt_project_url', '') or '').strip()[:500],
+        # The downloaded CV's file name (extension lib/save-file.js cvPdfName): {name} {first} {last}
+        # {company} {role} {date}; '' = "<Name> resume.pdf". No extension — .pdf is added.
+        'resume_filename': _clean_filename_template(item.get('resume_filename')),
         'region': _normalize_market_region(item.get('region', item.get('market_region', ''))),
         'active': bool(item.get('active', True)),
         'status': 'restricted' if str(item.get('status', 'active') or 'active').strip().lower() == 'restricted' else 'active',
