@@ -1632,6 +1632,113 @@ def delete(resume_id: str, user: dict = Depends(require_role("admin"))):
 
 
 # ---------------------------------------------------------------------------
+# Public share link: a CV anyone can open for 30 days, no login (VPS1's share link)
+# ---------------------------------------------------------------------------
+# The link carries the resume id and its expiry, signed with an HMAC of the server's JWT secret — no
+# table, nothing to clean up; a link can't be altered to open another CV or to live longer.
+SHARE_DAYS = 30
+public_router = APIRouter(prefix="/api/public", tags=["public"])
+
+
+def _share_key() -> bytes:
+    import hashlib
+    from auth import JWT_SECRET
+    return hashlib.sha256(f"cv-share:{JWT_SECRET}".encode()).digest()
+
+
+def _share_token(resume_id: str, expires: int) -> str:
+    import base64, hashlib, hmac
+    body = base64.urlsafe_b64encode(json.dumps({"r": resume_id, "e": expires}, separators=(",", ":")).encode()).decode().rstrip("=")
+    sig = base64.urlsafe_b64encode(hmac.new(_share_key(), body.encode(), hashlib.sha256).digest()[:18]).decode().rstrip("=")
+    return f"{body}.{sig}"
+
+
+def _share_target(token: str) -> str | None:
+    """The resume id a valid, unexpired share token opens — else None."""
+    import base64, hashlib, hmac, time
+    try:
+        body, sig = str(token or "").split(".", 1)
+        want = base64.urlsafe_b64encode(hmac.new(_share_key(), body.encode(), hashlib.sha256).digest()[:18]).decode().rstrip("=")
+        if not hmac.compare_digest(sig, want):
+            return None
+        data = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        if int(data.get("e", 0)) < time.time():
+            return None
+        rid = str(data.get("r") or "")
+        return rid if re.fullmatch(r"resume_[0-9a-f]{6,32}", rid) else None
+    except Exception:
+        return None
+
+
+def cv_file_name(profile: dict, job: dict | None = None) -> str:
+    """The CV's file name — extension/lib/save-file.js cvPdfName, in Python (keep the two the same)."""
+    name = re.sub(r'[\\/:*?"<>|\x00-\x1f\x7f]+', " ", str((profile or {}).get("name") or ""))
+    name = re.sub(r"\s+", " ", name).strip().strip(". ")[:120].strip()
+    tpl = str((profile or {}).get("resume_filename") or "").strip()
+    if not tpl:
+        return f"{name or 'Resume'} resume.pdf"
+    parts = name.split()
+    vals = {"name": name, "first": parts[0] if parts else "", "last": parts[-1] if len(parts) > 1 else "",
+            "company": str((job or {}).get("company") or ""), "role": str((job or {}).get("job_title") or ""),
+            "date": datetime.now().strftime("%Y-%m-%d")}
+    out = re.sub(r"(?i)\{(name|first|last|company|role|date)\}", lambda m: vals[m.group(1).lower()].strip(), tpl)
+    out = re.sub(r"(?i)\.pdf$", "", out)
+    out = re.sub(r"\s+", "_", out)
+    out = re.sub(r"[^\w.\-]+", "", out).replace("__", "_")
+    out = re.sub(r"_{2,}", "_", out).strip("._-")[:120]
+    return f"{out or name or 'Resume'}.pdf"
+
+
+@router.post("/{resume_id}/share")
+def share_resume(resume_id: str, user: dict = Depends(get_current_user)):
+    """A public link to this CV's PDF: anyone with it can open it for 30 days, no login. Who may
+    open the CV here may share it. A VPS_1 CV gets VPS_1's own public link."""
+    if resume_id.startswith("vps1:"):
+        if not has_role(user, "admin"):
+            raise HTTPException(status_code=403, detail="Forbidden")
+        remote_id = resume_id[len("vps1:"):]
+        if not _VPS1_ID_RE.fullmatch(remote_id):
+            raise HTTPException(status_code=404, detail="Resume not found")
+        url = vps1_client.get_resume_share_link(remote_id, "pdf")
+        if not url:
+            raise HTTPException(status_code=502, detail="VPS_1 gave no share link — try again later.")
+        return {"url": url, "expires_at": ""}
+    record = storage.get_generated_resume_by_id(resume_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Resume not found")
+    if not has_role(user, "admin") \
+            and record.get("profile_id", "") not in (user.get("assigned_profile_ids") or []) \
+            and not _resume_on_visible_call(user, resume_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    expires = datetime.now(timezone.utc) + timedelta(days=SHARE_DAYS)
+    token = _share_token(resume_id, int(expires.timestamp()))
+    return {"url": f"/api/public/cv/{token}", "expires_at": expires.strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+
+@public_router.get("/cv/{token}")
+def public_resume_pdf(token: str):
+    """The PDF behind a share link (POST /api/resumes/{id}/share). No login; 404 once expired."""
+    rid = _share_target(token)
+    if not rid:
+        raise HTTPException(status_code=404, detail="This link has expired or is not valid.")
+    record = storage.get_generated_resume_by_id(rid)
+    if not record:
+        raise HTTPException(status_code=404, detail="This CV no longer exists.")
+    cached = _render_pdf_to_cache(rid, raise_errors=True)
+    if not cached or not cached.exists() or not cached.stat().st_size:
+        raise HTTPException(status_code=500, detail="PDF render failed")
+    profile = next((p for p in storage.get_profiles() if p.get("id") == record.get("profile_id")), {}) or {}
+    from urllib.parse import quote
+    fname = cv_file_name(profile, {"company": record.get("job_company"), "job_title": record.get("job_title")})
+    ascii_name = re.sub(r"[^A-Za-z0-9._ -]+", "", fname) or "resume.pdf"
+    return Response(content=cached.read_bytes(), media_type="application/pdf", headers={
+        "Content-Disposition": f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(fname)}",
+        "Cache-Control": "private, max-age=300",
+        "X-Robots-Tag": "noindex, nofollow",
+    })
+
+
+# ---------------------------------------------------------------------------
 # PDF
 # ---------------------------------------------------------------------------
 

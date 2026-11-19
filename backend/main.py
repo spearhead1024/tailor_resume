@@ -89,6 +89,7 @@ app.include_router(companies_router.router)
 app.include_router(autofill_router.router)
 app.include_router(profiles_router.router)
 app.include_router(resumes_router.router)
+app.include_router(resumes_router.public_router)   # /api/public/cv/{token} — a shared CV, no login
 app.include_router(users_router.router)
 app.include_router(settings_router.router)
 app.include_router(todo_router.router)

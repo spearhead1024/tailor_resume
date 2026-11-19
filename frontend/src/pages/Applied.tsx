@@ -138,6 +138,19 @@ export default function Applied() {
     }
   }
 
+  // A public link to the CV's PDF: opens without login for 30 days (POST /api/resumes/{id}/share).
+  async function shareCv(r: Row) {
+    try {
+      const { url, expires_at } = await api.post<{ url: string; expires_at: string }>(`/api/resumes/${encodeURIComponent(r.saved_resume_id)}/share`);
+      const full = url.startsWith('/') ? `${window.location.origin}${url}` : url;
+      try { await navigator.clipboard.writeText(full); }
+      catch { window.prompt('Copy this link:', full); return; }
+      toast(`Link copied — anyone can open this CV${expires_at ? ` until ${new Date(expires_at).toLocaleDateString()}` : ''}, no login`, 'success');
+    } catch (e: any) {
+      toast(e?.response?.data?.detail || 'Could not make a share link', 'error');
+    }
+  }
+
   function clearFilters() {
     setQuery(''); setProfileId(''); setBidder(''); setDateFrom(''); setDateTo(''); setApplyFilter('');
   }
@@ -204,6 +217,7 @@ export default function Applied() {
                 onToggle={() => setExpanded(expanded === r.saved_resume_id ? null : r.saved_resume_id)}
                 onPdf={() => viewPdf(r.saved_resume_id)}
                 onSchedule={() => scheduleInterview(r)}
+                onShare={() => shareCv(r)}
                 tz={tz}
               />
             ))}
@@ -222,8 +236,8 @@ export default function Applied() {
   );
 }
 
-function RowView({ row, open, onToggle, onPdf, onSchedule, tz }: {
-  row: Row; open: boolean; onToggle: () => void; onPdf: () => void; onSchedule: () => Promise<void>; tz?: string;
+function RowView({ row, open, onToggle, onPdf, onSchedule, onShare, tz }: {
+  row: Row; open: boolean; onToggle: () => void; onPdf: () => void; onSchedule: () => Promise<void>; onShare: () => void; tz?: string;
 }) {
   const [scheduling, setScheduling] = useState(false);
   const { data: detail, isLoading } = useQuery({
@@ -247,6 +261,8 @@ function RowView({ row, open, onToggle, onPdf, onSchedule, tz }: {
           {/* PDF works for both: a VPS_1 resume streams through the backend, falling back to VPS_1's
               public link if it can't be fetched. Schedule adds a row to the Interviews board. */}
           <button className="secondary" onClick={(e) => { e.stopPropagation(); onPdf(); }}>📄 Resume</button>
+          <button className="secondary" style={{ marginLeft: 4 }} onClick={(e) => { e.stopPropagation(); onShare(); }}
+            title="Copy a public link to this CV — anyone can open it for 30 days, no login">🔗 Share</button>
           <button className="secondary" style={{ marginLeft: 4 }} disabled={scheduling}
             onClick={async (e) => { e.stopPropagation(); setScheduling(true); try { await onSchedule(); } finally { setScheduling(false); } }}
             title="Add this resume + job description as a row on the Interviews board">{scheduling ? '…' : '📅 Schedule'}</button>
