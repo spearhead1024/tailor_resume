@@ -997,7 +997,32 @@ def _replace_role_paragraph(paragraph: Paragraph, role_value: str) -> bool:
     return True
 
 
-def _replace_role_placeholders(doc: Document, resume: dict) -> bool:
+def _excluded_companies(profile: dict | None) -> tuple[dict[int, str], set[str]]:
+    """The company blocks the admin marked "Exclude" on the profile's detected work history (whose
+    order mirrors the DOCX's company blocks): ({position: its role title}, their names in compare
+    form). Those blocks keep the DOCX's own bullets — ChatGPT never wrote them (VPS1's rule). The
+    role marker on the block's line becomes the row's role title, else the profile's work-history
+    role for that company ('' = the CV's headline)."""
+    rows = [r for r in ((profile or {}).get("detected_work_history") or []) if isinstance(r, dict)]
+    history = {_company_compare_key(w.get("company_name")): str(w.get("role_title") or w.get("legacy_role") or "").strip()
+               for w in ((profile or {}).get("work_history") or []) if isinstance(w, dict)}
+    blocks: dict[int, str] = {}
+    for i, r in enumerate(rows):
+        if not r.get("exclude"):
+            continue
+        role = str(r.get("role_title") or "").strip()
+        if not role or any(m in role.lower() for m in EXP_ROLE_PLACEHOLDERS):
+            role = history.get(_company_compare_key(r.get("company_name")), "")
+        blocks[i] = role
+    names = {_company_compare_key(r.get("company_name")) for r in rows if r.get("exclude")} - {""}
+    return blocks, names
+
+
+def _company_compare_key(name) -> str:
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", str(name or "").lower()).split())
+
+
+def _replace_role_placeholders(doc: Document, resume: dict, excluded_blocks: dict[int, str] | None = None) -> bool:
     jobs = resume.get("work_history", []) or []
     # Align roles to __role__ markers BY POSITION (marker i → work_history[i]).
     # Do NOT drop empty role_titles first — that shifts every later company's role
@@ -1010,9 +1035,18 @@ def _replace_role_placeholders(doc: Document, resume: dict) -> bool:
     if not fallback_role and not any(role_values):
         return False
     role_index = 0
+    block_index = 0
+    excluded_blocks = excluded_blocks or set()
     changed = False
     for paragraph in _all_story_paragraphs(doc):
         if not _paragraph_contains_any_marker(paragraph, EXP_ROLE_PLACEHOLDERS):
+            continue
+        # One role marker per company block, in document order. An excluded block gets its own role
+        # (see _excluded_companies) and does not use up a generated one.
+        block_index += 1
+        if block_index - 1 in excluded_blocks:
+            if _replace_role_paragraph(paragraph, excluded_blocks[block_index - 1] or fallback_role):
+                changed = True
             continue
         role_value = role_values[role_index] if role_index < len(role_values) else ""
         if not role_value:
@@ -1279,7 +1313,7 @@ def _paragraph_looks_like_bullet_content(paragraph: Paragraph) -> bool:
     return False
 
 
-def _replace_experience_bullets_and_titles(doc: Document, resume: dict) -> bool:
+def _replace_experience_bullets_and_titles(doc: Document, resume: dict, excluded_blocks: dict[int, str] | set[int] | None = None) -> bool:
     body = _paragraphs_between_sections(doc, "experience")
     if not body:
         return False
@@ -1331,11 +1365,21 @@ def _replace_experience_bullets_and_titles(doc: Document, resume: dict) -> bool:
         if current_group:
             bullet_groups.append(current_group)
 
+    # Generated jobs go, in order, onto the blocks that are NOT excluded; an excluded block keeps
+    # the DOCX's own bullets.
+    excluded_blocks = excluded_blocks or set()
+    job_cursor = 0
     for idx, group in enumerate(bullet_groups):
-        if idx >= len(jobs) or not group:
+        if idx in excluded_blocks:
+            continue
+        if job_cursor >= len(jobs):
+            break
+        job = jobs[job_cursor]
+        job_cursor += 1
+        if not group:
             continue
         # Keep **bold** markers — _set_paragraph_text/keyword-bold honors them.
-        bullets = [_preserve_bold_line_text(bullet) for bullet in jobs[idx].get("bullets", []) if _plain_resume_text(bullet)]
+        bullets = [_preserve_bold_line_text(bullet) for bullet in job.get("bullets", []) if _plain_resume_text(bullet)]
         if not bullets:
             continue
 
@@ -1704,8 +1748,15 @@ def _inject_section_heading_borders(doc: Document, resume_template: str = 'spear
             spacing.set(qn("w:after"), "80")
 
 
-def apply_resume_to_docx(docx_path: Path, resume: dict, resume_template: str = 'spear-1') -> None:
+def apply_resume_to_docx(docx_path: Path, resume: dict, resume_template: str = 'spear-1',
+                         profile: dict | None = None) -> None:
     doc = _DocxFactory(str(docx_path))
+    excluded_blocks, excluded_names = _excluded_companies(profile)
+    if excluded_names:
+        # A CV written before a company was excluded may still hold it: leave that entry out, so the
+        # rest still land on their own blocks.
+        resume = {**resume, "work_history": [j for j in (resume.get("work_history") or [])
+                                             if _company_compare_key((j or {}).get("company_name")) not in excluded_names]}
     headline = _plain_resume_text(resume.get("headline", ""))
     # Keep **bold** markers in the summary — the keyword-bold path honors them and
     # renders those phrases bold. (Headline stays plain: it is never bolded.)
@@ -1728,7 +1779,7 @@ def apply_resume_to_docx(docx_path: Path, resume: dict, resume_template: str = '
                 "__headline__": headline,
             },
         )
-    _replace_role_placeholders(doc, resume)
+    _replace_role_placeholders(doc, resume, excluded_blocks)
 
     if summary:
         if not _replace_placeholders(doc, SUMMARY_PLACEHOLDERS, [summary], keywords=tech_keywords):
@@ -1772,7 +1823,7 @@ def apply_resume_to_docx(docx_path: Path, resume: dict, resume_template: str = '
 
     if experience_lines:
         if not _replace_placeholders(doc, EXPERIENCE_PLACEHOLDERS, experience_lines, keywords=tech_keywords):
-            _replace_experience_bullets_and_titles(doc, resume)
+            _replace_experience_bullets_and_titles(doc, resume, excluded_blocks)
 
     # Forced page breaks disabled — content flows naturally and LibreOffice
     # handles pagination. _insert_spear2_page_breaks and
@@ -2201,7 +2252,7 @@ def build_docx_style_pdf_bundle(resume: dict, profile: dict, output_dir: Path | 
         pdf_path = temp_dir / "styled_resume.pdf"
         shutil.copy2(source_docx, working_docx)
         resume_template = str(profile.get('resume_template') or 'spear-1').strip() or 'spear-1'
-        apply_resume_to_docx(working_docx, resume, resume_template=resume_template)
+        apply_resume_to_docx(working_docx, resume, resume_template=resume_template, profile=profile)
         ok, message = export_pdf(working_docx, pdf_path, pdf_cfg or {})
         pdf_bytes = pdf_path.read_bytes() if ok and pdf_path.exists() else b""
         docx_bytes = working_docx.read_bytes()

@@ -176,6 +176,11 @@ def _detect_work_history(extracted_text: str, existing_profile: dict) -> list[di
         for item in (existing_profile or {}).get("detected_work_history", []) or []
         if isinstance(item, dict)
     }
+    excluded = {
+        str(item.get("company_name") or "").strip().lower()
+        for item in (existing_profile or {}).get("detected_work_history", []) or []
+        if isinstance(item, dict) and item.get("exclude")
+    }
     detected = _extract_work_history_from_resume_text(extracted_text)
     out: list[dict] = []
     for item in detected:
@@ -188,6 +193,7 @@ def _detect_work_history(extracted_text: str, existing_profile: dict) -> list[di
             "duration": str(item.get("duration") or "").strip(),
             "location": str(item.get("location") or "").strip(),
             "bullets": prev.get(name.lower(), default_bullets),
+            "exclude": name.lower() in excluded,     # a new upload keeps the admin's Exclude marks
         })
     return out
 

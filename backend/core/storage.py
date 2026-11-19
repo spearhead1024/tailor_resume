@@ -657,6 +657,9 @@ def _normalize_detected_work_history(raw, default_bullets: int = 5) -> list:
             'duration': str(item.get('duration') or '').strip(),
             'location': str(item.get('location') or '').strip(),
             'bullets': _clamp_int(item.get('bullets'), default_bullets, 1, 20),
+            # Excluded: this company keeps its own text from the DOCX — never sent to ChatGPT,
+            # never rewritten (core/docx_resume_export.py skips its block).
+            'exclude': bool(item.get('exclude', False)),
         })
     return out[:8]
 

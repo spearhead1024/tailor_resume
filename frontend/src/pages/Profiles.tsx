@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, Fragment } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useAuth } from '../lib/auth';
@@ -278,6 +278,7 @@ export default function Profiles() {
         duration: String(d.duration || '').trim(),
         location: String(d.location || '').trim(),
         bullets: Number(d.bullets) || 5,
+        exclude: !!d.exclude,
       })).filter((d: any) => d.company_name),
     };
     saveMutation.mutate(payload);
@@ -617,7 +618,8 @@ export default function Profiles() {
                         ) : (
                           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                             {(selected.detected_work_history as any[]).map((d: any, i: number) => (
-                              <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                              <Fragment key={i}>
+                              <div style={{ display: 'flex', gap: 6, alignItems: 'center', opacity: d.exclude ? 0.75 : 1 }}>
                                 <input style={{ flex: 2 }} placeholder="Company"
                                   value={d.company_name || ''}
                                   onChange={(e) => {
@@ -633,18 +635,45 @@ export default function Profiles() {
                                     setSelected({ ...selected, detected_work_history: next });
                                   }} />
                                 <input type="number" min={1} max={20} style={{ width: 64 }} title="Bullets"
-                                  value={d.bullets ?? 5}
+                                  value={d.bullets ?? 5} disabled={!!d.exclude}
                                   onChange={(e) => {
                                     const next = [...(selected.detected_work_history || [])];
                                     next[i] = { ...next[i], bullets: Number(e.target.value) };
                                     setSelected({ ...selected, detected_work_history: next });
                                   }} />
+                                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, margin: 0, whiteSpace: 'nowrap',
+                                  fontSize: '0.8rem', textTransform: 'none', letterSpacing: 0, cursor: 'pointer' }}
+                                  title="Keep this company exactly as the DOCX has it: not sent to ChatGPT, not rewritten">
+                                  <input type="checkbox" checked={!!d.exclude}
+                                    onChange={(e) => {
+                                      const next = [...(selected.detected_work_history || [])];
+                                      const own = (selected.work_history || []).find((w: any) =>
+                                        String(w.company_name || '').trim().toLowerCase() === String(d.company_name || '').trim().toLowerCase());
+                                      next[i] = { ...next[i], exclude: e.target.checked,
+                                        role_title: next[i].role_title || own?.role_title || own?.legacy_role || '' };
+                                      setSelected({ ...selected, detected_work_history: next });
+                                    }} />
+                                  Exclude
+                                </label>
                                 <button type="button" className="ghost danger" title="Remove"
                                   onClick={() => {
                                     const next = (selected.detected_work_history || []).filter((_: any, j: number) => j !== i);
                                     setSelected({ ...selected, detected_work_history: next });
                                   }}>✕</button>
                               </div>
+                              {d.exclude && (
+                                <div style={{ display: 'flex', gap: 6, alignItems: 'center', margin: '-2px 0 4px 12px', fontSize: '0.8rem' }}>
+                                  <span className="muted" style={{ whiteSpace: 'nowrap' }}>↳ Kept as in the DOCX — role shown:</span>
+                                  <input style={{ flex: 1, maxWidth: 260, padding: '3px 8px', fontSize: '0.82rem' }} placeholder="Role title (empty = the CV's headline)"
+                                    value={d.role_title || ''}
+                                    onChange={(e) => {
+                                      const next = [...(selected.detected_work_history || [])];
+                                      next[i] = { ...next[i], role_title: e.target.value };
+                                      setSelected({ ...selected, detected_work_history: next });
+                                    }} />
+                                </div>
+                              )}
+                              </Fragment>
                             ))}
                             <button type="button" className="secondary" style={{ alignSelf: 'flex-start' }}
                               onClick={() => setSelected({
@@ -706,7 +735,7 @@ export default function Profiles() {
                       </div>
                       {(selected.detected_work_history || []).length > 0 && (
                         <Field label="Fixed work history (prompt)">
-                          <ReadValue value={(selected.detected_work_history as any[]).map((d: any) => `${d.company_name}${d.duration ? ` · ${d.duration}` : ''} → ${d.bullets} bullets`).join('\n')} />
+                          <ReadValue value={(selected.detected_work_history as any[]).map((d: any) => `${d.company_name}${d.duration ? ` · ${d.duration}` : ''} → ${d.exclude ? `excluded — kept as in the DOCX${d.role_title ? ` (${d.role_title})` : ''}` : `${d.bullets} bullets`}`).join('\n')} />
                         </Field>
                       )}
                       {(selected.generation_settings?.bullet_counts || []).length > 0 && (

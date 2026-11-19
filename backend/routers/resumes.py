@@ -1203,13 +1203,17 @@ def _prompt_companies(profile: dict) -> list[dict]:
 
     schools = frozenset(str(e.get("university") or "").strip().lower()
                         for e in (profile.get("education_history") or []) if isinstance(e, dict))
+    # Companies marked "Exclude" on the Profiles tab keep their DOCX text: never in the prompt.
+    excluded = {" ".join(_company_tokens(i.get("company_name") or "")) for i in (profile.get("detected_work_history") or [])
+                if isinstance(i, dict) and i.get("exclude")} - {""}
+    is_excluded = lambda name: " ".join(_company_tokens(name)) in excluded   # noqa: E731
 
     def _from_detected() -> list[dict]:
         out: list[dict] = []
         for item in profile.get("detected_work_history") or []:
             name = str(item.get("company_name") or "").strip()
             duration = str(item.get("duration") or "").strip()
-            if not _looks_like_real_company(name, duration, schools):
+            if item.get("exclude") or not _looks_like_real_company(name, duration, schools):
                 continue
             bullets = int(item.get("bullets") or 0) or overrides.get(name.lower()) or default_bullets
             out.append({"company_name": name, "duration": duration, "bullets": bullets})
@@ -1221,7 +1225,7 @@ def _prompt_companies(profile: dict) -> list[dict]:
         for i, w in enumerate(profile.get("work_history", []) or []):
             name = str(w.get("company_name") or "").strip()
             duration = str(w.get("duration") or "").strip()
-            if not _looks_like_real_company(name, duration, schools):
+            if is_excluded(name) or not _looks_like_real_company(name, duration, schools):
                 continue
             bullets = int(bullet_counts[i]) if i < len(bullet_counts) and bullet_counts[i] else default_bullets
             out.append({"company_name": name, "duration": duration, "bullets": bullets})
