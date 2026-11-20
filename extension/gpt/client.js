@@ -11,16 +11,22 @@ export const PARALLEL = 2;
 export const threadKey = (profileId, jobId) => `${profileId}:${jobId}`;
 
 // Which ChatGPT model writes what (⚙ Settings → ChatGPT models). Names as ChatGPT's model menu shows
-// them; '' = leave ChatGPT's own choice. Tech questions go to Instant by default — the reply comes in
-// seconds instead of the minute a thinking model takes; the CV keeps the account's model.
+// them; '' = leave ChatGPT's own choice. By default tech questions go to Instant (a reply in seconds)
+// and CVs to Pro (the best CV; minutes, not seconds — see cvTimeoutMin). An account without Pro in its
+// model menu writes the CV with the model it is on.
 export const GPT_MODELS_KEY = 'gptModels';
 export const MODEL_CHOICES = ['Instant', 'Thinking', 'Auto', 'Pro'];
-export const DEFAULT_MODELS = { answers: 'Instant', cv: '' };
+export const DEFAULT_MODELS = { answers: 'Instant', cv: 'Pro' };
+// v2 (1.15.0): CVs default to Pro. A setting saved before (cv '' = "ChatGPT's choice", stored whenever
+// the tech-questions model was changed) moves to Pro once; what is chosen after that is kept.
+export const MODELS_V = 2;
 export async function gptModels() {
   const got = (await chrome.storage.local.get(GPT_MODELS_KEY).catch(() => ({})))[GPT_MODELS_KEY] || {};
   const pick = (v, d) => (typeof v === 'string' ? v.trim().slice(0, 40) : d);
-  return { answers: pick(got.answers, DEFAULT_MODELS.answers), cv: pick(got.cv, DEFAULT_MODELS.cv) };
+  return { answers: pick(got.answers, DEFAULT_MODELS.answers), cv: got.v === MODELS_V ? pick(got.cv, DEFAULT_MODELS.cv) : DEFAULT_MODELS.cv };
 }
+// How long ChatGPT may take to write one CV: Pro thinks for minutes.
+export const cvTimeoutMin = (model) => (/\bpro\b/i.test(model || '') ? 25 : 6);
 
 export async function gptSnapshot() {
   const got = await chrome.storage.local.get(Object.values(GPT_KEYS)).catch(() => ({}));

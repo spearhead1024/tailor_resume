@@ -31,12 +31,14 @@
  * older version left, until the server has them). */
 
 import { request } from '../lib/api.js';
-import { GPT_KEYS as K, CHAT_ORIGINS, CHAT_URL, PARALLEL, gptModels } from './client.js';
+import { GPT_KEYS as K, CHAT_ORIGINS, CHAT_URL, PARALLEL, gptModels, cvTimeoutMin } from './client.js';
 import { answersPrompt, cleanAnswer } from './prompts.js';
 
-const TIMEOUT_MIN = 6;                  // ChatGPT's answer to the CV prompt
-// How long a frame may work before it is given up (within the server's lease).
-const WORK_LIMIT_MS = { write: (TIMEOUT_MIN + 4) * 60_000, answer: 5 * 60_000, delete: 3 * 60_000 };
+// ChatGPT's answer to the CV prompt: 6 minutes, 25 with Pro (client.js cvTimeoutMin).
+// How long a frame may work before it is given up (within the server's lease — 30 minutes for a CV):
+// its CV time + 4 minutes (the tech questions after it).
+const WORK_LIMIT_MS = { answer: 5 * 60_000, delete: 3 * 60_000 };
+const workLimit = (f) => f.lease.work === 'write' ? ((f.task?.timeoutMs || 6 * 60_000) + 4 * 60_000) : (WORK_LIMIT_MS[f.lease.work] || 10 * 60_000);
 const SILENT_LIMIT_MS = 2 * 60_000;     // a frame whose driver stopped reporting (crashed / never started)
 const CHECK_LIMIT_MS = 90_000;          // the account check
 const DRIVER_ID = 'tr-gpt-driver';
@@ -446,7 +448,7 @@ async function tickOnce() {
     for (const [id, f] of Object.entries(all)) {
       if (!live.has(id)) { gone.push(f); delete all[id]; continue; }
       const silent = now() - (f.aliveAt || f.startedAt), age = now() - f.startedAt;
-      if (age > (WORK_LIMIT_MS[f.lease.work] || WORK_LIMIT_MS.write) || silent > SILENT_LIMIT_MS) { stuck.push({ id, f, why: silent > SILENT_LIMIT_MS ? 'ChatGPT stopped responding.' : 'ChatGPT took too long.' }); delete all[id]; }
+      if (age > workLimit(f) || silent > SILENT_LIMIT_MS) { stuck.push({ id, f, why: silent > SILENT_LIMIT_MS ? 'ChatGPT stopped responding.' : 'ChatGPT took too long.' }); delete all[id]; }
     }
   });
   if (gone.length) await release(gone);
@@ -529,7 +531,7 @@ function frameTask(lease, models = {}, url = '') {
   const expect = { chat: convId(url), key: lease.key };
   if (lease.work === 'write') {
     const qs = lease.questions || [];
-    return { kind: 'write', prompt: lease.prompt, timeoutMs: TIMEOUT_MIN * 60_000, answersPrompt: qs.length ? answersPrompt(qs) : '', answersCount: qs.length,
+    return { kind: 'write', prompt: lease.prompt, timeoutMs: cvTimeoutMin(models.cv) * 60_000, answersPrompt: qs.length ? answersPrompt(qs) : '', answersCount: qs.length,
       model: models.cv || '', answersModel: models.answers || '', expect: { ...expect, chat: '' } };
   }
   // A new chat for answers (the CV has no chat): it carries the job and the CV (context).

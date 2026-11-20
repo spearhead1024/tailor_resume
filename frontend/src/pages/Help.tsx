@@ -133,7 +133,8 @@ function ExtensionGuide() {
             Each job has its own chat; its questions are always answered there.</li>
           <li><strong>Tech Questions</strong> — paste the application's questions (one per line) and click
             <strong> Save &amp; Answer</strong>: ChatGPT answers them first, before any other CV, in the same chat that wrote the CV — with the
-            fast <strong>Instant</strong> model, then it is set back so CVs keep their model (⚙ Settings → <strong>ChatGPT models</strong>).
+            fast <strong>Instant</strong> model. CVs are written with <strong>Pro</strong> — the best CVs, but each takes a few minutes
+            (up to 25). Change either in ⚙ Settings → <strong>ChatGPT models</strong>.
             Every bidder on that job sees them; click <strong>Copy</strong> to use an answer.</li>
           <li><strong>Add Jobs</strong> (job adders) — open a job posting and add it in one click; duplicates are flagged.
             The <strong>AI check</strong> reads it in a few seconds: a clearly remote, paid software job goes live at once; an onsite /

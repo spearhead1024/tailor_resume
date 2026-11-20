@@ -26,7 +26,8 @@ from core.storage import _write_lock
 
 AHEAD = 2                                   # Out Bids: CVs prepared for the job on screen + the next one — never further
 MAX_ATTEMPTS = 2
-LEASE = {"write": timedelta(minutes=12), "answer": timedelta(minutes=6), "delete": timedelta(minutes=4)}
+# A CV: up to 25 minutes with ChatGPT Pro + its tech questions (extension gpt/runner.js workLimit).
+LEASE = {"write": timedelta(minutes=32), "answer": timedelta(minutes=6), "delete": timedelta(minutes=4)}
 IDLE_CLOSE = timedelta(hours=2)             # a ready / failed row nobody touched → its conversation is deleted
 DELETE_BATCH = 25
 DELETE_TRIES = 12                           # 5, 10, 20, 40, 60, 60… minutes apart (~8 hours), then given up

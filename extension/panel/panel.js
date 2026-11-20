@@ -22,7 +22,7 @@ import { request, getConfig, setSession, clearSession } from '../lib/api.js';
 import { requestSiteAccess } from '../lib/access.js';
 import { createAdder } from './adder.js';
 import { linkedinJobId, readLinkedInJob, readOutsideLink } from './linkedin.js';
-import { gpt, gptSnapshot, onGptChange, requestChatAccess, threadKey, gptModels, GPT_MODELS_KEY, MODEL_CHOICES } from '../gpt/client.js';
+import { gpt, gptSnapshot, onGptChange, requestChatAccess, threadKey, gptModels, GPT_MODELS_KEY, MODEL_CHOICES, MODELS_V } from '../gpt/client.js';
 import { UPDATE_KEY, diskVersion } from '../lib/self-update.js';
 import { saveFile, cvPdfName, nameHasJob } from '../lib/save-file.js';
 
@@ -1216,10 +1216,10 @@ async function patchSettingsModels() {
       <select data-model="answers">${opts(m.answers, 'ChatGPT\'s choice')}</select></div>
     <div class="fld-2 model-row"><span class="fld-l">CVs</span>
       <select data-model="cv">${opts(m.cv, 'ChatGPT\'s choice')}</select></div>
-    <div class="muted small">Instant answers tech questions in seconds. After answering, ChatGPT is set back to the model it was on, so CVs keep theirs.</div>`;
+    <div class="muted small">Instant answers tech questions in seconds. Pro writes the best CVs but takes minutes (up to 25). Without Pro on your ChatGPT plan, the CV uses the model ChatGPT is on.</div>`;
   el.querySelectorAll('select[data-model]').forEach((sel) => sel.addEventListener('change', async () => {
     const cur = await gptModels();
-    await chrome.storage.local.set({ [GPT_MODELS_KEY]: { ...cur, [sel.dataset.model]: sel.value } });
+    await chrome.storage.local.set({ [GPT_MODELS_KEY]: { ...cur, [sel.dataset.model]: sel.value, v: MODELS_V } });
     toast(`${sel.dataset.model === 'cv' ? 'CVs' : 'Tech questions'}: ${sel.value || 'ChatGPT\'s choice'}`);
   }));
 }

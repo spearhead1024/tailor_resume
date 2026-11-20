@@ -71,8 +71,9 @@ One side panel (`extension/panel/`), tabs by role: **Out Bids** and **Easy Bids*
   Mark as Applied / Report / Skip, even when LinkedIn moves the tab ("Still on <company>").
 - **Tech Questions**: the application's questions, shared per job; ChatGPT answers them in the chat that
   wrote the CV (`gpt/runner.js` keeps that tab open until the job is done), with the model set in
-  ⚙ Settings → ChatGPT models (default **Instant**); the model menu is set back afterwards, so the CVs keep
-  theirs (a CV model can be pinned there too). `gpt/driver.js pickModel` finds the item by its name.
+  ⚙ Settings → ChatGPT models (default **Instant**); CVs are written with **Pro** by default (25 minutes
+  allowed per CV, 6 with other models; the server's CV lease is 32 minutes). An account without Pro writes
+  with the model it is on. `gpt/driver.js pickModel` finds the item by its name.
 - **The job on the tab** (`panel/linkedin.js`): since Oct 2026 bidders search on LinkedIn's AI job search
   (`/jobs/search-results/?currentJobId=<id>`), whose class names are generated — it is read by the names
   LinkedIn gives things: `componentkey="JobDetails_AboutTheJob_<id>"` (the description), the title link to
