@@ -22,7 +22,8 @@ import { request, getConfig, setSession, clearSession } from '../lib/api.js';
 import { requestSiteAccess } from '../lib/access.js';
 import { createAdder } from './adder.js';
 import { linkedinJobId, readLinkedInJob, readOutsideLink } from './linkedin.js';
-import { CLASSIC_ON, CLASSIC_SEARCH, classicTabKey, classicUrl, isAiSearch, isClassicSearch, describeSearch, applicationOpen } from '../lib/classic.js';
+import { CLASSIC_ON, CLASSIC_SEARCH, CLASSIC_BLOCKED, classicTabKey, classicUrl, isAiSearch, isClassicSearch, describeSearch, applicationOpen } from '../lib/classic.js';
+import { RECENT_KEY, RECENT_SEEN, WINDOWS, cleanSearch, searchFromUrl, fetchNewest, sortNewest, groupSame, LimitedError, ago } from '../lib/recent.js';
 import { gpt, gptSnapshot, onGptChange, requestChatAccess, threadKey, gptModels, GPT_MODELS_KEY, MODEL_CHOICES } from '../gpt/client.js';
 import { UPDATE_KEY, diskVersion } from '../lib/self-update.js';
 import { saveFile, cvPdfName, nameHasJob } from '../lib/save-file.js';
@@ -1065,6 +1066,8 @@ async function allowLinkedIn() {
 // Connections (ChatGPT, LinkedIn access) are managed in ⚙ Settings — here only a pointer to it.
 function patchEasy() {
   const el = $('#easyBody'); if (!el) return;
+  if (S.newest.curLid !== S.easy.lid) { S.newest.curLid = S.easy.lid; patchNewest(); }
+  newestKnownSoon();
   const typed = $('#easyExt')?.value || '';
   const E = S.easy, page = E.page, res = E.res, p = res?.profile || {};
   const name = esc(selectedProfile()?.name || 'this profile');
@@ -1170,8 +1173,9 @@ function patchEasy() {
 // back on the tab often enough that it is left alone for a while.
 async function patchClassic() {
   const el = $('#settingsClassic'); if (!el) return;
-  const got = await chrome.storage.local.get([CLASSIC_ON, CLASSIC_SEARCH]).catch(() => ({}));
+  const got = await chrome.storage.local.get([CLASSIC_ON, CLASSIC_SEARCH, CLASSIC_BLOCKED]).catch(() => ({}));
   const on = got[CLASSIC_ON] !== false, saved = got[CLASSIC_SEARCH] || '';
+  const refused = on && (got[CLASSIC_BLOCKED]?.until || 0) > Date.now() ? got[CLASSIC_BLOCKED] : null;
   const tab = await activeTab();
   const key = tab?.id != null ? classicTabKey(tab.id) : '';
   const st = key ? (await chrome.storage.session.get(key).catch(() => ({})))[key] : null;
@@ -1187,7 +1191,9 @@ async function patchClassic() {
       <button class="secondary sm" data-action="classicSave">Save URL</button>
       ${saved ? '<button class="secondary sm" data-action="classicOpen">Open Saved Search</button>' : ''}
     </div>
-    ${blocked ? `<div class="easy-line warn">LinkedIn keeps sending the current tab back to AI search — left alone until ${esc(new Date(st.blockedUntil).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}.
+    ${refused ? `<div class="easy-line warn"><span class="txt">LinkedIn sent the classic search back to its AI search (${esc(hhmm(refused.at))}) — no tab is switched until ${esc(hhmm(refused.until))}.
+      For newest-first jobs use <b>Newest Jobs</b> in Easy Bids.</span> <a href="#" data-action="classicRetry">Try Again</a></div>`
+    : blocked ? `<div class="easy-line warn">LinkedIn keeps sending the current tab back to AI search — left alone until ${esc(new Date(st.blockedUntil).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}.
       <a href="#" data-action="classicRetry">Try Again</a></div>` : ''}`;
 }
 async function saveClassicUrl() {
@@ -1200,7 +1206,7 @@ async function saveClassicUrl() {
   toast('Saved search updated');
 }
 chrome.storage.onChanged.addListener((ch, area) => {
-  if ((area === 'local' && (CLASSIC_ON in ch || CLASSIC_SEARCH in ch)) || (area === 'session' && Object.keys(ch).some((k) => k.startsWith('classic:tab:')))) patchClassic();
+  if ((area === 'local' && (CLASSIC_ON in ch || CLASSIC_SEARCH in ch || CLASSIC_BLOCKED in ch)) || (area === 'session' && Object.keys(ch).some((k) => k.startsWith('classic:tab:')))) patchClassic();
 });
 // The saved search: on the LinkedIn tab when nothing is being applied for there, else in a new tab.
 async function openClassicSearch() {
@@ -1215,6 +1221,7 @@ async function openClassicSearch() {
 }
 // "Try again": forget the loop guard for this tab and, if it shows AI search, go back to classic now.
 async function retryClassic() {
+  await chrome.storage.local.remove(CLASSIC_BLOCKED);
   const tab = await activeTab(); if (tab?.id == null) return;
   await chrome.storage.session.remove(classicTabKey(tab.id));
   if (isAiSearch(tab.url) && (await applicationOpen(tab.id)) === false) {
@@ -1223,12 +1230,197 @@ async function retryClassic() {
   }
 }
 
+// ---------- Easy Bids: Newest Jobs (lib/recent.js) ----------
+// LinkedIn's own search has no "Most recent" any more (Oct 2026): this list is the bidder's search,
+// newest first — LinkedIn's public job list, read signed out, sorted here. A row opens the posting on
+// the LinkedIn tab (signed in), where the LinkedIn Job card above reads it. Each row says where this
+// profile stands on it (Applied / In TailorResume / Duplicate…, POST /bid/easy/known). With Auto on
+// it looks for new postings every 2 minutes while the panel is open (only the minutes since the last
+// look — a page or two); new ones get a dot.
+const NW_LIST = 'recentList';            // the list, kept for the session (chrome.storage.session)
+const NW_AUTO_MS = 2 * 60_000, NW_PAUSE_MS = 5 * 60_000;
+const NW_STATE = { applied: ['ok', 'Applied'], skipped: ['muted', 'Skipped'], on_file: ['info', 'On file'],
+  closed: ['muted', 'Closed'], duplicate: ['warn', 'Duplicate'], blocked: ['error', 'Blocked'] };
+const hhmm = (t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const nwKey = (s) => JSON.stringify([s.keywords.toLowerCase(), s.location.toLowerCase(), s.geoId, s.remote, s.easy]);
+S.newest = { search: null, jobs: [], known: {}, opened: new Set(), fresh: new Set(), key: '', loading: false,
+  error: '', limitedUntil: 0, lastFetch: 0, editing: false, knownFor: '' };
+
+async function loadNewest() {
+  const got = await chrome.storage.local.get([RECENT_KEY, RECENT_SEEN, CLASSIC_SEARCH]).catch(() => ({}));
+  // First time: the bidder's classic search (keywords, place, Remote, Easy Apply) is the start.
+  const search = got[RECENT_KEY] || { ...(searchFromUrl(got[CLASSIC_SEARCH] || '') || {}) };
+  S.newest.search = cleanSearch(search);
+  S.newest.opened = new Set((got[RECENT_SEEN] || []).slice(-500));
+  const kept = (await chrome.storage.session.get(NW_LIST).catch(() => ({})))[NW_LIST];
+  if (kept?.key === nwKey(S.newest.search)) Object.assign(S.newest, { jobs: kept.jobs || [], lastFetch: kept.lastFetch || 0, key: kept.key });
+  if (!S.newest.search.keywords && !S.newest.search.location) S.newest.editing = true;
+}
+const nwSave = () => chrome.storage.session.set({ [NW_LIST]: { key: S.newest.key, jobs: S.newest.jobs.slice(0, 300), lastFetch: S.newest.lastFetch } }).catch(() => {});
+function nwSummary(s) {
+  const win = (WINDOWS.find(([w]) => w === s.window) || [0, ''])[1];
+  return [s.keywords || 'Any job', s.location || 'Anywhere', s.remote ? 'Remote' : '', s.easy ? 'Easy Apply' : '', `past ${win}`].filter(Boolean).join(' · ');
+}
+
+// Full = the whole window again (Refresh, a new search); otherwise only what is new since the last look.
+async function newestRefresh({ full = true } = {}) {
+  const N = S.newest, s = N.search;
+  if (!s || N.loading || S.mode !== 'easy') return;
+  if (!s.keywords && !s.location) { N.editing = true; patchNewest(); return; }
+  if (!(await hasLinkedInAccess())) { N.error = 'access'; patchNewest(); return; }
+  if (N.limitedUntil > Date.now() && !full) return;
+  const key = nwKey(s), now = Date.now();
+  full = full || key !== N.key || !N.lastFetch || now - N.lastFetch > s.window * 1000;
+  // Incremental: the minutes since the last look (+5 min of slack), a few pages at most.
+  const secs = full ? s.window : Math.min(s.window, Math.ceil((now - N.lastFetch) / 1000) + 300);
+  N.loading = true; N.error = ''; patchNewest();
+  try {
+    const got = await fetchNewest(s, { secs, maxPages: full ? undefined : 3 });
+    if (nwKey(S.newest.search) !== key) return;        // the search changed meanwhile
+    const old = new Map((key === N.key ? N.jobs : []).map((j) => [j.id, j]));
+    const hadList = old.size > 0;
+    const merged = full ? new Map() : new Map(old);
+    for (const j of got) {
+      const prev = old.get(j.id);
+      merged.set(j.id, prev ? { ...j, postedAt: Math.min(prev.postedAt, j.postedAt) } : j);   // a job never "gets younger"
+      if (!prev && hadList) N.fresh.add(j.id);
+    }
+    const cutoff = Date.now() - s.window * 1000;
+    N.jobs = sortNewest([...merged.values()].filter((j) => j.postedAt >= cutoff));
+    N.key = key; N.lastFetch = now; N.limitedUntil = 0;
+    nwSave();
+    await newestKnown();
+  } catch (e) {
+    if (e instanceof LimitedError) { N.limitedUntil = Date.now() + NW_PAUSE_MS; N.error = 'limited'; }
+    else N.error = e?.message || String(e);
+  } finally { N.loading = false; patchNewest(); }
+}
+// Where this profile stands on each listed job.
+async function newestKnown() {
+  const N = S.newest;
+  if (!S.profileId || !N.jobs.length) { N.known = {}; return; }
+  const pid = S.profileId;
+  try {
+    const r = await api('/api/resumes/bid/easy/known', { method: 'POST',
+      body: { profile_id: pid, jobs: N.jobs.slice(0, 200).map((j) => ({ id: j.id, company: j.company, title: j.title })) } });
+    if (S.profileId === pid) { N.known = r?.known || {}; N.knownFor = `${pid}|${S.jobId}|${S.resumeId}|${S.easy.state}`; }
+  } catch { /* the labels wait for the next look */ }
+}
+let nwKnownTimer = 0;
+function newestKnownSoon() {
+  const N = S.newest, sig = `${S.profileId}|${S.jobId}|${S.resumeId}|${S.easy.state}`;
+  if (S.mode !== 'easy' || !N.jobs.length || sig === N.knownFor) return;
+  N.knownFor = sig;
+  clearTimeout(nwKnownTimer);
+  nwKnownTimer = setTimeout(() => newestKnown().then(patchNewest), 1500);
+}
+
+// The posting on the LinkedIn tab (the one in this window), or a new tab — never over an application
+// being filled in.
+async function newestOpen(id) {
+  const N = S.newest;
+  N.opened.add(id); N.fresh.delete(id);
+  chrome.storage.local.set({ [RECENT_SEEN]: [...N.opened].slice(-500) }).catch(() => {});
+  patchNewest();
+  const url = jobViewLink(id);
+  try {
+    const active = await activeTab();
+    let tab = active?.id != null && isLinkedIn(active.url) ? active
+      : (await chrome.tabs.query({ windowId: active?.windowId, url: ['https://www.linkedin.com/*'] }).catch(() => []))[0] || null;
+    if (tab && (await applicationOpen(tab.id)) === true) tab = null;
+    if (tab) await chrome.tabs.update(tab.id, { url, active: true });
+    else await chrome.tabs.create({ url, active: true });
+  } catch { /* the tab closed meanwhile */ }
+}
+
+async function newestSearch() {
+  const v = (id) => $(`#${id}`);
+  const s = cleanSearch({ keywords: v('nwKw')?.value, location: v('nwLoc')?.value, window: Number(v('nwWin')?.value),
+    remote: v('nwRemote')?.checked, easy: v('nwEasy')?.checked, auto: v('nwAuto')?.checked,
+    // the place's LinkedIn id stays only while the place's name is unchanged
+    geoId: (v('nwLoc')?.value || '').trim().toLowerCase() === (S.newest.search?.location || '').toLowerCase() ? S.newest.search?.geoId : '' });
+  if (!s.keywords && !s.location) { const err = $('#nwErr'); if (err) { err.textContent = 'Type keywords or a place.'; err.hidden = false; } return; }
+  S.newest.search = s; S.newest.editing = false; S.newest.fresh.clear();
+  await chrome.storage.local.set({ [RECENT_KEY]: s });
+  await newestRefresh({ full: true });
+}
+async function newestFromTab() {
+  const t = await activeTab(), s = searchFromUrl(t?.url || '');
+  if (!s) { toast('Open a LinkedIn job search with keywords first'); return; }
+  S.newest.search = cleanSearch({ ...S.newest.search, ...s }); S.newest.editing = true; patchNewest();
+}
+
+function patchNewest() {
+  const el = $('#newestCard'); if (!el) return;
+  const N = S.newest, s = N.search || cleanSearch({});
+  const groups = groupSame(N.jobs);
+  const busy = N.loading ? '<span class="spinner"></span>' : I.refresh;
+  const head = `<div class="card-head"><span class="card-title">Newest Jobs${groups.length ? ` <span class="muted">· ${groups.length}</span>` : ''}</span>
+    <span class="row nw-tools">
+      <button class="secondary sm" data-action="newestEdit" title="Change the search">${N.editing ? 'Close' : 'Search'}</button>
+      <button class="secondary sm icon-sm" data-action="newestRefresh" ${N.loading ? 'disabled' : ''} title="Look again now (the whole window)">${busy}</button>
+    </span></div>`;
+  let form = '';
+  if (N.editing) {
+    // Typing in the form must survive a repaint (the list refreshes by itself).
+    const keep = (id, val) => (document.activeElement?.id === id ? $(`#${id}`)?.value ?? val : val);
+    form = `<div class="nw-form">
+      <input id="nwKw" placeholder="Keywords — e.g. python developer" value="${esc(keep('nwKw', s.keywords))}" spellcheck="false">
+      <div class="row">
+        <input id="nwLoc" class="grow" placeholder="Place — e.g. United States" value="${esc(keep('nwLoc', s.location))}" spellcheck="false">
+        <select id="nwWin" title="Posted within">${WINDOWS.map(([w, l]) => `<option value="${w}" ${w === s.window ? 'selected' : ''}>Past ${l}</option>`).join('')}</select>
+      </div>
+      <div class="row wrap">
+        <label class="set-switch"><input type="checkbox" id="nwRemote" ${s.remote ? 'checked' : ''}> Remote</label>
+        <label class="set-switch"><input type="checkbox" id="nwEasy" ${s.easy ? 'checked' : ''}> Easy Apply only</label>
+        <label class="set-switch" title="Look for new postings every 2 minutes while the panel is open"><input type="checkbox" id="nwAuto" ${s.auto ? 'checked' : ''}> Auto</label>
+      </div>
+      <div class="easy-line error" id="nwErr" hidden></div>
+      <div class="row"><button class="sm" data-action="newestSearch">Search</button>
+        <button class="secondary sm" data-action="newestFromTab" title="Take keywords, place and filters from the LinkedIn search open in this tab">From LinkedIn Tab</button></div>
+    </div>`;
+  }
+  const line = (cls, html, extra = '') => `<div class="easy-line ${cls}"><span class="txt">${html}</span>${extra}</div>`;
+  let note = '';
+  if (N.error === 'access') note = line('warn', 'Newest Jobs reads LinkedIn — connect LinkedIn in Settings.', '<button class="secondary sm" data-action="settings">Settings</button>');
+  else if (N.error === 'limited') note = line('warn', `LinkedIn asked to slow down — looking again after ${esc(hhmm(N.limitedUntil))}.`);
+  else if (N.error) note = line('error', `Couldn't read LinkedIn's list — ${esc(N.error)}`, '<button class="secondary sm" data-action="newestRefresh">Retry</button>');
+  const sub = N.editing ? '' : `<div class="nw-sum" title="${esc(nwSummary(s))}">${esc(nwSummary(s))}</div>`;
+  const now = Date.now(), lid = S.easy?.lid || '';
+  const rows = groups.map((j) => {
+    const k = N.known[j.id] || j.others.map((o) => N.known[o.id]).find(Boolean), st = k && NW_STATE[k.state];
+    const ids = [j.id, ...j.others.map((o) => o.id)];
+    const cls = [ids.some((x) => N.opened.has(x)) ? 'seen' : '', ids.includes(lid) ? 'cur' : '', N.fresh.has(j.id) ? 'fresh' : '', k && k.state !== 'on_file' ? 'done' : ''].filter(Boolean).join(' ');
+    const place = j.others.length ? `${j.location} +${j.others.length} place${j.others.length === 1 ? '' : 's'}` : j.location;
+    const sub2 = [j.company, place, j.salary].filter(Boolean).join(' · ');
+    return `<button type="button" class="nw-row ${cls}" data-action="newestOpen" data-id="${esc(j.id)}" title="${esc(`${j.title} — ${sub2}${k?.note ? `\n${k.note}` : ''}\nPosted ~${hhmm(j.postedAt)} · opens on your LinkedIn tab`)}">
+      <span class="nw-age">${esc(ago(j.postedAt, now))}</span>
+      <span class="nw-main"><span class="nw-title">${esc(j.title)}</span><span class="nw-sub">${esc(sub2)}</span></span>
+      ${st ? `<span class="easy-pill ${st[0]}">${st[1]}</span>` : ''}
+    </button>`;
+  }).join('');
+  const foot = N.lastFetch && !N.editing
+    ? `<div class="nw-foot muted small">Newest first · looked ${esc(ago(N.lastFetch, now) === 'now' ? 'just now' : `${ago(N.lastFetch, now)} ago`)}${s.auto ? ' · Auto' : ''}</div>` : '';
+  const empty = !N.jobs.length && !N.editing && !N.loading && N.lastFetch && !N.error
+    ? '<div class="empty">No jobs posted in this window yet — Auto keeps looking.</div>' : '';
+  const scroll = $('#nwList')?.scrollTop || 0;
+  el.innerHTML = head + sub + form + note + (rows ? `<div class="nw-list" id="nwList">${rows}</div>` : empty) + foot;
+  if (scroll && $('#nwList')) $('#nwList').scrollTop = scroll;
+}
+// The ages tick; with Auto on (and the panel on screen in Easy Bids) it looks again every 2 minutes.
+setInterval(() => {
+  if (S.mode !== 'easy' || S.screen !== 'main' || !$('#newestCard')) return;
+  const N = S.newest;
+  if (N.search?.auto && !N.editing && document.visibilityState === 'visible' && N.lastFetch && Date.now() - N.lastFetch >= NW_AUTO_MS) newestRefresh({ full: false });
+  else if (!N.loading) patchNewest();
+}, 30_000);
+
 // ---------- ⚙ Settings: ChatGPT, what each bid tab shows, classic job search ----------
 // The tabs keep only what is needed on screen; everything you set up once lives here.
 const SHOW_KEY = 'panelShow';
-const SHOW_ITEMS = [['details', 'Details'], ['jobs', 'Job list'], ['questions', 'Tech questions'], ['preview', 'CV preview']];
+const SHOW_ITEMS = [['details', 'Details'], ['jobs', 'Job list'], ['questions', 'Tech questions'], ['preview', 'CV preview'], ['newest', 'Newest jobs']];
 // Out Bids shows everything; Easy Bids: profile, Details, the LinkedIn job, Resume, Tech questions.
-const SHOW_DEFAULTS = { bid: { details: true, jobs: true, questions: true, preview: true }, easy: { details: true, jobs: false, questions: true, preview: false } };
+const SHOW_DEFAULTS = { bid: { details: true, jobs: true, questions: true, preview: true }, easy: { details: true, jobs: false, questions: true, preview: false, newest: true } };
 const shownFor = (mode) => ({ ...(SHOW_DEFAULTS[mode] || {}), ...((S.show || {})[mode] || {}) });
 async function loadShow() { S.show = (await chrome.storage.local.get(SHOW_KEY).catch(() => ({})))[SHOW_KEY] || {}; }
 function applyShow() {
@@ -1258,7 +1450,7 @@ function renderSettings() {
       </section>
       <section class="card"><div class="card-head"><span class="card-title">ChatGPT models</span></div><div id="settingsModels" class="fld"></div></section>
       <section class="card"><div class="card-head"><span class="card-title">Show on ${tabName}</span></div>
-        <div class="set-grid">${SHOW_ITEMS.map(([k, label]) => `<label class="set-switch"><input type="checkbox" data-action="showToggle" data-k="${k}" ${v[k] ? 'checked' : ''}> ${esc(label)}</label>`).join('')}</div>
+        <div class="set-grid">${SHOW_ITEMS.filter(([k]) => k in (SHOW_DEFAULTS[S.mode] || {})).map(([k, label]) => `<label class="set-switch"><input type="checkbox" data-action="showToggle" data-k="${k}" ${v[k] ? 'checked' : ''}> ${esc(label)}</label>`).join('')}</div>
       </section>` : ''}
       <section class="card"><div class="card-head"><span class="card-title">Classic job search</span></div><div id="settingsClassic" class="fld"></div></section>
       <section class="card"><div class="card-head"><span class="card-title">Extension</span></div><div id="settingsExt" class="fld"></div></section>
@@ -1449,6 +1641,7 @@ async function startMain() {
   const modes = availableModes();
   if (!modes.length) { renderNoAccess(); return; }
   await loadShow();
+  await loadNewest();
   renderFrame(modes);
   patchUpdateBar();
   fetchLatest(true).then(patchUpdates);
@@ -1606,13 +1799,22 @@ function renderMain() {
         </section>
         <section class="card" id="buildCard"></section>
         <section class="card" id="qaCard" hidden></section>
+        ${S.mode === 'easy' ? '<section class="card" id="newestCard"></section>' : ''}
       </div>
       <section class="card" id="previewCard" hidden></section>
     </main>`;
   $('#profileSelect').addEventListener('change', (e) => { setError(''); setMessage(''); selectProfile(e.target.value); });
   wireCombo();
-  patchAlerts(); patchProfile(); patchJob(); patchBuild(); patchCopy(); patchQA(); patchEasy();
+  patchAlerts(); patchProfile(); patchJob(); patchBuild(); patchCopy(); patchQA(); patchEasy(); patchNewest();
   applyShow();
+  if (S.mode === 'easy') {
+    $('#newestCard').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && e.target.matches('#nwKw, #nwLoc')) { e.preventDefault(); newestSearch().catch(showError); }
+    });
+    // Back in Easy Bids: the list as it was (this session), looked at again when it is old.
+    const N = S.newest;
+    if (!N.editing && (!N.jobs.length || Date.now() - N.lastFetch >= NW_AUTO_MS)) setTimeout(() => newestRefresh({ full: !N.jobs.length }).catch(() => {}), 50);
+  }
 }
 
 // The job box is a search; the current job is shown right below it.
@@ -1951,6 +2153,11 @@ async function onClick(e) {
       case 'classicOpen': await openClassicSearch(); break;
       case 'classicRetry': e.preventDefault(); await retryClassic(); break;
       case 'easyCopyLink': e.preventDefault(); await copyText(t.getAttribute('href') || '', 'Job link'); break;
+      case 'newestOpen': await newestOpen(t.dataset.id); break;
+      case 'newestRefresh': S.newest.fresh.clear(); await newestRefresh({ full: true }); break;
+      case 'newestEdit': S.newest.editing = !S.newest.editing; patchNewest(); if (S.newest.editing) $('#nwKw')?.focus(); break;
+      case 'newestSearch': await newestSearch(); break;
+      case 'newestFromTab': await newestFromTab(); break;
       case 'easyOpenLinkedIn': await chrome.tabs.create({ url: 'https://www.linkedin.com/jobs/search/?f_AL=true' }); break;
       case 'copyField': {
         const f = copyFields(selectedProfile())[Number(t.dataset.i)];

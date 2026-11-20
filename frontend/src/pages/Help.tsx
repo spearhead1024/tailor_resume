@@ -118,6 +118,12 @@ function ExtensionGuide() {
             <em> New Job</em>, <em>CV Ready</em>, <em>Duplicate</em> or <em>Applied</em>. Click <strong>Add + Gen CV</strong>:
             the CV is written (only that job — Easy Bids has no queue) and saved to Downloads as “Name Resume.pdf”. Apply on LinkedIn, then <strong>Mark as Applied</strong>.
             A posting that applies on the company's site gets <strong>Add Job</strong> only — it goes to Out Bids.</li>
+          <li><strong>Newest Jobs</strong> (Easy Bids, under the job) — LinkedIn's own search no longer sorts by date (its AI
+            search, since Oct 2026). Type your keywords and place once (or <strong>From LinkedIn Tab</strong>), pick Remote / Easy Apply
+            and how far back (15 min – 24 h): the jobs come <strong>newest first</strong>, each with its age and a label —
+            <em>On file</em>, <em>Duplicate</em>, <em>Applied</em>. Click one: it opens on your LinkedIn tab and the panel checks it as usual.
+            With <strong>Auto</strong> on it looks for new ones every 2 minutes (a green dot marks them). The list is read from
+            LinkedIn's public job pages, signed out — your LinkedIn account is not used for it.</li>
           <li><strong>ChatGPT project — one per profile (do this once)</strong>. Everyone shares one ChatGPT account, and its
             memory mixes profiles up (Farhan's chat answering with Stefan's details). In ChatGPT: <strong>New project</strong> →
             name it after the profile → ⚙ <strong>Memory: Project-only</strong> → Create. With that project open, in the panel:

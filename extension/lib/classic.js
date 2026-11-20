@@ -28,6 +28,12 @@ const OMIT_KEYS = new Set(['skipRedirect', 'currentJobId', 'trackingId', 'trk', 
 export const CLASSIC_ON = 'classicOn';          // the one switch (default on)
 export const CLASSIC_SEARCH = 'classicSearch';  // the last classic search with filters
 export const classicTabKey = (tabId) => `classic:tab:${tabId}`;   // per-tab loop guard (session storage)
+// LinkedIn refused the classic search (sent the tab straight back to AI search): no tab is switched
+// for CLASSIC_PAUSE_MS — since Oct 2026 LinkedIn does this to signed-in members, so without this
+// every AI search would bounce twice. {at, until} (chrome.storage.local). Easy Bids' Newest Jobs
+// list (lib/recent.js) is the newest-first search that still works.
+export const CLASSIC_BLOCKED = 'classicBlocked';
+export const CLASSIC_PAUSE_MS = 6 * 60 * 60_000;
 
 const parse = (raw) => {
   try {
@@ -95,7 +101,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function onUrl(tabId, url) {
   const u = parse(url);
   if (!u || !u.pathname.startsWith('/jobs')) return;
-  const got = await chrome.storage.local.get([CLASSIC_ON, CLASSIC_SEARCH]);
+  const got = await chrome.storage.local.get([CLASSIC_ON, CLASSIC_SEARCH, CLASSIC_BLOCKED]);
   if (got[CLASSIC_ON] === false) return;
   if (isClassicSearch(url)) {                        // remember the bidder's classic search (with filters)
     const canonical = classicUrl(url);
@@ -103,6 +109,7 @@ async function onUrl(tabId, url) {
     return;
   }
   if (!isAiSearch(url)) return;
+  if ((got[CLASSIC_BLOCKED]?.until || 0) > Date.now()) return;   // LinkedIn refuses it now: leave every tab alone
   await sleep(CHECK_DELAY_MS);
   const tab = await chrome.tabs.get(tabId).catch(() => null);
   if (!tab || !isAiSearch(tab.url)) return;
@@ -114,8 +121,9 @@ async function onUrl(tabId, url) {
   if (applying === true) { await chrome.storage.session.set({ [key]: { ...state, applyingAt: now } }); return; }
   if (applying === null && now - (state.applyingAt || 0) < APPLY_STALE_MS) return;
   const recent = (state.attempts || []).filter((t) => now - t < ATTEMPT_WINDOW_MS);
-  if (recent.length >= MAX_ATTEMPTS) {               // LinkedIn keeps forcing AI search: stop, don't loop
+  if (recent.length >= MAX_ATTEMPTS) {               // LinkedIn keeps forcing AI search: stop, don't loop —
     await chrome.storage.session.set({ [key]: { attempts: recent, blockedUntil: now + BLOCK_MS } });
+    await chrome.storage.local.set({ [CLASSIC_BLOCKED]: { at: now, until: now + CLASSIC_PAUSE_MS } });   // in any tab
     return;
   }
   if (recent.length && now - recent[recent.length - 1] < 650) return;   // the same change reported twice

@@ -73,9 +73,17 @@ One side panel (`extension/panel/`), tabs by role: **Out Bids** and **Easy Bids*
   wrote the CV (`gpt/runner.js` keeps that tab open until the job is done), with the model set in
   ⚙ Settings → ChatGPT models (default **Instant**); the model menu is set back afterwards, so the CVs keep
   theirs (a CV model can be pinned there too). `gpt/driver.js pickModel` finds the item by its name.
+- **Newest Jobs** (Easy Bids, `lib/recent.js`): since Oct 2026 LinkedIn sends signed-in members from the
+  classic search to its AI search, which has no "Most recent" (`sortBy=DD` is stripped, windows under 24 h
+  count as 24 h). The list reads LinkedIn's public job list (`/jobs-guest/jobs/api/seeMoreJobPostings/search`,
+  `credentials: 'omit'` — signed out, the LinkedIn host permission Easy Bids already has), which honours
+  `f_TPR=r<seconds>`, and sorts it by each card's age. Same company + title in many places = one row. Rows
+  open `/jobs/view/<id>/` on the bidder's LinkedIn tab (a new tab if an Easy Apply form is open there).
+  Labels from `POST /api/resumes/bid/easy/known` (batch: applied / skipped / on file / closed / duplicate /
+  blocked). Auto looks every 2 min, only the minutes since the last look; HTTP 429 pauses it 5 min.
 - **⚙ Settings**: Connections (ChatGPT — real background tabs; LinkedIn — the optional host permission),
-  which cards each tab shows, LinkedIn's classic job search (`lib/classic.js`, kept instead of the AI search),
-  and Update Now.
+  which cards each tab shows, LinkedIn's classic job search (`lib/classic.js`; when LinkedIn sends it straight
+  back to AI search, it pauses 6 h in every tab — `classicBlocked`), and Update Now.
 - The layout is one fluid column (centred past 600px), so it works from Chrome's narrowest side panel up.
 - **Opening the panel** picks the tab from the page you're on: an empty tab → Out Bids (the latest job
   opens in it), LinkedIn → Easy Bids, any other site → Add Jobs (Out Bids for a bidder without it).
