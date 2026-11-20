@@ -1,6 +1,6 @@
 {
-  "version": "1.12.1",
+  "version": "1.13.0",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "Easy Bids: \"ChatGPT is writing the CV\" shows once (in the Resume card), and Gen CV hides while it writes.",
-  "built_at": "2026-11-20T04:07:11Z"
+  "changelog": "Easy Bids: new Newest Jobs list \u2014 your LinkedIn search sorted newest first (LinkedIn removed Most recent). Click a job to open it on your LinkedIn tab. Classic search no longer bounces tabs when LinkedIn refuses it.",
+  "built_at": "2026-11-20T08:39:18Z"
 }
