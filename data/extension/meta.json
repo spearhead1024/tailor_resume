@@ -1,6 +1,6 @@
 {
-  "version": "1.14.0",
+  "version": "1.15.0",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "Easy Bids reads jobs on LinkedIn's AI job search. Newest Jobs and the classic job search are removed.",
-  "built_at": "2026-11-20T16:14:42Z"
+  "changelog": "CVs are written with ChatGPT Pro (up to 25 minutes each); tech questions with Instant.",
+  "built_at": "2026-11-20T16:55:25Z"
 }
