@@ -1,6 +1,6 @@
 {
-  "version": "1.12.0",
+  "version": "1.12.1",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "You see one ChatGPT tab: the chat of the job on screen. The next job's CV is written out of sight. Each job has its own chat; questions always go there. Chats are deleted when the job is done. Easy Bids writes only the job on screen. CVs save as \"Name Resume.pdf\".",
-  "built_at": "2026-11-19T19:55:32Z"
+  "changelog": "Easy Bids: \"ChatGPT is writing the CV\" shows once (in the Resume card), and Gen CV hides while it writes.",
+  "built_at": "2026-11-20T04:07:11Z"
 }
