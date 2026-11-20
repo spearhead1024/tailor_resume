@@ -14,8 +14,12 @@
  *   'applied'  — already applied on LinkedIn (no button, "Applied … ago")
  *   'closed'   — "No longer accepting applications"
  *   'none'     — no apply button found
- * Selectors follow LinkedIn's job-details markup (the logged-in job search page, Nov 2026), with older ones
- * as fallbacks. */
+ * Two layouts:
+ *   - the AI job search (/jobs/search-results/, since Oct 2026): generated class names, so it is read
+ *     by what LinkedIn names things — the "About the job" block is componentkey="JobDetails_AboutTheJob_<id>",
+ *     the title links to /jobs/view/<id>/, the company link is labelled "Company, <name>.", the button
+ *     "Easy Apply to this job";
+ *   - the classic job details markup (/jobs/view/ pages, older searches), as the fallback. */
 
 export function linkedinJobId(url) {
   let u;
@@ -43,7 +47,46 @@ export async function readLinkedInJob(wantId) {
   const pick = (root, sels) => { for (const s of sels) { const el = root.querySelector(s); if (el && oneLine(el.textContent)) return el; } return null; };
   const idIn = (href) => (String(href || '').match(/\/jobs\/view\/(?:[^/?#]*?-)?(\d{6,})/) || [])[1] || '';
 
+  // The applied / closed state from the top of the job (before "About the job").
+  const statusOf = (topText) => /no longer accepting applications/i.test(topText) ? 'closed'
+    : /\bapplied\b[^·\n]{0,40}\bago\b|application (was )?(submitted|sent)|\byou applied\b/i.test(topText) ? 'applied' : 'none';
+
+  // The AI job search pane. null when the page isn't laid out that way.
+  const readAi = () => {
+    const abouts = [...document.querySelectorAll('[componentkey^="JobDetails_AboutTheJob_"]')];
+    if (!abouts.length) return null;
+    const about = abouts.find((a) => wantId && a.getAttribute('componentkey').endsWith(`_${wantId}`)) || abouts[0];
+    const id = (about.getAttribute('componentkey').match(/_(\d{6,})$/) || [])[1] || '';
+    // The pane: the nearest block around "About the job" that also holds the job's title link.
+    let root = about.parentElement;
+    while (root && root !== document.body && !root.querySelector(`a[href*="/jobs/view/${id}"]`)) root = root.parentElement;
+    if (!root || root === document.body) root = about.parentElement || document;
+    const titleEl = [...root.querySelectorAll(`a[href*="/jobs/view/${id}"]`)].find((a) => oneLine(a.textContent));
+    const companyA = root.querySelector('a[aria-label^="Company, "]');
+    let company = companyA ? oneLine(companyA.getAttribute('aria-label')).replace(/^Company,\s*/i, '').replace(/\.$/, '') : '';
+    if (!company) company = oneLine([...root.querySelectorAll('a[href*="/company/"]')].map((a) => a.textContent).find((t) => oneLine(t)) || '');
+    // "France · 3 hours ago · Over 100 applicants" → France
+    const meta = [...root.querySelectorAll('p, span, div')].filter((el) => /·/.test(el.textContent)
+      && /\b(ago|applicants?|reposted|posted)\b/i.test(el.textContent) && oneLine(el.textContent).length < 200)
+      .sort((a, b) => oneLine(a.textContent).length - oneLine(b.textContent).length)[0];   // the line itself, not the card
+    const location = meta ? oneLine(meta.textContent).split('·')[0].trim() : '';
+    const box = about.querySelector('[data-testid="expandable-text-box"]') || about;
+    const description = textOf(box).replace(/^About the job\s*/i, '').trim();
+    // The apply control: "Easy Apply to this job" / "Apply on company website" / "Apply".
+    const btn = [...root.querySelectorAll('button, a')].find((el) => {
+      const label = oneLine(`${el.getAttribute('aria-label') || ''} ${el.textContent || ''}`);
+      return /^(easy\s+)?apply\b/i.test(label) && !/^applied\b/i.test(label);
+    });
+    const topText = oneLine(root.textContent).split(/About the job/i)[0].slice(0, 3000);
+    let apply = 'none';
+    if (btn) apply = /easy\s*apply/i.test(`${btn.getAttribute('aria-label') || ''} ${btn.textContent || ''}`) ? 'easy' : 'external';
+    else apply = statusOf(topText);
+    return { id, apply, title: oneLine(titleEl && titleEl.textContent), company, location, description };
+  };
+
   const read = () => {
+    const ai = readAi();
+    if (ai) return { ...ai, description: ai.description.length > 20000 ? `${ai.description.slice(0, 20000)}\n…` : ai.description };
     // The detail pane (search page) or the whole page (a /jobs/view/ page).
     const root = document.querySelector('.jobs-search__job-details--container, .jobs-search__job-details, .job-view-layout, .jobs-details') || document;
     const titleEl = pick(root, ['.job-details-jobs-unified-top-card__job-title h1', '.job-details-jobs-unified-top-card__job-title',
