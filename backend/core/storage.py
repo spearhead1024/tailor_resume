@@ -2578,6 +2578,49 @@ class Storage:
             row = session.get(JobRow, match_id)
             return _normalize_job(dict(row.data or {})) if row else None
 
+    def jobs_by_linkedin_ids(self, linkedin_ids) -> dict[str, dict]:
+        """{LinkedIn job id: its job} for many ids in one pass (Easy Bids' Newest Jobs list) — the
+        same match as find_job_by_linkedin_id: a LinkedIn link of any form, or an outside job's
+        stored linkedin_job_id. The newest job wins."""
+        from core.easy_apply import linkedin_job_id
+        want = {str(x).strip() for x in (linkedin_ids or []) if str(x).strip().isdigit()}
+        out: dict[str, dict] = {}
+        if not want:
+            return out
+        hits: dict[str, str] = {}
+        with session_scope(self.db_path) as session:
+            # Light columns first (no JSON body); full rows only for the matches.
+            rows = session.execute(text(
+                "SELECT id, normalized_url, json_extract(data, '$.linkedin_job_id'), json_extract(data, '$.link') FROM jobs "
+                "WHERE normalized_url LIKE '%linkedin.com%' OR json_extract(data, '$.linkedin_job_id') IS NOT NULL "
+                "ORDER BY submitted_at DESC")).all()
+            for jid, nurl, stored, link in rows:
+                for lid in (str(stored or ''), linkedin_job_id(link or nurl or '')):
+                    if lid in want and lid not in hits:
+                        hits[lid] = jid
+            for lid, jid in hits.items():
+                row = session.get(JobRow, jid)
+                if row is not None:
+                    out[lid] = _normalize_job(dict(row.data or {}))
+        return out
+
+    def recent_company_jobs_any_region(self, within_days: int = COMPANY_DEDUP_DAYS) -> dict[str, dict]:
+        """{company fold key: its newest ACTIVE job within `within_days`} — find_recent_company_job_any_region
+        for many companies at once (one query)."""
+        cutoff = datetime.utcnow() - timedelta(days=max(1, int(within_days or COMPANY_DEDUP_DAYS)))
+        out: dict[str, dict] = {}
+        with session_scope(self.db_path) as session:
+            stmt = (select(JobRow.id, JobRow.company, JobRow.job_title, JobRow.region, JobRow.submitted_at)
+                    .where(JobRow.status.in_(('approved', 'pending')), JobRow.submitted_at.is_not(None),
+                           JobRow.submitted_at >= cutoff)
+                    .order_by(JobRow.submitted_at.desc()))
+            for jid, comp, title, region, at in session.execute(stmt):
+                k = _company_fold_key(company_key_for(comp or ''))
+                if k and k not in out:
+                    out[k] = {"id": jid, "company": comp or "", "job_title": title or "", "region": region or "",
+                              "submitted_at": at.isoformat() if hasattr(at, "isoformat") else str(at or "")}
+        return out
+
     def find_job_by_linkedin_id(self, linkedin_id: str) -> dict | None:
         """The job whose link points at this LinkedIn posting, whatever form the link was saved in
         (/jobs/view/<id>, a slug-<id> view link, or a search page with ?currentJobId=<id>). SQL
