@@ -31,7 +31,7 @@ Full-stack rewrite of the Streamlit Resume Generator. FastAPI backend + React (V
 - **Profiles** — CRUD, DOCX template upload, technical-skills / work-history / education editing.
   A detected company can be **Excluded** (kept as in the DOCX — not sent to ChatGPT, not rewritten), and
   **CV file name** sets the download's name: `{name} {first} {last} {company} {role} {date}`.
-- **Applied** — the applied CVs: tech stack, **Share** (a public link to the PDF for 30 days, no login —
+- **Applied** — the applied CVs: tech stack, **Share** (a public link to the PDF for 60 days, no login —
   HMAC-signed, `/api/public/cv/<token>`), **Schedule** (a row on the Interviews board with the profile as
   "Name(REGION)" and the job's stack as Skillset).
 - **Users** (admin) — CRUD, role + status, profile assignments

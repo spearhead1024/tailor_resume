@@ -121,9 +121,10 @@ export default function Applied() {
       const desc = (jd?.description || '').trim();
       const c_jd = [link && `Job link: ${link}`, desc].filter(Boolean).join('\n\n');
       // Skillset = the job's main tech stack; Account Profile = the board's "Name(REGION)" option;
-      // Resume = a PUBLIC link to the CV (opens without login, for a year) — callers and the client can open it.
+      // Resume = a PUBLIC link to the CV (opens without login, for 60 days) — callers and the client can open it.
+      // (The server also turns any login-only CV link into a public one — see routers/interviews.py.)
       const stack = (jd?.tech_stack?.length ? jd.tech_stack : r.tech_stack) || [];
-      const share = await api.post<{ url: string }>(`/api/resumes/${encodeURIComponent(r.saved_resume_id)}/share?days=365`).catch(() => null);
+      const share = await api.post<{ url: string }>(`/api/resumes/${encodeURIComponent(r.saved_resume_id)}/share`).catch(() => null);
       const resumeLink = share?.url ? (share.url.startsWith('/') ? `${window.location.origin}${share.url}` : share.url)
         : `/api/resumes/${r.saved_resume_id}/pdf`;
       await api.post('/api/interviews/rows', {
@@ -142,7 +143,7 @@ export default function Applied() {
     }
   }
 
-  // A public link to the CV's PDF: opens without login for 30 days (POST /api/resumes/{id}/share).
+  // A public link to the CV's PDF: opens without login for 60 days (POST /api/resumes/{id}/share).
   async function shareCv(r: Row) {
     try {
       const { url, expires_at } = await api.post<{ url: string; expires_at: string }>(`/api/resumes/${encodeURIComponent(r.saved_resume_id)}/share`);
@@ -266,7 +267,7 @@ function RowView({ row, open, onToggle, onPdf, onSchedule, onShare, tz }: {
               public link if it can't be fetched. Schedule adds a row to the Interviews board. */}
           <button className="secondary" onClick={(e) => { e.stopPropagation(); onPdf(); }}>📄 Resume</button>
           <button className="secondary" style={{ marginLeft: 4 }} onClick={(e) => { e.stopPropagation(); onShare(); }}
-            title="Copy a public link to this CV — anyone can open it for 30 days, no login">🔗 Share</button>
+            title="Copy a public link to this CV — anyone can open it for 60 days, no login">🔗 Share</button>
           <button className="secondary" style={{ marginLeft: 4 }} disabled={scheduling}
             onClick={async (e) => { e.stopPropagation(); setScheduling(true); try { await onSchedule(); } finally { setScheduling(false); } }}
             title="Add this resume + job description as a row on the Interviews board">{scheduling ? '…' : '📅 Schedule'}</button>

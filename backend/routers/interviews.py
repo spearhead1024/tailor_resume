@@ -944,6 +944,7 @@ def add_row(body: dict | None = None, user: dict = Depends(_access)):
     cells = {k: v for k, v in (body2.get("cells", {}) or {}).items() if k in valid}
     if "c_sched" in cells:           # store Scheduled_at as a UTC instant (idempotent)
         cells["c_sched"] = _sched_to_utc(cells["c_sched"], str(user.get("timezone", "")).strip())
+    _publicize_resume(cells)
     # The Creator is whoever added the row. Stamp it here, once, so it is always true and never
     # depends on anyone clicking the cell — the board used to fill it on a plain left-click, which
     # meant simply selecting your way across an empty Creater cell silently signed you as author
@@ -990,6 +991,44 @@ def add_row(body: dict | None = None, user: dict = Depends(_access)):
     _broadcast_row(row, live_notify.row_audience(cells))   # audience from the UNSTRIPPED cells
     live_notify.on_row_changed(rid, {}, cells, user)      # a row created already naming a caller/team
     return _public_row(row, bool(user.get("is_admin")))
+
+
+def _publicize_resume(cells: dict) -> None:
+    """The Resume cell must open for anyone (the caller, the client): a login-only CV link
+    (/api/resumes/<id>/pdf) is swapped for a public 60-day link to the same CV."""
+    if "c_resume" not in cells:
+        return
+    from routers.resumes import public_cv_link
+    try:
+        url = public_cv_link(cells["c_resume"])
+    except Exception:
+        log.exception("Could not make a public CV link")
+        url = None
+    if url:
+        cells["c_resume"] = url
+
+
+def publicize_resume_links() -> int:
+    """Every row whose Resume cell is a login-only CV link → a public 60-day link (run at startup;
+    rows scheduled by an old page or before public links existed). Returns the number of rows changed."""
+    touched: list[dict] = []
+    try:
+        with _lock:
+            for row in storage.get_interview_rows():
+                cells = {"c_resume": (row.get("cells") or {}).get("c_resume", "")}
+                before = cells["c_resume"]
+                _publicize_resume(cells)
+                if cells["c_resume"] != before:
+                    updated = storage.patch_interview_row(row["id"], cells)
+                    if updated:
+                        touched.append(updated)
+    except Exception:
+        log.exception("Could not make the board's CV links public")
+    for row in touched:
+        _broadcast_row(row, live_notify.row_audience(row.get("cells") or {}))
+    if touched:
+        log.info("Made %d CV links on the board public", len(touched))
+    return len(touched)
 
 
 def rename_team_cells(old_name: str, new_name: str) -> int:
@@ -1054,6 +1093,7 @@ def patch_row(row_id: str, body: dict, user: dict = Depends(_access)):
                 raise HTTPException(status_code=403, detail="You can only assign callers on your own team.")
     if "c_sched" in patch:           # store Scheduled_at as a UTC instant (idempotent)
         patch["c_sched"] = _sched_to_utc(patch["c_sched"], str(user.get("timezone", "")).strip())
+    _publicize_resume(patch)
     # Somebody else is actively editing one of these cells — refuse rather than silently overwrite
     # their work. This is the fix for the lost-write bug: two people typing into the same cell
     # used to end with whoever saved last, and the other person's content simply vanished.

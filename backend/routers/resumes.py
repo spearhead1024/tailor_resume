@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import cast
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
-from fastapi.responses import Response
+from fastapi.responses import RedirectResponse, Response
 
 from auth import get_current_user, has_role, require_role, storage
 from core import vps1_adapt, vps1_client
@@ -1695,11 +1695,13 @@ def delete(resume_id: str, user: dict = Depends(require_role("admin"))):
 
 
 # ---------------------------------------------------------------------------
-# Public share link: a CV anyone can open for 30 days, no login (VPS1's share link)
+# Public share link: a CV anyone can open for 60 days, no login
 # ---------------------------------------------------------------------------
 # The link carries the resume id and its expiry, signed with an HMAC of the server's JWT secret — no
 # table, nothing to clean up; a link can't be altered to open another CV or to live longer.
-SHARE_DAYS = 30
+# A VPS_1 CV ("vps1:<uuid>") gets one too: we serve its PDF (fetched from VPS_1, cached here).
+SHARE_DAYS = 60
+PUBLIC_BASE = "https://tailorresume.duckdns.org"
 public_router = APIRouter(prefix="/api/public", tags=["public"])
 
 
@@ -1728,9 +1730,36 @@ def _share_target(token: str) -> str | None:
         if int(data.get("e", 0)) < time.time():
             return None
         rid = str(data.get("r") or "")
+        if rid.startswith("vps1:") and _VPS1_ID_RE.fullmatch(rid[5:]):
+            return rid
         return rid if re.fullmatch(r"resume_[0-9a-f]{6,32}", rid) else None
     except Exception:
         return None
+
+
+def public_cv_url(resume_id: str, days: int = SHARE_DAYS) -> tuple[str, datetime]:
+    """(full public URL, expiry) of a share link to this CV — opens without login for `days` days."""
+    expires = datetime.now(timezone.utc) + timedelta(days=days)
+    return f"{PUBLIC_BASE}/api/public/cv/{_share_token(resume_id, int(expires.timestamp()))}", expires
+
+
+_LOGIN_CV_RE = re.compile(r"^(?:https?://[^/\s]+)?/api/resumes/(resume_[0-9a-f]{6,32}|vps1(?::|%3A)[0-9a-fA-F-]{36})/pdf/?$")
+
+
+def public_cv_link(value) -> str | None:
+    """A Resume cell holding a login-only CV link (/api/resumes/<id>/pdf — only signed-in users can
+    open it) → a public link to the same CV, 60 days. None when it isn't one (Drive links, public
+    links, a CV that no longer exists are left as they are)."""
+    m = _LOGIN_CV_RE.match(str(value or "").strip())
+    if not m:
+        return None
+    rid = m.group(1).replace("%3A", ":")
+    if rid.startswith("vps1:"):
+        if not _VPS1_ID_RE.fullmatch(rid[5:]):
+            return None
+    elif not storage.get_generated_resume_by_id(rid):
+        return None
+    return public_cv_url(rid)[0]
 
 
 def cv_file_name(profile: dict, job: dict | None = None) -> str:
@@ -1754,19 +1783,15 @@ def cv_file_name(profile: dict, job: dict | None = None) -> str:
 
 @router.post("/{resume_id}/share")
 def share_resume(resume_id: str, days: int = Query(SHARE_DAYS, ge=1, le=365), user: dict = Depends(get_current_user)):
-    """A public link to this CV's PDF: anyone with it can open it for `days` days (30 by default; the
-    Interviews board's Schedule asks for a year, as a call can come late), no login. Who may open the
-    CV here may share it. A VPS_1 CV gets VPS_1's own public link."""
+    """A public link to this CV's PDF: anyone with it can open it for `days` days (60 by default), no
+    login. Who may open the CV here may share it. A VPS_1 CV gets a link to our copy of its PDF."""
     if resume_id.startswith("vps1:"):
         if not has_role(user, "admin"):
             raise HTTPException(status_code=403, detail="Forbidden")
-        remote_id = resume_id[len("vps1:"):]
-        if not _VPS1_ID_RE.fullmatch(remote_id):
+        if not _VPS1_ID_RE.fullmatch(resume_id[len("vps1:"):]):
             raise HTTPException(status_code=404, detail="Resume not found")
-        url = vps1_client.get_resume_share_link(remote_id, "pdf")
-        if not url:
-            raise HTTPException(status_code=502, detail="VPS_1 gave no share link — try again later.")
-        return {"url": url, "expires_at": ""}
+        url, expires = public_cv_url(resume_id, days)
+        return {"url": url, "expires_at": expires.strftime("%Y-%m-%dT%H:%M:%SZ")}
     record = storage.get_generated_resume_by_id(resume_id)
     if not record:
         raise HTTPException(status_code=404, detail="Resume not found")
@@ -1774,9 +1799,8 @@ def share_resume(resume_id: str, days: int = Query(SHARE_DAYS, ge=1, le=365), us
             and record.get("profile_id", "") not in (user.get("assigned_profile_ids") or []) \
             and not _resume_on_visible_call(user, resume_id):
         raise HTTPException(status_code=403, detail="Forbidden")
-    expires = datetime.now(timezone.utc) + timedelta(days=days)
-    token = _share_token(resume_id, int(expires.timestamp()))
-    return {"url": f"/api/public/cv/{token}", "expires_at": expires.strftime("%Y-%m-%dT%H:%M:%SZ")}
+    url, expires = public_cv_url(resume_id, days)
+    return {"url": url, "expires_at": expires.strftime("%Y-%m-%dT%H:%M:%SZ")}
 
 
 @public_router.get("/cv/{token}")
@@ -1785,6 +1809,8 @@ def public_resume_pdf(token: str):
     rid = _share_target(token)
     if not rid:
         raise HTTPException(status_code=404, detail="This link has expired or is not valid.")
+    if rid.startswith("vps1:"):
+        return _public_vps1_pdf(rid[len("vps1:"):])
     record = storage.get_generated_resume_by_id(rid)
     if not record:
         raise HTTPException(status_code=404, detail="This CV no longer exists.")
@@ -1797,6 +1823,31 @@ def public_resume_pdf(token: str):
     ascii_name = re.sub(r"[^A-Za-z0-9._ -]+", "", fname) or "Resume.pdf"
     return Response(content=cached.read_bytes(), media_type="application/pdf", headers={
         "Content-Disposition": f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(fname)}",
+        "Cache-Control": "private, max-age=300",
+        "X-Robots-Tag": "noindex, nofollow",
+    })
+
+
+def _public_vps1_pdf(remote_id: str):
+    """A VPS_1 CV behind a share link: our cached copy, else fetched from VPS_1 (and cached), else a
+    redirect to VPS_1's own public link."""
+    cache_file = PDF_CACHE_DIR / f"vps1_{remote_id}.pdf"
+    content = cache_file.read_bytes() if cache_file.exists() and cache_file.stat().st_size > 0 else None
+    if content is None:
+        got = vps1_client.get_resume_file(remote_id, "pdf")
+        if got and got[0]:
+            content = got[0]
+            try:
+                cache_file.write_bytes(content)
+            except Exception:
+                pass
+    if content is None:
+        url = vps1_client.get_resume_share_link(remote_id, "pdf")
+        if url:
+            return RedirectResponse(url, status_code=302)
+        raise HTTPException(status_code=404, detail="This CV could not be loaded right now.")
+    return Response(content=content, media_type="application/pdf", headers={
+        "Content-Disposition": "inline; filename=\"Resume.pdf\"",
         "Cache-Control": "private, max-age=300",
         "X-Robots-Tag": "noindex, nofollow",
     })

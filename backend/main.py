@@ -137,6 +137,16 @@ def _start_job_ai():
     job_ai.start()
 
 
+# The board's Resume cells: login-only CV links → public 60-day links (routers/interviews.py).
+@app.on_event("startup")
+def _public_board_cv_links():
+    if os.environ.get("BOARD_CV_LINKS", "1") == "0":
+        return
+    import threading
+    from routers.interviews import publicize_resume_links
+    threading.Thread(target=publicize_resume_links, daemon=True).start()
+
+
 @app.on_event("shutdown")
 def _flush_board_notifications():
     """Board notifications wait a minute for the editor to finish (core/live.py). Announce any still
