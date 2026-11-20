@@ -1,6 +1,6 @@
 {
-  "version": "1.13.0",
+  "version": "1.14.0",
   "extension_id": "angiojlgdegcljecfdciedcpfhhpcahh",
-  "changelog": "Easy Bids: new Newest Jobs list \u2014 your LinkedIn search sorted newest first (LinkedIn removed Most recent). Click a job to open it on your LinkedIn tab. Classic search no longer bounces tabs when LinkedIn refuses it.",
-  "built_at": "2026-11-20T08:39:18Z"
+  "changelog": "Easy Bids reads jobs on LinkedIn's AI job search. Newest Jobs and the classic job search are removed.",
+  "built_at": "2026-11-20T16:14:42Z"
 }
