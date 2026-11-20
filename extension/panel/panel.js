@@ -782,7 +782,7 @@ function patchGptLine() {
   } else if (t.stage === 'failed') {
     cls = 'error'; text = `ChatGPT could not write it — ${t.error || 'unknown error'}`;
     btn = '<button class="secondary sm" data-action="gptRetry">Retry</button>';
-  } else if (t.stage === 'writing') text = `<span class="spinner"></span> ChatGPT is writing this CV${t.attempts > 1 ? ` (try ${t.attempts})` : ''}…`;
+  } else if (t.stage === 'writing') text = `<span class="spinner"></span> ChatGPT is writing this CV${t.attempts > 1 ? ` (try ${t.attempts})` : ''}${S.mode === 'easy' ? ' — saved to Downloads when ready' : ''}…`;
   else if (st.status === 'limited') { cls = 'warn'; text = st.notice; }
   else {
     const ahead = Object.values(S.gptSnap.threads).filter((x) => x.work && x.key !== t.key).length;
@@ -1139,11 +1139,12 @@ function patchEasy() {
       if (E.state === 'existing' && !cvReady) body += note('muted', { linkedin: 'This posting is already in TailorResume.', url: 'This company link is already in TailorResume.' }[res.match]
         || 'Same company + title already in TailorResume.');
       if (page?.apply === 'applied') body += note('warn', E.state === 'new' ? 'You applied on LinkedIn — it is not in TailorResume.' : 'LinkedIn shows it applied — click Mark as Applied below.');
-      else if (S.gen.has(job?.id) && !S.resumeId && gptOn()) body += note('info', `${spin} ChatGPT is writing the CV — saved to Downloads when ready.`);
+      // (A CV being written shows its progress once — in the Resume card below.)
+      const writing = job?.id === S.jobId && S.gen.has(job?.id) && !S.resumeId && gptOn();
       if (E.state === 'new' && easyCanGen()) {
         buttons = btn('genCv', `${S.genBusy ? spin : I.sparkle} Add + Gen CV`, 'Add the job, write its CV with ChatGPT and save it to Downloads')
           + btn('addJob', 'Add Job', 'Only add the job (make its CV later)', 'secondary');
-      } else if (easyCanGen() && !(cvReady && job?.id === S.jobId)) {
+      } else if (easyCanGen() && !writing && !(cvReady && job?.id === S.jobId)) {
         buttons = btn('genCv', `${S.genBusy ? spin : I.sparkle} ${cvReady ? 'Use This Job' : 'Gen CV'}`,
           cvReady ? 'Make it the current job and save its CV to Downloads' : 'Write the CV with ChatGPT and save it to Downloads');
       }
